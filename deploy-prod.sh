@@ -68,21 +68,21 @@ pull_image() {
 # Function to stop existing containers
 stop_containers() {
     print_status "Остановка существующих контейнеров..."
-    docker-compose -f docker-compose.prod.yml down || true
+    docker-compose down || true
     print_success "Контейнеры остановлены"
 }
 
 # Function to start production containers
 start_containers() {
     print_status "Запуск продакшен контейнеров..."
-    docker-compose -f docker-compose.prod.yml up -d
+    docker-compose up -d
     print_success "Контейнеры запущены"
 }
 
 # Function to show status
 show_status() {
     print_status "Статус контейнеров:"
-    docker-compose -f docker-compose.prod.yml ps
+    docker-compose ps
     
     print_status "Использование ресурсов:"
     docker stats --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}" wgbot
@@ -91,7 +91,7 @@ show_status() {
 # Function to show logs
 show_logs() {
     print_status "Последние логи:"
-    docker-compose -f docker-compose.prod.yml logs --tail=20 wgbot
+    docker-compose logs --tail=20 wgbot
 }
 
 # Function to show help

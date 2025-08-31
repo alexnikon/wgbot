@@ -254,8 +254,7 @@ wgbot/
 ├── .gitignore              # Игнорируемые файлы
 ├── README.md               # Документация
 ├── Dockerfile              # Docker образ
-├── docker-compose.yml      # Docker Compose конфигурация (dev)
-├── docker-compose.prod.yml # Docker Compose конфигурация (prod)
+├── docker-compose.yml      # Docker Compose конфигурация
 ├── .dockerignore           # Игнорируемые файлы для Docker
 ├── docker-manage.sh        # Скрипт управления Docker (dev)
 ├── deploy-prod.sh          # Скрипт продакшен деплоя
@@ -289,7 +288,7 @@ nano .env  # Заполните реальными данными
 # 2. Проверьте конфигурацию
 python3 check_config.py
 
-# 3. Запустите продакшен версию
+# 3. Запустите бота
 ./deploy-prod.sh deploy
 ```
 
@@ -386,20 +385,19 @@ python -c "from config import *; print('Config loaded successfully')"
 # Клонирование и настройка
 git clone https://github.com/alexnikon/wgbot.git
 cd wgbot
-git checkout dev
 cp env.docker.example .env
 nano .env  # Настройте конфигурацию
 
 # Запуск
-./docker-manage.sh start
+./deploy-prod.sh deploy
 
 # Мониторинг
-./docker-manage.sh logs
+./deploy-prod.sh logs
 ```
 
 #### Особенности Docker развертывания
 
-- **Alpine Linux** - Минимальный размер образа (~400MB)
+- **Alpine Linux** - Минимальный размер образа (~151MB)
 - **Health checks** - Автоматическая проверка состояния
 - **Автоматический перезапуск** - При сбоях
 - **Монтирование данных** - Персистентная база данных и логи
@@ -416,7 +414,7 @@ nano .env  # Настройте конфигурацию
 #### Продакшен развертывание
 
 ```bash
-# Используйте продакшен конфигурацию
+# Используйте продакшен скрипт
 ./deploy-prod.sh deploy
 
 # Обновление

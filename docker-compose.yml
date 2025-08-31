@@ -1,7 +1,6 @@
 services:
   wgbot:
     image: alexnikon/wgbot:latest
-    build: .
     container_name: wgbot
     restart: unless-stopped
     environment:
@@ -25,9 +24,9 @@ services:
       
     volumes:
       # Монтируем директорию для базы данных
-      - ./data:/app/data
+      - wgbot-data:/app/data
       # Монтируем директорию для логов
-      - ./logs:/app/logs
+      - wgbot-logs:/app/logs
       
     networks:
       - wgbot-network
@@ -39,6 +38,23 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+    
+    # Ограничения ресурсов
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+    
+    # Безопасность
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
 
   # Опциональный сервис для мониторинга логов
   log-viewer:
@@ -49,11 +65,13 @@ services:
       - "9999:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./logs:/var/log
+      - wgbot-logs:/var/log
     networks:
       - wgbot-network
     profiles:
       - monitoring
+    security_opt:
+      - no-new-privileges:true
 
 networks:
   wgbot-network:
