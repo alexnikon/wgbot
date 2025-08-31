@@ -1,0 +1,12 @@
+# nikonVPN Telegram Bot Dependencies
+# Core bot framework
+aiogram==3.13.0
+
+# HTTP requests
+requests==2.31.0
+
+# Environment variables
+python-dotenv==1.0.0
+
+# Async file operations
+aiofiles==23.2.1

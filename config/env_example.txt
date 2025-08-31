@@ -1,0 +1,12 @@
+# Telegram Bot Token (получить у @BotFather)
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
+
+# WGDashboard Configuration
+WG_DASHBOARD_URL=http://localhost:10086
+WG_DASHBOARD_API_KEY=your_wg_dashboard_api_key_here
+WG_CONFIG_NAME=awg0
+
+# YooKassa Configuration (для тестовой среды)
+YOOKASSA_SHOP_ID=your_yookassa_shop_id_here
+YOOKASSA_SECRET_KEY=your_yookassa_secret_key_here
+YOOKASSA_PROVIDER_TOKEN=test_Bu_TTD62i4I7kv37kuvecfSdn7v66nPOUtl1DbrHVhg
