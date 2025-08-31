@@ -1,0 +1,1016 @@
+WGDashboard API Documentation (v4.2.0)
+
+I'm still updating this documentation. If you have any questions, please don't hesitate to contact me :)
+Get Started
+
+To use the REST API of your WGDashboard, you need to obtain an API Key.
+Create API Key
+
+    To request an API Key, simply login to your WGDashboard, go to Settings, scroll to the very bottom. Click the switch on the right to enable API Key.
+
+    Click the blur Create button, set an expiry date you want or never expire, then click Done.
+
+Use API Key
+
+Simply add wg-dashboard-apikey with the value of your API key into the HTTP Header.
+javascript
+
+fetch('http://server:10086/api/handshake', {
+    headers: {
+       'content-type': 'application/json',
+        'wg-dashboard-apikey': 'insert your api key here'
+    },
+    method: "GET"
+})
+
+If you required an URL prefix for WGDashboard
+javascript
+
+fetch('http://server:10086/[app_prefix]/api/handshake', {
+    headers: {
+       'content-type': 'application/json',
+        'wg-dashboard-apikey': 'insert your api key here'
+    },
+    method: "GET"
+})
+
+URL Format
+
+Currently, there are 2 types of URL format
+
+    Regular URL: /api/getWireguardConfigurations
+
+    Regular URL with a parameter in the path: /api/deletePeers/
+        Currently, configName is the only URL parameter. To use it, simply replace it with an existing WireGuard configuration name. Such as wg0.
+
+Postman Variables
+
+    {{server}}: Replace this with your server URL, for example: https://wgserver.com:10086.
+
+    {{wg-dashboard-apikey}}: Replace this with your API key
+
+    Notice: The example code below of all POST requests does not include wg-dashboard-apikey within the header. To avoid this, you can import this Postman collection and set it directly within Postman.
+
+GETHandshake Server
+{{server}}/api/handshake
+
+This API endpoint is designed for a simple handshake when using API key to connect.
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+
+GETRequire Authorization
+{{server}}/api/requireAuthentication
+
+This API endpoint is designed for checking if WGDashboard is required authorization
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+
+GETGet All WireGuard Configurations
+{{server}}/api/getWireguardConfigurations
+
+This API endpoint is designed to get all WireGuard configuration under /etc/wireguard or under /etc/awg if available
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+
+POSTAdd WireGuard Configuration
+{{server}}/api/addWireguardConfiguration
+
+This API endpoint is designed to add WireGuard configuration / AmneziaWG configuration
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+json
+
+{
+    "ConfigurationName": "wg98",
+    "Address": "10.0.20.1/24",
+    "ListenPort":  51829,
+    "PrivateKey": "eJuuamCgakVs2xUZGHh/g7C6Oy89JGh7eE2jjEGbbFc=",
+    "Protocol": "wg"
+}
+
+POSTDelete WireGuard Configuration
+{{server}}/api/deleteWireguardConfiguration
+
+This API endpoint is designed to delete a WireGuard configuration
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+json
+
+{
+    "ConfigurationName": "wgBlah"
+}
+
+GETToggle WireGuard Configuration
+{{server}}/api/toggleWireguardConfiguration/?configurationName=wgblah
+
+This API endpoint is designed to toggle a WireGuard configuration
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+PARAMS
+configurationName
+
+wgblah
+
+POSTUpdate WireGuard Configuration
+{{server}}/api/updateWireguardConfiguration
+
+This API endpoint is designed to update a WireGuard configuration
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+
+json
+
+{
+	"Name": "wg999",
+	"Address": "10.24.5.0/23",
+	"ListenPort": 56768,
+	"PostDown": "iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o enp0s1 -j MASQUERADE;",
+	"PostUp": "iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o enp0s1 -j MASQUERADE;",
+	"PreDown": "",
+	"PreUp": ""
+}
+
+POSTUpdate WireGuard Configuration Name
+{{server}}/api/renameWireguardConfiguration
+
+This API endpoint is designed to update a WireGuard configuration's name
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+json
+
+{
+    "ConfigurationName": "demo3",
+    "NewConfigurationName": "wg11"
+}
+
+
+GETGet WireGuard Configuration Raw Content
+{{server}}/api/getWireguardConfigurationRawFile?configurationName=wg0
+
+This API endpoint is designed to get a WireGuard configuration in its raw form, i.e the content in the .conf file
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+PARAMS
+configurationName
+
+wg0
+
+POSTUpdate WireGuard Configuration Raw Content
+{{server}}/api/updateWireguardConfigurationRawFile
+
+This API endpoint is designed to update a WireGuard configuration's raw content. Please note this would change the .conf file directly
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+json
+
+{
+    "configurationName":"wg0",
+    "rawConfiguration": ""
+}
+
+GETGet WireGuard Configuration Realtime Traffic Usage
+{{server}}/api/getWireguardConfigurationRealtimeTraffic?configurationName=wg11
+
+This API endpoint is designed to get a WireGuard configuration's real-time traffic usage
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+PARAMS
+configurationName
+
+wg11
+
+
+GETGet WireGuard Configuration Backup
+{{server}}/api/getWireguardConfigurationBackup?configurationName=wg1
+GET /api/getWireguardConfigurationBackup
+
+This endpoint retrieves the backup data for a specific Wireguard configuration.
+Request
+
+    Query Parameters
+        configurationName (string, required): The name of the Wireguard configuration for which the backup is to be retrieved.
+
+Response
+
+The response is a JSON object with the following schema:
+
+{
+    "data": [
+        {
+            "backupDate": "",
+            "content": "",
+            "database": true,
+            "filename": ""
+        }
+    ],
+    "message": null,
+    "status": true
+}
+
+    data (array): An array containing backup information for the specified Wireguard configuration.
+
+        backupDate (string): The date of the backup.
+
+        content (string): The content of the backup.
+
+        database (boolean): Indicates whether the backup is stored in a database.
+
+        filename (string): The name of the backup file.
+
+    message (string): A message related to the response, if any.
+
+    status (boolean): Indicates the status of the response.
+
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+PARAMS
+configurationName
+
+wg1
+
+
+GETCreate WireGuard Configuration Backup
+{{server}}/api/createWireguardConfigurationBackup?configurationName=wg1
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+PARAMS
+configurationName
+
+wg1
+
+Configuration Name
+
+OSTDelete WireGuard Configuration Backup
+{{server}}/api/deleteWireguardConfigurationBackup
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+json
+
+{
+        "ConfigurationName": "wg-external1212",
+        "BackupFileName": "wg-external_20241021164704.conf"
+}
+
+GETGet All WireGuard Configuration Backups
+{{server}}/api/getAllWireguardConfigurationBackup
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+
+GETDownload WireGuard Configuration Backup
+{{server}}/api/downloadWireguardConfigurationBackup?configurationName=wg2&backupFileName=wg1_20241025224313.conf
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+PARAMS
+configurationName
+
+wg2
+backupFileName
+
+wg1_20241025224313.conf
+
+POSTRestore WireGuard Configuration Backup
+{{server}}/api/restoreWireguardConfigurationBackup
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+json
+
+{
+    "ConfigurationName": "awg-externalblah",
+    "BackupFileName": "awg-external1_20241204230509.conf"
+}
+
+POSTUpdate WireGuard Peer Settings
+{{server}}/api/updatePeerSettings/wg-external
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+
+{
+    "id": "7MWFwRRHaALqmcynyhpA1APOqjB+C8LxFBhsKqfFkRA",
+    "DNS": "1.1.1.1",
+    "allowed_ip": "10.0.0.2/32, 2001:db8:64:49::2/128",
+    "endpoint_allowed_ip": "0.0.0.0/0",
+    "keepalive": 21,
+    "mtu": 1420,
+    "name": "Donald's Macbook Pro ",
+    "preshared_key": "",
+    "private_key": "IPHI1N2vyyVQiwQvP4nrXMKso4PxY7yCVJK93o7LbXk="
+}
+
+POSTReset WireGuard Peer Data Usage
+{{server}}/api/resetPeerData/wg-external
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+json
+
+{
+  "id": "7MWFwRRHaALqmcynyhpA1APOqjB+C8LxFBhsKqfFkRA=",
+  "type": "blah"
+}
+
+POSTDelete WireGuard Peers
+{{server}}/api/deletePeers/demo
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+json
+
+{
+    "peers": [
+        "QiCj+Tyge1h8rnntkmoRRSbQID2fYvsErdjpwhv4W3E="
+    ]
+}
+
+POSTRestrict WireGuard Peers
+{{server}}/api/restrictPeers/wg-external
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+json
+
+{
+    "peers": [
+        "7MWFwRRHaALqmcynyhpA1APOqjB+C8LxFBhsKqfFkRA="
+    ]
+}
+
+POSTUn-Restrict WireGuard Peers
+{{server}}/api/allowAccessPeers/wg0
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+json
+
+{
+    "peers": [
+        ""
+    ]
+}
+
+
+POSTAdd WireGuard Peer Share Link
+{{server}}/api/sharePeer/create
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+json
+
+{
+    "Configuration": "wg-external",
+    "Peer": "7MWFwRRHaALqmcynyhpA1APOqjB+C8LxFBhsKqfFkRA=",
+    "ExpireDate": "2025-12-31 23:59:59"
+}
+
+
+POSTUpdate WireGuard Peer Share Link
+{{server}}/api/sharePeer/update
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+json
+
+{
+    "ShareID": "fbee052e-0a64-4ec6-98a7-8f219cf03c62",
+    "ExpireDate": "2025-12-20 12:34:33"
+}
+
+
+GETGet WireGuard Peer Share Link
+{{server}}/api/sharePeer/get?ShareID=fbee052e-0a64-4ec6-98a7-8f219cf03c62
+PARAMS
+ShareID
+
+fbee052e-0a64-4ec6-98a7-8f219cf03c62
+
+POSTAdd WireGuard Peers
+{{server}}/api/addPeers/wg-external
+
+Please read through this description before actually making an request to this endpoint :)
+Add 1 Peer
+
+When you add a single peer, you can provide an empty JSON body, and let WGDashboard to use default settings you set under Settings > Peer Settings. Just like this:
+json
+
+{}
+
+But, if you want to specify your peer, you can provide the following fields. There will be some rules apply to some fields:
+
+{
+    "name": "Example Peer",
+    "private_key": "EF3ryxHSXcoMLUC8zozBdo/NBW24gDl/AA6+1gJ7+lY=",
+    "public_key": "J98lf1sSbRmyjqJ9P0inm95N2HmJ1gPLRh0oZCWlDyI=",
+    "allowed_ips": [
+        "10.0.0.9/32"
+    ],
+    "allowed_ips_validation": true,
+    "endpoint_allowed_ip": "0.0.0.0/0",
+    "dns_addresses": "1.1.1.1",
+    "mtu": 1460,
+    "keep_alive": 21,
+    "preshared_key": ""
+}
+
+    private_key and public_key
+
+        If public_key is provided
+
+            If private_key is provided
+                WGDashboard will generate a public key based on private_key and compare the public_key provided to see if they're the same, if not will return an error
+
+            If private_key is not provided
+
+                The peer will still be able to create, but some functions on WGDashboard will not be able to use on this peer:
+
+                    QR Code
+
+                    Download Configuration
+
+                    Share
+
+    allowed_ips and allowed_ips_validation
+        If you provided IP address(es) in allowed_ips and (by default) set true to allowed_ips_validation, WGDashboard will check all the address(es) you provided and see if they're in any of the subset of this configuration. If not it will return an error.
+
+Add Peers by Bulk
+
+If you wish to add peers by bulk, you can simply provide the following fields:
+
+{
+    "bulkAdd": true,
+    "bulkAddAmount": 5,
+    "preshared_key_bulkAdd": false
+}
+
+Note that bulkAddAmount will be checked to see if there's available IP address in the subnet. If not it will return an error.
+
+preshared_key_bulkAdd means if you want to enable Pre-Shared Key to your peers.
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+
+{
+    "name": "Example Peer",
+    "private_key": "EF3ryxHSXcoMLUC8zozBdo/NBW24gDl/AA6+1gJ7+lY=",
+    "public_key": "J98lf1sSbRmyjqJ9P0inm95N2HmJ1gPLRh0oZCWlDyI=",
+    "allowed_ips": [
+        "10.0.0.9/32"
+    ],
+    "allowed_ips_validation": true,
+    "endpoint_allowed_ip": "0.0.0.0/0",
+    "dns_addresses": "1.1.1.1",
+    "mtu": 1460,
+    "keep_alive": 21,
+    "preshared_key": ""
+}
+
+GETDownload WireGuard Peer
+{{server}}/api/downloadPeer/wg-external?id=Wu%2F0xCr%2Bn%2FcaqDVKtjG%2BC9UelAvY%2FbeARX3cW1i7LUI%3D
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+PARAMS
+id
+
+Wu%2F0xCr%2Bn%2FcaqDVKtjG%2BC9UelAvY%2FbeARX3cW1i7LUI%3D
+
+A URI Encoded Public Key of the peer you want to download
+
+GETDownload All WireGuard Peers in a WireGuard Configuration
+{{server}}/api/downloadAllPeers/wg-external
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+
+GETGet WGDashboard Configuration
+{{server}}/api/getDashboardConfiguration
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+
+POSTUpdate WGDashboard Configuration
+{{server}}/api/updateDashboardConfigurationItem
+
+Please read through this note before making any requests to the endpoint. It will directly change data in wg-dashboard.ini
+
+This endpoint requires you provide 3 key-value pair in the JSON body:
+
+    section: It represents which section you wants to change.
+
+    key: It represents which configuration you wants to change under the section you provided
+
+    value: The value you wants to change to the key you provided.
+
+For more information on WGDashboard's configuration, please review: ✂️ Configure
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+json
+
+{
+    "section": "Peers",
+    "key": "peer_display_mode23",
+    "value": "list"
+}
+
+GETGet WGDashboard API Keys
+{{server}}/api/getDashboardAPIKeys
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+
+POSTAdd WGDashboard API Key
+{{server}}/api/newDashboardAPIKey
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+json
+
+{
+    "NeverExpire": false,
+    "ExpiredAt": "2025-12-31 23:59:59"
+}
+
+
+POSTDelete WGDashboard API Key
+{{server}}/api/deleteDashboardAPIKey
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+json
+
+{
+    "Key": "tDigXlrxbmIiDFfIi4RxQNECf59XO-Ob8VqWuqms8go"
+}
+
+GETGet Available IP Address(es) of a WireGuard Configuration
+{{server}}/api/getAvailableIPs/wg-external
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+
+GETGet WireGuard Configuration Information
+{{server}}/api/getWireguardConfigurationInfo?configurationName=demo
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+PARAMS
+configurationName
+
+demo
+
+GETGet WGDashboard Theme
+{{server}}/api/getDashboardTheme
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+
+GETGet WGDashboard Version
+{{server}}/api/getDashboardVersion
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+
+POSTCreate/Update WireGuard Peer Schedule Job
+{{server}}/api/savePeerScheduleJob
+
+This endpoint handles both create and update WireGuard Peer's schedule job. The only difference is it will check if the JobID provided is exist in the database or not, if not it will create, else it will update the following accordingly:
+
+    Field
+
+    Operator
+
+    Value
+
+    Action
+
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+
+{
+    "Job": {
+        "JobID": "2d156dd8-1dcb-475d-a9b8-0c9b4a194049",
+        "Configuration": "wg-external",
+        "Peer": "Wu/0xCr+n/caqDVKtjG+C9UelAvY/beARX3cW1i7LUI=",
+        "Field": "total_data",
+        "Operator": "lgt",
+        "Value": "22",
+        "CreationDate": "",
+        "ExpireDate": "",
+        "Action": "restrict"
+    }
+}
+
+POSTDelete WireGuard Peer Schedule Job
+{{server}}/api/deletePeerScheduleJob
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+{
+    "Job": {
+        "Action": "restrict",
+        "Configuration": "wg-external",
+        "CreationDate": "2025-04-18 07:51:12",
+        "ExpireDate": null,
+        "Field": "total_data",
+        "JobID": "2d156dd8-1dcb-475d-a9b8-0c9b4a194046",
+        "Operator": "lgt",
+        "Peer": "Wu/0xCr+n/caqDVKtjG+C9UelAvY/beARX3cW1i7LUI=",
+        "Value": "21"
+    }
+}
+
+GETGet WireGuard Configuration Peer Schedule Job Logs
+{{server}}/api/getPeerScheduleJobLogs/wg-external
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+
+GETGet All WireGuard Peers IP Address & Endpoint Address
+{{server}}/api/ping/getAllPeersIpAddress
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+
+
+GETPing IP Address / Domain
+{{server}}/api/ping/execute?ipAddress=1.1.1.1&count=4
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+PARAMS
+ipAddress
+
+1.1.1.1
+
+IP address or domain you want to ping
+count
+
+4
+
+How many times you want to ping
+
+
+GETTraceroute IP Address / Domain
+{{server}}/api/traceroute/execute?ipAddress=1.1.1.1
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+PARAMS
+ipAddress
+
+1.1.1.1
+
+IP address or domain name you want to trace
+
+
+GETGet WGDashboard Updates
+{{server}}/api/getDashboardUpdate
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+
+
+GETGet WGDashboard TOTP Enable Status
+{{server}}/api/isTotpEnabled
+
+If data is false that means WGDashboard is not enabled with TOTP, and vice versa.
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+
+
+GETGet WGDashboard Locale
+{{server}}/api/locale
+
+This API endpoint is to get the current locale settings of WGDashboard. null means it is currently set to English.
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+
+
+GETGet WGDashboard Available Locale
+{{server}}/api/locale/available
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+
+
+POSTUpdate WGDashboard Locale
+{{server}}/api/locale/update
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+json
+
+{
+    "lang_id": "zh-CN"
+}
+
+
+GETGet WGDashboard Email Service Status
+{{server}}/api/email/ready
+
+This API endpoints will return if the email service is ready, which means all of the following fields are filled:
+
+    Server
+
+    Port
+
+    Encryption
+
+    Username
+
+    Password
+
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+
+
+POSTShare WireGuard Peer w/ WGDashboard Email Service
+{{server}}/api/email/send
+
+This API endpoint allows to share a peer with email. Please see the example body for required fields. For more information, please review the Email section in the WGDashboard Official Documentation.
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+
+{
+  "Receiver": "448172686@qq.com",
+  "Body": "Hi,\n\nYour WireGuard configuration is ready with the name \"{{ peer.name }}\", and its allowed IP address is: {{ peer.allowed_ip }}.\n\nPlease see the attached configuration file \"{{ configurationFile.fileName }}\" and open it on your iPhone with the WireGuard app. If you can't, please copy the following lines into a raw .conf file and send it to your phone:\n\n------- Configuration start below this line -------\n\n{{ configurationFile.file }}\n\n------- Configuration end below this line -------\n\nBest,\nDonald",
+  "Subject": "WireGuard Configuration",
+  "IncludeAttachment": true,
+  "ConfigurationName": "wg-external",
+  "Peer": "Wu/0xCr+n/caqDVKtjG+C9UelAvY/beARX3cW1i7LUI="
+}
+
+
+POSTGet Email Preview from WGDashboard Email Service
+{{server}}/api/email/previewBody
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+Bodyraw (json)
+
+json
+
+{
+    "ConfigurationName": "wg-external",
+    "Peer": "Wu/0xCr+n/caqDVKtjG+C9UelAvY/beARX3cW1i7LUI=",
+    "Body": "{{ peer.id }}"
+}
+
+
+GETGet WGDashboard System Status
+{{server}}/api/systemStatus
+AUTHORIZATIONAPI Key
+Key
+
+wg-dashboard-apikey
+Value
+
+{{apikey}}
+
+
+
+
