@@ -51,9 +51,77 @@ nano .env
 ```bash
 # Используем удобный скрипт управления
 ./docker-manage.sh start
+
+# Просмотр логов
+./docker-manage.sh logs
+
+# Остановка
+./docker-manage.sh stop
 ```
 
-**Подробная документация по Docker:** [DOCKER_README.md](DOCKER_README.md)
+#### Управление Docker контейнером
+
+```bash
+# Все доступные команды
+./docker-manage.sh help
+
+# Запуск бота
+./docker-manage.sh start
+
+# Остановка бота
+./docker-manage.sh stop
+
+# Перезапуск бота
+./docker-manage.sh restart
+
+# Просмотр логов
+./docker-manage.sh logs
+
+# Просмотр последних 100 строк логов
+./docker-manage.sh logs-tail
+
+# Статус бота
+./docker-manage.sh status
+
+# Обновление бота
+./docker-manage.sh update
+
+# Сборка образа
+./docker-manage.sh build
+```
+
+#### Прямое использование Docker Compose
+
+```bash
+# Запуск
+docker-compose up -d
+
+# Остановка
+docker-compose down
+
+# Просмотр логов
+docker-compose logs -f wgbot
+
+# Перезапуск
+docker-compose restart
+
+# Сборка
+docker-compose build
+```
+
+#### Мониторинг логов (опционально)
+
+Для удобного просмотра логов можно запустить Dozzle:
+
+```bash
+# Запуск с мониторингом
+docker-compose --profile monitoring up -d
+
+# Доступ к веб-интерфейсу
+# http://localhost:9999
+```
+
+
 
 ### Вариант 2: Локальная установка
 
@@ -190,7 +258,7 @@ wgbot/
 ├── .dockerignore        # Игнорируемые файлы для Docker
 ├── docker-manage.sh     # Скрипт управления Docker
 ├── env.docker.example   # Пример конфигурации для Docker
-├── DOCKER_README.md     # Документация по Docker
+
 ├── config/
 │   └── env_example.txt  # Пример переменных окружения
 ├── data/
@@ -303,7 +371,23 @@ nano .env  # Настройте конфигурацию
 ./docker-manage.sh logs
 ```
 
-**Подробная документация:** [DOCKER_README.md](DOCKER_README.md)
+#### Особенности Docker развертывания
+
+- **Alpine Linux** - Минимальный размер образа (~400MB)
+- **Health checks** - Автоматическая проверка состояния
+- **Автоматический перезапуск** - При сбоях
+- **Монтирование данных** - Персистентная база данных и логи
+- **Безопасность** - Запуск под непривилегированным пользователем
+- **Мониторинг** - Опциональный Dozzle сервис для логов
+
+#### Требования для Docker
+
+- Docker Engine 20.10+
+- Docker Compose 2.0+
+- 512MB RAM
+- 1GB свободного места
+
+
 
 ### Systemd (Linux)
 

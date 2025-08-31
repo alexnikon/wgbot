@@ -1,13 +1,16 @@
-# Используем официальный Python образ
-FROM python:3.11-slim
+# Используем официальный Python образ на Alpine
+FROM python:3.11-alpine
 
 # Устанавливаем рабочую директорию
 WORKDIR /app
 
-# Устанавливаем системные зависимости
-RUN apt-get update && apt-get install -y \
+# Устанавливаем системные зависимости для Alpine
+RUN apk add --no-cache \
     gcc \
-    && rm -rf /var/lib/apt/lists/*
+    musl-dev \
+    libffi-dev \
+    openssl-dev \
+    && rm -rf /var/cache/apk/*
 
 # Копируем файл зависимостей
 COPY requirements.txt .
@@ -22,7 +25,7 @@ COPY . .
 RUN mkdir -p /app/logs
 
 # Создаем пользователя для безопасности
-RUN useradd --create-home --shell /bin/bash wgbot
+RUN adduser -D -s /bin/sh wgbot
 RUN chown -R wgbot:wgbot /app
 USER wgbot
 
