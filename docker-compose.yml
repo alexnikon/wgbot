@@ -1,6 +1,6 @@
 services:
   wgbot:
-    build: .
+    image: goomboldt/wgbot:latest
     container_name: wgbot
     restart: unless-stopped
     environment:
