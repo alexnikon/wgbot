@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  wgbot:
+    build: .
+    container_name: wgbot
+    restart: unless-stopped
+    environment:
+      # Telegram Bot Configuration
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      
+      # YooKassa Configuration
+      - YOOKASSA_SHOP_ID=${YOOKASSA_SHOP_ID}
+      - YOOKASSA_SECRET_KEY=${YOOKASSA_SECRET_KEY}
+      - YOOKASSA_PROVIDER_TOKEN=${YOOKASSA_PROVIDER_TOKEN}
+      
+      # WGDashboard Configuration
+      - WG_DASHBOARD_URL=${WG_DASHBOARD_URL}
+      - WG_DASHBOARD_API_KEY=${WG_DASHBOARD_API_KEY}
+      
+      # Database Configuration
+      - DATABASE_PATH=/app/data/wgbot.db
+      
+      # Logging Configuration
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      
+    volumes:
+      # Монтируем директорию для базы данных
+      - ./data:/app/data
+      # Монтируем директорию для логов
+      - ./logs:/app/logs
+      
+    networks:
+      - wgbot-network
+      
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Опциональный сервис для мониторинга логов
+  log-viewer:
+    image: amir20/dozzle:latest
+    container_name: wgbot-logs
+    restart: unless-stopped
+    ports:
+      - "9999:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./logs:/var/log
+    networks:
+      - wgbot-network
+    profiles:
+      - monitoring
+
+networks:
+  wgbot-network:
+    driver: bridge
+
+volumes:
+  wgbot-data:
+    driver: local
+  wgbot-logs:
+    driver: local
