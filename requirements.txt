@@ -4,9 +4,17 @@ aiogram==3.13.0
 
 # HTTP requests
 requests==2.31.0
+httpx==0.25.2
 
 # Environment variables
 python-dotenv==1.0.0
 
 # Async file operations
 aiofiles==23.2.1
+
+# Webhook server
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+
+# Cryptography for webhook verification
+cryptography==41.0.7

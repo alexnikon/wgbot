@@ -21,7 +21,10 @@ PEER_EXPIRY_DAYS = 30
 # YooKassa Configuration
 YOOKASSA_SHOP_ID = os.getenv('YOOKASSA_SHOP_ID')
 YOOKASSA_SECRET_KEY = os.getenv('YOOKASSA_SECRET_KEY')
-YOOKASSA_PROVIDER_TOKEN = os.getenv('YOOKASSA_PROVIDER_TOKEN')  # Токен от BotFather для ЮKassa (нужно настроить в BotFather)
+
+# Webhook Configuration
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+DOMAIN = os.getenv('DOMAIN')
 
 # Tariff Configuration
 TARIFFS = {

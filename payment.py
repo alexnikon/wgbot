@@ -3,7 +3,9 @@ from typing import Optional, Dict, Any
 from aiogram import Bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
 from aiogram.exceptions import TelegramAPIError
-from config import TARIFFS, YOOKASSA_PROVIDER_TOKEN
+from config import TARIFFS, WEBHOOK_URL, DOMAIN
+from yookassa_client import YooKassaClient
+from database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +15,10 @@ class PaymentManager:
     def __init__(self, bot: Bot):
         self.bot = bot
         self.tariffs = TARIFFS  # Конфигурация тарифов
-        self.yookassa_provider_token = YOOKASSA_PROVIDER_TOKEN
+        self.yookassa_client = YooKassaClient()
+        self.db = Database()
+        self.webhook_url = WEBHOOK_URL
+        self.domain = DOMAIN
     
     async def create_payment_selection_keyboard(self, user_id: int) -> InlineKeyboardMarkup:
         """
@@ -26,7 +31,7 @@ class PaymentManager:
             InlineKeyboardMarkup с вариантами тарифов
         """
         # Проверяем доступность ЮKassa
-        yookassa_available = bool(self.yookassa_provider_token)
+        yookassa_available = bool(self.yookassa_client.shop_id and self.yookassa_client.secret_key)
         
         buttons = []
         
@@ -98,21 +103,21 @@ class PaymentManager:
             logger.error(f"Ошибка при создании инвойса Stars для пользователя {user_id}, тариф {tariff_key}: {e}")
             return None
     
-    async def create_yookassa_invoice(self, user_id: int, tariff_key: str, username: str = None) -> Optional[Dict[str, Any]]:
+    async def create_yookassa_payment(self, user_id: int, tariff_key: str, username: str = None) -> Optional[str]:
         """
-        Создает инвойс для оплаты через ЮKassa
+        Создает платеж в ЮKassa и возвращает ссылку для оплаты
         
         Args:
             user_id: ID пользователя Telegram
-            tariff_key: Ключ тарифа (7_days или 30_days)
+            tariff_key: Ключ тарифа (14_days или 30_days)
             username: Username пользователя (опционально)
             
         Returns:
-            Словарь с информацией об инвойсе или None при ошибке
+            URL для оплаты или None при ошибке
         """
         try:
-            if not self.yookassa_provider_token:
-                logger.error("Не настроен YooKassa provider token")
+            if not self.yookassa_client.shop_id or not self.yookassa_client.secret_key:
+                logger.error("Не настроен YooKassa")
                 return None
                 
             if tariff_key not in self.tariffs:
@@ -120,31 +125,60 @@ class PaymentManager:
                 return None
                 
             tariff_data = self.tariffs[tariff_key]
+            amount = tariff_data['rub_price'] * 100  # В копейках
             
-            # Создаем кнопку для оплаты
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(
-                    text=f"💳 Оплатить {tariff_data['rub_price']} руб.",
-                    pay=True
-                )]
-            ])
+            # Создаем URL для возврата
+            return_url = f"https://{self.domain}/bot/return?user_id={user_id}&tariff={tariff_key}"
             
-            # Создаем инвойс
-            invoice_data = {
-                'title': f'VPN доступ на {tariff_data["name"]} (ЮKassa)',
-                'description': f'{tariff_data["description"]}\n\n'
-                              f'Пользователь: @{username}' if username else tariff_data['description'],
-                'payload': f'vpn_access_yookassa_{tariff_key}_{user_id}',
-                'provider_token': self.yookassa_provider_token,
-                'currency': 'RUB',  # Код валюты для рублей
-                'prices': [LabeledPrice(label=f'VPN доступ {tariff_data["name"]}', amount=tariff_data['rub_price'] * 100)],  # В копейках
-                'reply_markup': keyboard
+            # Метаданные для платежа
+            metadata = {
+                'user_id': str(user_id),
+                'tariff_key': tariff_key,
+                'username': username or '',
+                'description': f'VPN доступ на {tariff_data["name"]}'
             }
             
-            return invoice_data
+            # Создаем платеж в ЮKassa
+            payment_data = await self.yookassa_client.create_payment(
+                amount=amount,
+                currency='RUB',
+                description=f'VPN доступ на {tariff_data["name"]}',
+                return_url=return_url,
+                metadata=metadata
+            )
+            
+            if not payment_data:
+                logger.error("Не удалось создать платеж в ЮKassa")
+                return None
+            
+            payment_id = payment_data.get('id')
+            if not payment_id:
+                logger.error("Не получен ID платежа от ЮKassa")
+                return None
+            
+            # Сохраняем платеж в базу данных
+            self.db.add_payment(
+                payment_id=payment_id,
+                user_id=user_id,
+                amount=amount,
+                payment_method='yookassa',
+                tariff_key=tariff_key,
+                metadata=metadata
+            )
+            
+            # Получаем URL для оплаты
+            confirmation = payment_data.get('confirmation', {})
+            payment_url = confirmation.get('confirmation_url')
+            
+            if not payment_url:
+                logger.error("Не получен URL для оплаты от ЮKassa")
+                return None
+            
+            logger.info(f"Создан платеж ЮKassa {payment_id} для пользователя {user_id}")
+            return payment_url
             
         except Exception as e:
-            logger.error(f"Ошибка при создании инвойса ЮKassa для пользователя {user_id}, тариф {tariff_key}: {e}")
+            logger.error(f"Ошибка при создании платежа ЮKassa для пользователя {user_id}, тариф {tariff_key}: {e}")
             return None
     
     async def send_payment_selection(self, chat_id: int, user_id: int) -> bool:
@@ -232,20 +266,36 @@ class PaymentManager:
         Args:
             chat_id: ID чата
             user_id: ID пользователя Telegram
-            tariff_key: Ключ тарифа (7_days или 30_days)
+            tariff_key: Ключ тарифа (14_days или 30_days)
             username: Username пользователя (опционально)
             
         Returns:
             True если запрос отправлен успешно
         """
         try:
-            invoice_data = await self.create_yookassa_invoice(user_id, tariff_key, username)
-            if not invoice_data:
+            # Создаем платеж и получаем URL
+            payment_url = await self.create_yookassa_payment(user_id, tariff_key, username)
+            if not payment_url:
                 return False
             
-            await self.bot.send_invoice(
+            tariff_data = self.tariffs[tariff_key]
+            
+            # Создаем клавиатуру с кнопкой для оплаты
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text=f"💳 Оплатить {tariff_data['rub_price']} руб.",
+                    url=payment_url
+                )]
+            ])
+            
+            # Отправляем сообщение с кнопкой оплаты
+            await self.bot.send_message(
                 chat_id=chat_id,
-                **invoice_data
+                text=f"💳 Оплата через банковскую карту\n\n"
+                     f"📋 Тариф: {tariff_data['name']}\n"
+                     f"💰 Сумма: {tariff_data['rub_price']} руб.\n\n"
+                     f"Нажмите кнопку ниже для перехода к оплате:",
+                reply_markup=keyboard
             )
             
             logger.info(f"Запрос на оплату ЮKassa отправлен пользователю {user_id}, тариф {tariff_key}")
@@ -363,7 +413,7 @@ class PaymentManager:
         
         return {
             'tariffs': self.tariffs,
-            'yookassa_available': bool(self.yookassa_provider_token),
+            'yookassa_available': bool(self.yookassa_client.shop_id and self.yookassa_client.secret_key),
             'period': first_tariff['name'] if first_tariff else '30 дней',
             'stars_price': first_tariff['stars_price'] if first_tariff else 200,
             'rub_price': first_tariff['rub_price'] if first_tariff else 300

@@ -1,4 +1,21 @@
 services:
+  nginx:
+    image: nginx:alpine
+    container_name: wgbot-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+      - ./wgbot-logs/nginx:/var/log/nginx
+    depends_on:
+      - wgbot
+      - webhook
+    networks:
+      - wgbot-network
+
   wgbot:
     image: goomboldt/wgbot:latest
     container_name: wgbot
@@ -7,11 +24,12 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - YOOKASSA_SHOP_ID=${YOOKASSA_SHOP_ID}
       - YOOKASSA_SECRET_KEY=${YOOKASSA_SECRET_KEY}
-      - YOOKASSA_PROVIDER_TOKEN=${YOOKASSA_PROVIDER_TOKEN}
       - WG_DASHBOARD_URL=${WG_DASHBOARD_URL}
       - WG_DASHBOARD_API_KEY=${WG_DASHBOARD_API_KEY}
       - DATABASE_PATH=/app/data/wgbot.db
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - WEBHOOK_URL=${WEBHOOK_URL}
+      - DOMAIN=${DOMAIN}
     volumes:
       - ./wgbot-data:/app/data
       - ./wgbot-logs:/app/logs
@@ -23,6 +41,31 @@ services:
       timeout: 10s
       retries: 2
       start_period: 60s
+
+  webhook:
+    image: goomboldt/wgbot:latest
+    container_name: wgbot-webhook
+    restart: unless-stopped
+    command: ["python", "webhook_server.py"]
+    environment:
+      - YOOKASSA_SHOP_ID=${YOOKASSA_SHOP_ID}
+      - YOOKASSA_SECRET_KEY=${YOOKASSA_SECRET_KEY}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - WG_DASHBOARD_URL=${WG_DASHBOARD_URL}
+      - WG_DASHBOARD_API_KEY=${WG_DASHBOARD_API_KEY}
+      - DATABASE_PATH=/app/data/wgbot.db
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./wgbot-data:/app/data
+      - ./wgbot-logs:/app/logs
+    networks:
+      - wgbot-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
 networks:
   wgbot-network:

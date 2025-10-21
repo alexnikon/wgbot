@@ -1,4 +1,5 @@
 import sqlite3
+import json
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -43,6 +44,23 @@ class Database:
                     operation TEXT,
                     details TEXT,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Таблица для хранения платежей
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS payments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    payment_id TEXT UNIQUE NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    amount INTEGER NOT NULL,
+                    currency TEXT DEFAULT 'RUB',
+                    status TEXT DEFAULT 'pending',
+                    payment_method TEXT,
+                    tariff_key TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    metadata TEXT
                 )
             ''')
             
@@ -441,3 +459,123 @@ class Database:
         except Exception as e:
             logger.error(f"Ошибка при отметке уведомления для пользователя {telegram_user_id}: {e}")
             return False
+    
+    def add_payment(self, payment_id: str, user_id: int, amount: int, 
+                   payment_method: str, tariff_key: str, metadata: dict = None) -> bool:
+        """
+        Добавляет новый платеж в базу данных
+        
+        Args:
+            payment_id: ID платежа от ЮKassa
+            user_id: ID пользователя Telegram
+            amount: Сумма в копейках
+            payment_method: Способ оплаты
+            tariff_key: Ключ тарифа
+            metadata: Дополнительные данные
+            
+        Returns:
+            True если успешно добавлен
+        """
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO payments (payment_id, user_id, amount, payment_method, 
+                                         tariff_key, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (payment_id, user_id, amount, payment_method, tariff_key, 
+                      json.dumps(metadata) if metadata else None))
+                conn.commit()
+                
+                # Логируем операцию
+                self.log_operation(f"user_{user_id}", "CREATE_PAYMENT", 
+                                 f"Создан платеж {payment_id}, сумма: {amount}")
+                return True
+                
+        except sqlite3.IntegrityError as e:
+            logger.error(f"Ошибка при добавлении платежа {payment_id}: {e}")
+            return False
+    
+    def update_payment_status(self, payment_id: str, status: str) -> bool:
+        """
+        Обновляет статус платежа
+        
+        Args:
+            payment_id: ID платежа
+            status: Новый статус
+            
+        Returns:
+            True если успешно обновлен
+        """
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE payments 
+                    SET status = ?, updated_at = datetime('now')
+                    WHERE payment_id = ?
+                ''', (status, payment_id))
+                conn.commit()
+                
+                # Логируем операцию
+                self.log_operation(f"payment_{payment_id}", "UPDATE_PAYMENT_STATUS", 
+                                 f"Обновлен статус платежа на: {status}")
+                return cursor.rowcount > 0
+                
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении статуса платежа {payment_id}: {e}")
+            return False
+    
+    def get_payment_by_id(self, payment_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Получает информацию о платеже по ID
+        
+        Args:
+            payment_id: ID платежа
+            
+        Returns:
+            Данные платежа или None
+        """
+        with sqlite3.connect(self.db_file) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM payments WHERE payment_id = ?', (payment_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    
+    def get_payments_by_user(self, user_id: int) -> List[Dict[str, Any]]:
+        """
+        Получает все платежи пользователя
+        
+        Args:
+            user_id: ID пользователя
+            
+        Returns:
+            Список платежей
+        """
+        with sqlite3.connect(self.db_file) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM payments 
+                WHERE user_id = ? 
+                ORDER BY created_at DESC
+            ''', (user_id,))
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def get_pending_payments(self) -> List[Dict[str, Any]]:
+        """
+        Получает все ожидающие платежи
+        
+        Returns:
+            Список ожидающих платежей
+        """
+        with sqlite3.connect(self.db_file) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM payments 
+                WHERE status = 'pending' 
+                ORDER BY created_at ASC
+            ''')
+            return [dict(row) for row in cursor.fetchall()]

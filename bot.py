@@ -670,7 +670,7 @@ async def handle_pay_yookassa_callback(callback_query: types.CallbackQuery):
     await callback_query.answer()
     
     # Проверяем, настроен ли ЮKassa
-    if not payment_manager.yookassa_provider_token:
+    if not payment_manager.yookassa_client.shop_id or not payment_manager.yookassa_client.secret_key:
         await callback_query.message.reply(
             "❌ Оплата через банковскую карту временно недоступна.\n\n"
             "💡 Используйте оплату через Telegram Stars.\n\n"
@@ -738,35 +738,27 @@ async def process_successful_payment(message: types.Message):
         await message.reply("❌ Ошибка при обработке платежа.")
         return
     
-    # Определяем способ оплаты и тариф из payload
-    payment_method = 'stars' if 'stars' in payload else 'yookassa'
-    tariff_key = None
+    # Обрабатываем только Stars платежи (ЮKassa обрабатывается через webhook)
+    if not payload.startswith('vpn_access_stars_'):
+        await message.reply("❌ Неизвестный тип платежа.")
+        return
     
-    if 'stars' in payload or 'yookassa' in payload:
-        payload_parts = payload.split('_')
-        if len(payload_parts) >= 4:
-            tariff_key = f"{payload_parts[3]}_{payload_parts[4]}"  # 14_days, 30_days или 90_days
+    # Извлекаем тариф из payload
+    payload_parts = payload.split('_')
+    if len(payload_parts) >= 4:
+        tariff_key = f"{payload_parts[3]}_{payload_parts[4]}"  # 14_days, 30_days
+    else:
+        await message.reply("❌ Ошибка в данных платежа.")
+        return
+    
+    payment_method = 'stars'
     
     # Обновляем статус оплаты в базе данных
     db.update_payment_status(user_id, 'paid', amount_paid, payment_method, tariff_key)
     
-    # Определяем тариф и период доступа на основе payload
-    access_days = 30  # По умолчанию
-    
-    if 'stars' in payload:
-        # Извлекаем тариф из payload (формат: vpn_access_stars_14_days_123456789)
-        payload_parts = payload.split('_')
-        if len(payload_parts) >= 4:
-            tariff_key = f"{payload_parts[3]}_{payload_parts[4]}"  # 14_days, 30_days или 90_days
-            tariff_data = payment_manager.tariffs.get(tariff_key, {})
-            access_days = tariff_data.get('days', 30)
-    elif 'yookassa' in payload:
-        # Извлекаем тариф из payload (формат: vpn_access_yookassa_14_days_123456789)
-        payload_parts = payload.split('_')
-        if len(payload_parts) >= 4:
-            tariff_key = f"{payload_parts[3]}_{payload_parts[4]}"  # 14_days, 30_days или 90_days
-            tariff_data = payment_manager.tariffs.get(tariff_key, {})
-            access_days = tariff_data.get('days', 30)
+    # Определяем период доступа на основе тарифа
+    tariff_data = payment_manager.tariffs.get(tariff_key, {})
+    access_days = tariff_data.get('days', 30)
     
     # Проверяем, есть ли уже пир у пользователя
     existing_peer = db.get_peer_by_telegram_id(user_id)
@@ -796,11 +788,10 @@ async def process_successful_payment(message: types.Message):
             logger.error(f"Ошибка при обновлении job в WGDashboard: {e}")
         
         # При продлении не отправляем конфигурацию повторно
-        payment_type_text = "⭐ Telegram Stars" if payment_type == 'stars' else "💳 Банковская карта"
         await message.reply(
             f"✅ Платеж успешно обработан!\n"
             f"🎉 Продлили тебе доступ на {access_days} дней!\n"
-            f"💳 Способ оплаты: {payment_type_text}\n\n"
+            f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
             f"Текущая конфигурация остается актуальной."
         )
         
@@ -850,14 +841,13 @@ async def process_successful_payment(message: types.Message):
             config_content = wg_api.download_peer_config(peer_id)
             filename = "nikonVPN.conf"
             
-            payment_type_text = "⭐ Telegram Stars" if payment_type == 'stars' else "💳 Банковская карта"
             await bot.send_document(
                 chat_id=message.chat.id,
                 document=types.BufferedInputFile(
                     file=config_content,
                     filename=filename
                 ),
-                caption=f"✅ Платеж успешно обработан!\n💳 Способ оплаты: {payment_type_text}\n🎉 VPN доступ на {access_days} дней!\n📁 Ваша VPN конфигурация готова!"
+                caption=f"✅ Платеж успешно обработан!\n💳 Способ оплаты: ⭐ Telegram Stars\n🎉 VPN доступ на {access_days} дней!\n📁 Ваша VPN конфигурация готова!"
             )
             
             # Не отправляем дополнительное сообщение после создания нового доступа
