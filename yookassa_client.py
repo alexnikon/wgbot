@@ -178,6 +178,30 @@ class YooKassaClient:
         """
         return payment_data.get("status") == "canceled"
     
+    def is_payment_waiting_for_capture(self, payment_data: Dict[str, Any]) -> bool:
+        """
+        Проверяет, ожидает ли платеж подтверждения
+        
+        Args:
+            payment_data: Данные платежа
+            
+        Returns:
+            True если платеж ожидает подтверждения
+        """
+        return payment_data.get("status") == "waiting_for_capture"
+    
+    def is_refund_succeeded(self, refund_data: Dict[str, Any]) -> bool:
+        """
+        Проверяет, успешен ли возврат
+        
+        Args:
+            refund_data: Данные возврата
+            
+        Returns:
+            True если возврат успешен
+        """
+        return refund_data.get("status") == "succeeded"
+    
     def get_payment_amount(self, payment_data: Dict[str, Any]) -> int:
         """
         Получает сумму платежа в копейках

@@ -1,6 +1,6 @@
 # nikonVPN Telegram Bot Dependencies
 # Core bot framework
-aiogram==3.13.0
+aiogram==3.22.0
 
 # HTTP requests
 requests==2.31.0

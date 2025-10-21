@@ -212,6 +212,54 @@ async def process_canceled_payment(payment_data: dict):
     except Exception as e:
         logger.error(f"Ошибка при обработке отмененного платежа: {e}")
 
+async def process_waiting_for_capture_payment(payment_data: dict):
+    """Обрабатывает платеж, ожидающий подтверждения"""
+    try:
+        metadata = yookassa_client.get_payment_metadata(payment_data)
+        user_id = int(metadata.get('user_id', 0))
+        
+        if user_id:
+            await send_telegram_message(
+                user_id,
+                "⏳ Платеж получен и ожидает подтверждения.\n\n"
+                "💳 Обычно подтверждение происходит автоматически в течение нескольких минут.\n"
+                "📧 Вы получите уведомление о результате."
+            )
+    except Exception as e:
+        logger.error(f"Ошибка при обработке платежа waiting_for_capture: {e}")
+
+async def process_refund_succeeded(refund_data: dict):
+    """Обрабатывает успешный возврат"""
+    try:
+        # Для возвратов нужно найти оригинальный платеж
+        payment_id = refund_data.get('payment_id')
+        if not payment_id:
+            logger.error("Не найден payment_id в данных возврата")
+            return
+        
+        # Получаем информацию о платеже из базы данных
+        payment_info = db.get_payment_by_id(payment_id)
+        if not payment_info:
+            logger.error(f"Не найден платеж {payment_id} в базе данных")
+            return
+        
+        user_id = payment_info['user_id']
+        amount = refund_data.get('amount', {}).get('value', '0')
+        
+        await send_telegram_message(
+            user_id,
+            f"💰 Возврат успешно обработан!\n\n"
+            f"💳 Сумма возврата: {amount} руб.\n"
+            f"📧 Деньги будут возвращены на карту в течение 1-3 рабочих дней.\n\n"
+            f"❓ Если у вас есть вопросы, обратитесь в поддержку."
+        )
+        
+        # Обновляем статус платежа в базе данных
+        db.update_payment_status(payment_id, 'refunded')
+        
+    except Exception as e:
+        logger.error(f"Ошибка при обработке возврата: {e}")
+
 @app.get("/health")
 async def health_check():
     """Проверка здоровья сервиса"""
@@ -239,19 +287,23 @@ async def yookassa_webhook(request: Request):
             logger.error("Ошибка парсинга webhook")
             raise HTTPException(status_code=400, detail="Invalid JSON")
         
-        # Получаем данные платежа
-        payment_data = webhook_data.get('object', {})
-        payment_status = payment_data.get('status')
+        # Получаем данные события
+        event_type = webhook_data.get('event', '')
+        event_data = webhook_data.get('object', {})
         
-        logger.info(f"Получен webhook: статус {payment_status}, ID {payment_data.get('id')}")
+        logger.info(f"Получен webhook: событие {event_type}, ID {event_data.get('id')}")
         
-        # Обрабатываем в зависимости от статуса
-        if yookassa_client.is_payment_succeeded(payment_data):
-            await process_successful_payment(payment_data)
-        elif yookassa_client.is_payment_canceled(payment_data):
-            await process_canceled_payment(payment_data)
+        # Обрабатываем в зависимости от типа события
+        if event_type == 'payment.succeeded':
+            await process_successful_payment(event_data)
+        elif event_type == 'payment.canceled':
+            await process_canceled_payment(event_data)
+        elif event_type == 'payment.waiting_for_capture':
+            await process_waiting_for_capture_payment(event_data)
+        elif event_type == 'refund.succeeded':
+            await process_refund_succeeded(event_data)
         else:
-            logger.info(f"Платеж в статусе: {payment_status}")
+            logger.info(f"Неизвестное событие: {event_type}")
         
         return JSONResponse(content={"status": "ok"})
         

@@ -502,12 +502,18 @@ class Database:
         
         Args:
             payment_id: ID платежа
-            status: Новый статус
+            status: Новый статус (pending, succeeded, canceled, refunded)
             
         Returns:
             True если успешно обновлен
         """
         try:
+            # Валидируем статус
+            valid_statuses = ['pending', 'succeeded', 'canceled', 'refunded']
+            if status not in valid_statuses:
+                logger.error(f"Неверный статус платежа: {status}")
+                return False
+                
             with sqlite3.connect(self.db_file) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
