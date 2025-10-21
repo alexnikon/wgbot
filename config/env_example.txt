@@ -9,4 +9,4 @@ WG_CONFIG_NAME=awg0
 # YooKassa Configuration (для тестовой среды)
 YOOKASSA_SHOP_ID=your_yookassa_shop_id_here
 YOOKASSA_SECRET_KEY=your_yookassa_secret_key_here
-YOOKASSA_PROVIDER_TOKEN=test_Bu_TTD62i4I7kv37kuvecfSdn7v66nPOUtl1DbrHVhg
+YOOKASSA_PROVIDER_TOKEN=test_token
