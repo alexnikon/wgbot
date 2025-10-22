@@ -11,8 +11,10 @@ services:
       - ./ssl:/etc/nginx/ssl:ro
       - ./wgbot-logs/nginx:/var/log/nginx
     depends_on:
-      - wgbot
-      - webhook
+      wgbot:
+        condition: service_healthy
+      webhook:
+        condition: service_healthy
     networks:
       - wgbot-network
 
