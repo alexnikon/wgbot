@@ -1,53 +1,25 @@
-# Multi-stage build для оптимизации размера
-FROM python:3.11-alpine AS builder
+FROM python:3.11-slim
 
-# Устанавливаем системные зависимости для сборки
-RUN apk add --no-cache \
+# Установка системных зависимостей
+RUN apt-get update && apt-get install -y \
     gcc \
-    musl-dev \
-    libffi-dev \
-    openssl-dev \
-    && rm -rf /var/cache/apk/*
+    && rm -rf /var/lib/apt/lists/*
 
-# Копируем файл зависимостей
-COPY requirements.txt .
-
-# Устанавливаем Python зависимости в виртуальное окружение
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
-
-# Финальный образ
-FROM python:3.11-alpine AS runtime
-
-# Копируем виртуальное окружение из builder
-COPY --from=builder /opt/venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-
-# Устанавливаем только runtime зависимости
-RUN apk add --no-cache \
-    ca-certificates \
-    && rm -rf /var/cache/apk/*
-
-# Устанавливаем рабочую директорию
+# Создание рабочей директории
 WORKDIR /app
 
-# Создаем пользователя для безопасности
-RUN adduser -D -s /bin/sh wgbot
+# Копирование requirements.txt и установка зависимостей
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем исходный код
-COPY --chown=wgbot:wgbot . .
+# Копирование исходного кода
+COPY . .
 
-# Создаем директории для данных и логов
-RUN mkdir -p /app/logs /app/data && \
-    chown -R wgbot:wgbot /app
+# Создание директорий для логов и данных
+RUN mkdir -p logs data
 
-# Переключаемся на непривилегированного пользователя
-USER wgbot
+# Установка прав доступа
+RUN chmod +x *.py
 
-# Открываем порт (если понадобится для health checks)
-EXPOSE 8000
-
-# Команда запуска
-CMD ["python", "run.py"]
+# Точка входа (по умолчанию запускает бота)
+CMD ["python", "bot.py"]
