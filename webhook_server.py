@@ -143,8 +143,8 @@ async def process_successful_payment(payment_data: dict):
                 except Exception as e:
                     logger.error(f"Ошибка при обновлении job в WGDashboard: {e}")
                 
-                # Обновляем статус оплаты
-                db.update_payment_status(user_id, 'paid', amount, 'yookassa', tariff_key)
+                # Обновляем статус оплаты в таблице peers (amount в копейках, конвертируем в рубли)
+                db.update_payment_status(user_id, 'paid', amount // 100, 'yookassa', tariff_key)
                 
                 await send_telegram_message(
                     user_id,
