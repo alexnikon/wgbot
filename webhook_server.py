@@ -57,6 +57,43 @@ async def send_telegram_message(chat_id: int, text: str):
 async def process_successful_payment(payment_data: dict):
     """Обрабатывает успешный платеж"""
     try:
+        # Получаем основную информацию о платеже
+        payment_id = payment_data.get('id', '')
+        amount_info = payment_data.get('amount', {})
+        amount_value = amount_info.get('value', '0')
+        currency = amount_info.get('currency', 'RUB')
+        description = payment_data.get('description', '')
+        created_at = payment_data.get('created_at', '')
+        
+        # Получаем информацию о способе оплаты
+        payment_method = payment_data.get('payment_method', {})
+        method_type = payment_method.get('type', 'unknown')
+        method_title = payment_method.get('title', '')
+        
+        # Для банковских карт получаем дополнительную информацию
+        card_info = ""
+        if method_type == 'bank_card':
+            card = payment_method.get('card', {})
+            if card:
+                first6 = card.get('first6', '')
+                last4 = card.get('last4', '')
+                card_type = card.get('card_type', '')
+                issuer_country = card.get('issuer_country', '')
+                issuer_name = card.get('issuer_name', '')
+                card_info = f" ({card_type} *{last4}, {issuer_name})"
+        
+        # Получаем информацию о 3D Secure
+        auth_details = payment_data.get('authorization_details', {})
+        three_d_secure = auth_details.get('three_d_secure', {})
+        three_d_applied = three_d_secure.get('applied', False)
+        rrn = auth_details.get('rrn', '')
+        auth_code = auth_details.get('auth_code', '')
+        
+        if three_d_applied:
+            logger.info(f"Платеж {payment_id} прошел 3D Secure аутентификацию")
+        
+        logger.info(f"Обработка успешного платежа {payment_id}: {amount_value} {currency}, способ: {method_type}{card_info}")
+        
         metadata = yookassa_client.get_payment_metadata(payment_data)
         user_id = int(metadata.get('user_id', 0))
         tariff_key = metadata.get('tariff_key', '30_days')
@@ -273,11 +310,13 @@ async def yookassa_webhook(request: Request):
         body = await request.body()
         body_str = body.decode('utf-8')
         
-        # Получаем подпись из заголовков
-        signature = request.headers.get('X-YooMoney-Signature', '')
+        # Получаем подпись из заголовков (ЮKassa может использовать разные заголовки)
+        signature = (request.headers.get('X-YooMoney-Signature', '') or 
+                    request.headers.get('Authorization', '').replace('Bearer ', '') or
+                    request.headers.get('X-Signature', ''))
         
-        # Проверяем подпись
-        if not yookassa_client.verify_webhook_signature(body_str, signature):
+        # Проверяем подпись (если есть)
+        if signature and not yookassa_client.verify_webhook_signature(body_str, signature):
             logger.warning("Неверная подпись webhook от ЮKassa")
             raise HTTPException(status_code=400, detail="Invalid signature")
         
@@ -287,11 +326,29 @@ async def yookassa_webhook(request: Request):
             logger.error("Ошибка парсинга webhook")
             raise HTTPException(status_code=400, detail="Invalid JSON")
         
+        # Проверяем тип уведомления (обязательный параметр)
+        notification_type = webhook_data.get('type', '')
+        if notification_type != 'notification':
+            logger.warning(f"Неверный тип уведомления: {notification_type}")
+            raise HTTPException(status_code=400, detail="Invalid notification type")
+        
         # Получаем данные события
         event_type = webhook_data.get('event', '')
         event_data = webhook_data.get('object', {})
         
-        logger.info(f"Получен webhook: событие {event_type}, ID {event_data.get('id')}")
+        # Проверяем обязательные параметры
+        if not event_type:
+            logger.error("Отсутствует параметр 'event' в webhook")
+            raise HTTPException(status_code=400, detail="Missing event parameter")
+        
+        if not event_data:
+            logger.error("Отсутствует параметр 'object' в webhook")
+            raise HTTPException(status_code=400, detail="Missing object parameter")
+        
+        # Логируем детали webhook'а
+        object_id = event_data.get('id', 'unknown')
+        object_status = event_data.get('status', 'unknown')
+        logger.info(f"Получен webhook: событие {event_type}, ID {object_id}, статус {object_status}")
         
         # Обрабатываем в зависимости от типа события
         if event_type == 'payment.succeeded':

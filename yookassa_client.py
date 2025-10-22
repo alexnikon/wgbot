@@ -117,6 +117,9 @@ class YooKassaClient:
         """
         Проверяет подпись webhook от ЮKassa
         
+        Примечание: В документации ЮKassa не указан точный алгоритм проверки подписи.
+        Этот метод реализует стандартную проверку HMAC-SHA256.
+        
         Args:
             body: Тело запроса
             signature: Подпись из заголовка
@@ -125,14 +128,24 @@ class YooKassaClient:
             True если подпись валидна
         """
         try:
-            # Создаем подпись для проверки
+            if not signature:
+                logger.warning("Отсутствует подпись в webhook")
+                return False
+                
+            # Создаем подпись для проверки (HMAC-SHA256)
             expected_signature = hmac.new(
                 self.secret_key.encode(),
                 body.encode(),
                 hashlib.sha256
             ).hexdigest()
             
-            return hmac.compare_digest(signature, expected_signature)
+            # Сравниваем подписи безопасным способом
+            is_valid = hmac.compare_digest(signature, expected_signature)
+            
+            if not is_valid:
+                logger.warning(f"Неверная подпись webhook. Ожидалось: {expected_signature[:8]}..., получено: {signature[:8]}...")
+            
+            return is_valid
             
         except Exception as e:
             logger.error(f"Ошибка при проверке подписи webhook: {e}")
@@ -149,10 +162,55 @@ class YooKassaClient:
             Данные webhook или None при ошибке
         """
         try:
-            return json.loads(body)
+            data = json.loads(body)
+            
+            # Валидируем структуру webhook согласно документации
+            if not self.validate_webhook_structure(data):
+                return None
+                
+            return data
         except json.JSONDecodeError as e:
             logger.error(f"Ошибка парсинга webhook: {e}")
             return None
+    
+    def validate_webhook_structure(self, data: Dict[str, Any]) -> bool:
+        """
+        Валидирует структуру webhook согласно документации ЮKassa
+        
+        Args:
+            data: Распарсенные данные webhook
+            
+        Returns:
+            True если структура валидна
+        """
+        try:
+            # Проверяем обязательные поля
+            required_fields = ['type', 'event', 'object']
+            for field in required_fields:
+                if field not in data:
+                    logger.error(f"Отсутствует обязательное поле '{field}' в webhook")
+                    return False
+            
+            # Проверяем тип уведомления
+            if data.get('type') != 'notification':
+                logger.error(f"Неверный тип уведомления: {data.get('type')}")
+                return False
+            
+            # Проверяем, что event является строкой
+            if not isinstance(data.get('event'), str):
+                logger.error("Поле 'event' должно быть строкой")
+                return False
+            
+            # Проверяем, что object является словарем
+            if not isinstance(data.get('object'), dict):
+                logger.error("Поле 'object' должно быть объектом")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Ошибка валидации структуры webhook: {e}")
+            return False
     
     def is_payment_succeeded(self, payment_data: Dict[str, Any]) -> bool:
         """
