@@ -135,3 +135,10 @@ logs/
 *.db
 *.log
 .env
+
+# SSL certificates (security sensitive)
+ssl/
+*.pem
+*.key
+*.crt
+*.cert
