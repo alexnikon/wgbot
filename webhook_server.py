@@ -313,6 +313,11 @@ async def health_check():
     """Проверка здоровья сервиса"""
     return {"status": "healthy"}
 
+@app.get("/webhook/yookassa/health")
+async def webhook_health_check():
+    """Проверка здоровья webhook endpoint"""
+    return {"status": "webhook_healthy", "endpoint": "/webhook/yookassa"}
+
 @app.post("/webhook/yookassa")
 async def yookassa_webhook(request: Request):
     """Обработчик webhook от ЮKassa"""
