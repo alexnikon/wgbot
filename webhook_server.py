@@ -49,8 +49,19 @@ async def send_telegram_message(chat_id: int, text: str):
                 },
                 timeout=10.0
             )
-            if response.status_code != 200:
-                logger.error(f"Ошибка отправки сообщения: {response.text}")
+            
+            if response.status_code == 200:
+                logger.info(f"Сообщение отправлено пользователю {chat_id}")
+            else:
+                response_data = response.json()
+                error_code = response_data.get('error_code', 'unknown')
+                error_description = response_data.get('description', 'unknown error')
+                
+                if error_code == 400 and 'chat not found' in error_description:
+                    logger.warning(f"Пользователь {chat_id} заблокировал бота или удалил чат")
+                else:
+                    logger.error(f"Ошибка отправки сообщения пользователю {chat_id}: {error_code} - {error_description}")
+                    
     except Exception as e:
         logger.error(f"Ошибка при отправке сообщения в Telegram: {e}")
 
