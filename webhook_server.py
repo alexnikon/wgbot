@@ -193,7 +193,7 @@ async def process_successful_payment(payment_data: dict):
                     stars_paid=0,
                     tariff_key=tariff_key,
                     payment_method='yookassa',
-                    rub_paid=amount
+                    rub_paid=amount // 100  # Конвертируем из копеек в рубли
                 )
                 
                 if not success:
