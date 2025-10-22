@@ -128,7 +128,7 @@ class PaymentManager:
             amount = tariff_data['rub_price'] * 100  # В копейках
             
             # Создаем URL для возврата
-            return_url = f"https://{self.domain}/bot/return?user_id={user_id}&tariff={tariff_key}"
+            return_url = "https://t.me/nikonvpn_bot"
             
             # Метаданные для платежа
             metadata = {
