@@ -17,7 +17,7 @@ services:
       - wgbot-network
 
   wgbot:
-    image: goomboldt/wgbot:dev
+    build: .
     container_name: wgbot
     restart: unless-stopped
     environment:
@@ -43,7 +43,7 @@ services:
       start_period: 60s
 
   webhook:
-    image: goomboldt/wgbot:dev
+    build: .
     container_name: wgbot-webhook
     restart: unless-stopped
     command: ["python", "webhook_server.py"]
