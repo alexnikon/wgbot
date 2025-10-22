@@ -303,7 +303,7 @@ async def process_refund_succeeded(refund_data: dict):
         )
         
         # Обновляем статус платежа в базе данных
-        db.update_payment_status(payment_id, 'refunded')
+        db.update_payment_status_by_id(payment_id, 'refunded')
         
     except Exception as e:
         logger.error(f"Ошибка при обработке возврата: {e}")

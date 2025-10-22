@@ -496,9 +496,9 @@ class Database:
             logger.error(f"Ошибка при добавлении платежа {payment_id}: {e}")
             return False
     
-    def update_payment_status(self, payment_id: str, status: str) -> bool:
+    def update_payment_status_by_id(self, payment_id: str, status: str) -> bool:
         """
-        Обновляет статус платежа
+        Обновляет статус платежа по ID
         
         Args:
             payment_id: ID платежа
