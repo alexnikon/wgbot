@@ -58,6 +58,7 @@ class YooKassaClient:
                     "type": "redirect",
                     "return_url": return_url
                 },
+                "capture": True,
                 "description": description,
                 "metadata": metadata
             }
