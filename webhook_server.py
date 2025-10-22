@@ -1,19 +1,16 @@
 import logging
 import asyncio
 import sqlite3
-from datetime import datetime, timedelta
-from contextlib import asynccontextmanager
-
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
+from contextlib import asynccontextmanager
 import uvicorn
-import httpx
-
 from yookassa_client import YooKassaClient
 from database import Database
 from wg_api import WGDashboardAPI
 from utils import generate_peer_name
-from config import TELEGRAM_BOT_TOKEN, TARIFFS
+from config import TELEGRAM_BOT_TOKEN
+import httpx
 
 # Настройка логирования
 logging.basicConfig(
@@ -119,6 +116,7 @@ async def process_successful_payment(payment_data: dict):
             return
         
         # Получаем информацию о тарифе
+        from config import TARIFFS
         tariff_data = TARIFFS.get(tariff_key, TARIFFS['30_days'])
         access_days = tariff_data.get('days', 30)
         
@@ -180,6 +178,7 @@ async def process_successful_payment(payment_data: dict):
                 peer_id = peer_result['id']
                 
                 # Создаем job для ограничения через определенное количество дней
+                from datetime import datetime, timedelta
                 expire_date = (datetime.now() + timedelta(days=access_days)).strftime('%Y-%m-%d %H:%M:%S')
                 job_result, job_id, expire_date = wg_api.create_restrict_job(peer_id, expire_date)
                 
@@ -245,7 +244,7 @@ async def process_successful_payment(payment_data: dict):
                 )
         
     except Exception as e:
-        logger.error(f"Ошибка при обработке успешного платежа: {e}", exc_info=True)
+        logger.error(f"Ошибка при обработке успешного платежа: {e}")
 
 async def process_canceled_payment(payment_data: dict):
     """Обрабатывает отмененный платеж"""
@@ -260,7 +259,7 @@ async def process_canceled_payment(payment_data: dict):
                 "💡 Попробуйте оплатить снова или обратитесь в поддержку."
             )
     except Exception as e:
-        logger.error(f"Ошибка при обработке отмененного платежа: {e}", exc_info=True)
+        logger.error(f"Ошибка при обработке отмененного платежа: {e}")
 
 async def process_waiting_for_capture_payment(payment_data: dict):
     """Обрабатывает платеж, ожидающий подтверждения"""
@@ -276,7 +275,7 @@ async def process_waiting_for_capture_payment(payment_data: dict):
                 "📧 Вы получите уведомление о результате."
             )
     except Exception as e:
-        logger.error(f"Ошибка при обработке платежа waiting_for_capture: {e}", exc_info=True)
+        logger.error(f"Ошибка при обработке платежа waiting_for_capture: {e}")
 
 async def process_refund_succeeded(refund_data: dict):
     """Обрабатывает успешный возврат"""
@@ -307,11 +306,13 @@ async def process_refund_succeeded(refund_data: dict):
             
             # Определяем количество дней для возврата на основе тарифа
             tariff_key = payment_info.get('tariff_key', '30_days')
+            from config import TARIFFS
             refund_days = TARIFFS.get(tariff_key, {}).get('days', 30)
             
             logger.info(f"Возврат {refund_days} дней для тарифа {tariff_key}")
             
             # Вычисляем новую дату истечения (вычитаем дни возврата)
+            from datetime import datetime, timedelta
             current_date = datetime.now()
             if current_expire_date:
                 try:
@@ -427,7 +428,7 @@ async def process_refund_succeeded(refund_data: dict):
         logger.info(f"Возврат {payment_id} успешно обработан для пользователя {user_id}")
         
     except Exception as e:
-        logger.error(f"Ошибка при обработке возврата: {e}", exc_info=True)
+        logger.error(f"Ошибка при обработке возврата: {e}")
 
 @app.get("/health")
 async def health_check():
@@ -504,7 +505,7 @@ async def yookassa_webhook(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Ошибка обработки webhook: {e}", exc_info=True)
+        logger.error(f"Ошибка обработки webhook: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 if __name__ == "__main__":
