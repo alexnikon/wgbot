@@ -20,6 +20,8 @@ services:
     build: .
     container_name: wgbot
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - YOOKASSA_SHOP_ID=${YOOKASSA_SHOP_ID}
@@ -47,6 +49,8 @@ services:
     container_name: wgbot-webhook
     restart: unless-stopped
     command: ["python", "webhook_server.py"]
+    env_file:
+      - .env
     environment:
       - YOOKASSA_SHOP_ID=${YOOKASSA_SHOP_ID}
       - YOOKASSA_SECRET_KEY=${YOOKASSA_SECRET_KEY}

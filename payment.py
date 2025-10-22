@@ -196,7 +196,7 @@ class PaymentManager:
             keyboard = await self.create_payment_selection_keyboard(user_id)
             
             # Проверяем доступность ЮKassa
-            yookassa_available = bool(self.yookassa_provider_token)
+            yookassa_available = bool(self.yookassa_client.shop_id and self.yookassa_client.secret_key)
             
             # Формируем текст с доступными тарифами
             tariff_text = ""
