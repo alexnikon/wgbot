@@ -1,6 +1,5 @@
 import logging
 import asyncio
-import sqlite3
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
@@ -295,137 +294,16 @@ async def process_refund_succeeded(refund_data: dict):
         user_id = payment_info['user_id']
         amount = refund_data.get('amount', {}).get('value', '0')
         
-        logger.info(f"Обработка возврата для платежа {payment_id}, пользователь {user_id}, сумма {amount} руб.")
-        
-        # Находим пира пользователя
-        peer_info = db.get_peer_by_telegram_id(user_id)
-        if peer_info:
-            peer_id = peer_info['peer_id']
-            peer_name = peer_info['peer_name']
-            current_expire_date = peer_info['expire_date']
-            
-            # Определяем количество дней для возврата на основе тарифа
-            tariff_key = payment_info.get('tariff_key', '30_days')
-            from config import TARIFFS
-            refund_days = TARIFFS.get(tariff_key, {}).get('days', 30)
-            
-            logger.info(f"Возврат {refund_days} дней для тарифа {tariff_key}")
-            
-            # Вычисляем новую дату истечения (вычитаем дни возврата)
-            from datetime import datetime, timedelta
-            current_date = datetime.now()
-            if current_expire_date:
-                try:
-                    expire_dt = datetime.strptime(current_expire_date, '%Y-%m-%d %H:%M:%S')
-                except ValueError:
-                    expire_dt = datetime.strptime(current_expire_date, '%Y-%m-%d')
-            else:
-                expire_dt = current_date
-            
-            # Вычитаем дни возврата
-            new_expire_date = expire_dt - timedelta(days=refund_days)
-            
-            # Проверяем, остается ли оплаченный период
-            if new_expire_date > current_date:
-                # Остается оплаченный период - обновляем дату истечения
-                new_expire_date_str = new_expire_date.strftime('%Y-%m-%d %H:%M:%S')
-                
-                try:
-                    # Обновляем дату истечения в WGDashboard
-                    job_update_result = wg_api.update_job_expire_date(
-                        peer_info['job_id'], 
-                        peer_id, 
-                        new_expire_date_str
-                    )
-                    
-                    if job_update_result and job_update_result.get('status'):
-                        logger.info(f"Обновлена дата истечения для пира {peer_name}: {new_expire_date_str}")
-                    else:
-                        logger.error(f"Ошибка при обновлении даты истечения для пира {peer_name}")
-                        
-                except Exception as e:
-                    logger.error(f"Ошибка при обновлении job в WGDashboard: {e}")
-                
-                # Обновляем дату в базе данных
-                try:
-                    with sqlite3.connect(db.db_file) as conn:
-                        cursor = conn.cursor()
-                        cursor.execute('''
-                            UPDATE peers 
-                            SET expire_date = ?, payment_status = 'refunded'
-                            WHERE telegram_user_id = ?
-                        ''', (new_expire_date_str, user_id))
-                        conn.commit()
-                        
-                    logger.info(f"Обновлена дата истечения в БД для пира {peer_name}: {new_expire_date_str}")
-                    
-                except Exception as e:
-                    logger.error(f"Ошибка при обновлении даты в БД: {e}")
-                
-                # Отправляем уведомление о частичном возврате
-                await send_telegram_message(
-                    user_id,
-                    f"💰 Частичный возврат обработан!\n\n"
-                    f"💳 Сумма возврата: {amount} руб.\n"
-                    f"📅 VPN доступ продлен до: {new_expire_date.strftime('%d.%m.%Y')}\n"
-                    f"📧 Деньги будут возвращены на карту в течение 1-3 рабочих дней.\n\n"
-                    f"❓ Если у вас есть вопросы, обратитесь в поддержку."
-                )
-                
-            else:
-                # Не остается оплаченного периода - удаляем пира
-                logger.info(f"Недостаточно оплаченного периода для пира {peer_name}, удаляем пир")
-                
-                # Удаляем пира из WGDashboard
-                try:
-                    delete_result = wg_api.delete_peer(peer_id)
-                    if delete_result:
-                        logger.info(f"Пир {peer_name} (ID: {peer_id}) удален из WGDashboard")
-                    else:
-                        logger.error(f"Ошибка при удалении пира {peer_name} из WGDashboard")
-                except Exception as e:
-                    logger.error(f"Ошибка при удалении пира из WGDashboard: {e}")
-                
-                # Отключаем пира в базе данных
-                try:
-                    with sqlite3.connect(db.db_file) as conn:
-                        cursor = conn.cursor()
-                        cursor.execute('''
-                            UPDATE peers 
-                            SET is_active = 0, payment_status = 'refunded'
-                            WHERE telegram_user_id = ?
-                        ''', (user_id,))
-                        conn.commit()
-                        
-                    logger.info(f"Пир {peer_name} отключен в базе данных")
-                    
-                except Exception as e:
-                    logger.error(f"Ошибка при обновлении статуса пира в БД: {e}")
-                
-                # Отправляем уведомление о полном возврате
-                await send_telegram_message(
-                    user_id,
-                    f"💰 Полный возврат обработан!\n\n"
-                    f"💳 Сумма возврата: {amount} руб.\n"
-                    f"🚫 VPN доступ отключен\n"
-                    f"📧 Деньги будут возвращены на карту в течение 1-3 рабочих дней.\n\n"
-                    f"❓ Если у вас есть вопросы, обратитесь в поддержку."
-                )
-        else:
-            logger.warning(f"Пир не найден для пользователя {user_id}")
-            # Отправляем уведомление о возврате без пира
-            await send_telegram_message(
-                user_id,
-                f"💰 Возврат успешно обработан!\n\n"
-                f"💳 Сумма возврата: {amount} руб.\n"
-                f"📧 Деньги будут возвращены на карту в течение 1-3 рабочих дней.\n\n"
-                f"❓ Если у вас есть вопросы, обратитесь в поддержку."
-            )
+        await send_telegram_message(
+            user_id,
+            f"💰 Возврат успешно обработан!\n\n"
+            f"💳 Сумма возврата: {amount} руб.\n"
+            f"📧 Деньги будут возвращены на карту в течение 1-3 рабочих дней.\n\n"
+            f"❓ Если у вас есть вопросы, обратитесь в поддержку."
+        )
         
         # Обновляем статус платежа в базе данных
         db.update_payment_status_by_id(payment_id, 'refunded')
-        
-        logger.info(f"Возврат {payment_id} успешно обработан для пользователя {user_id}")
         
     except Exception as e:
         logger.error(f"Ошибка при обработке возврата: {e}")
