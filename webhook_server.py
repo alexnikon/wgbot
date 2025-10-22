@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import sqlite3
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
@@ -294,16 +295,60 @@ async def process_refund_succeeded(refund_data: dict):
         user_id = payment_info['user_id']
         amount = refund_data.get('amount', {}).get('value', '0')
         
+        logger.info(f"Обработка возврата для платежа {payment_id}, пользователь {user_id}, сумма {amount} руб.")
+        
+        # Находим пира пользователя
+        peer_info = db.get_peer_by_telegram_id(user_id)
+        if peer_info:
+            peer_id = peer_info['peer_id']
+            peer_name = peer_info['peer_name']
+            
+            # Удаляем пира из WGDashboard
+            try:
+                delete_result = wg_api.delete_peer(peer_id)
+                if delete_result:
+                    logger.info(f"Пир {peer_name} (ID: {peer_id}) удален из WGDashboard")
+                else:
+                    logger.error(f"Ошибка при удалении пира {peer_name} из WGDashboard")
+            except Exception as e:
+                logger.error(f"Ошибка при удалении пира из WGDashboard: {e}")
+            
+            # Обновляем статус пира в базе данных (отключаем доступ)
+            try:
+                # Обновляем статус оплаты на 'unpaid' и отключаем пира
+                db.update_payment_status(user_id, 'unpaid', 0, 'yookassa', None)
+                
+                # Отключаем пира (is_active = 0)
+                with sqlite3.connect(db.db_file) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        UPDATE peers 
+                        SET is_active = 0, payment_status = 'refunded'
+                        WHERE telegram_user_id = ?
+                    ''', (user_id,))
+                    conn.commit()
+                    
+                logger.info(f"Пир {peer_name} отключен в базе данных")
+                
+            except Exception as e:
+                logger.error(f"Ошибка при обновлении статуса пира в БД: {e}")
+        else:
+            logger.warning(f"Пир не найден для пользователя {user_id}")
+        
+        # Отправляем уведомление пользователю
         await send_telegram_message(
             user_id,
             f"💰 Возврат успешно обработан!\n\n"
             f"💳 Сумма возврата: {amount} руб.\n"
+            f"🚫 VPN доступ отключен\n"
             f"📧 Деньги будут возвращены на карту в течение 1-3 рабочих дней.\n\n"
             f"❓ Если у вас есть вопросы, обратитесь в поддержку."
         )
         
         # Обновляем статус платежа в базе данных
         db.update_payment_status_by_id(payment_id, 'refunded')
+        
+        logger.info(f"Возврат {payment_id} успешно обработан для пользователя {user_id}")
         
     except Exception as e:
         logger.error(f"Ошибка при обработке возврата: {e}")
