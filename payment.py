@@ -3,7 +3,7 @@ from typing import Optional, Dict, Any
 from aiogram import Bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
 from aiogram.exceptions import TelegramAPIError
-from config import TARIFFS, WEBHOOK_URL, DOMAIN
+from config import TARIFFS
 from yookassa_client import YooKassaClient
 from database import Database
 
@@ -17,8 +17,6 @@ class PaymentManager:
         self.tariffs = TARIFFS  # Конфигурация тарифов
         self.yookassa_client = YooKassaClient()
         self.db = Database()
-        self.webhook_url = WEBHOOK_URL
-        self.domain = DOMAIN
     
     async def create_payment_selection_keyboard(self, user_id: int) -> InlineKeyboardMarkup:
         """
