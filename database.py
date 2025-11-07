@@ -32,7 +32,8 @@ class Database:
                     payment_status TEXT DEFAULT 'unpaid',
                     stars_paid INTEGER DEFAULT 0,
                     last_payment_date TIMESTAMP,
-                    notification_sent BOOLEAN DEFAULT 0
+                    notification_sent BOOLEAN DEFAULT 0,
+                    expired_notification_sent BOOLEAN DEFAULT 0
                 )
             ''')
             
@@ -93,6 +94,10 @@ class Database:
                 cursor.execute("ALTER TABLE peers ADD COLUMN notification_sent BOOLEAN DEFAULT 0")
                 logger.info("Добавлена колонка notification_sent")
             
+            if 'expired_notification_sent' not in columns:
+                cursor.execute("ALTER TABLE peers ADD COLUMN expired_notification_sent BOOLEAN DEFAULT 0")
+                logger.info("Добавлена колонка expired_notification_sent")
+
             # Добавляем колонки для новой системы тарифов
             if 'tariff_key' not in columns:
                 cursor.execute("ALTER TABLE peers ADD COLUMN tariff_key TEXT")
@@ -257,13 +262,13 @@ class Database:
             return [dict(row) for row in cursor.fetchall()]
     
     def get_expired_peers(self) -> List[Dict[str, Any]]:
-        """Получает список пиров с истекшим сроком действия"""
+        """Получает список пиров с истекшим сроком действия, ещё не уведомлённых"""
         with sqlite3.connect(self.db_file) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute('''
                 SELECT * FROM peers 
-                WHERE is_active = 1 AND expire_date < datetime('now')
+                WHERE is_active = 1 AND expire_date < datetime('now') AND expired_notification_sent = 0
                 ORDER BY expire_date ASC
             ''')
             return [dict(row) for row in cursor.fetchall()]
@@ -397,7 +402,7 @@ class Database:
                 # Обновляем дату истечения
                 cursor.execute('''
                     UPDATE peers 
-                    SET expire_date = ?, notification_sent = 0
+                    SET expire_date = ?, notification_sent = 0, expired_notification_sent = 0
                     WHERE telegram_user_id = ? AND is_active = 1
                 ''', (new_expire_date, telegram_user_id))
                 conn.commit()
@@ -458,6 +463,24 @@ class Database:
                 
         except Exception as e:
             logger.error(f"Ошибка при отметке уведомления для пользователя {telegram_user_id}: {e}")
+            return False
+
+    def mark_expired_notification_sent(self, telegram_user_id: int) -> bool:
+        """
+        Отмечает, что уведомление об истечении доступа отправлено пользователю (одноразово)
+        """
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE peers 
+                    SET expired_notification_sent = 1
+                    WHERE telegram_user_id = ? AND is_active = 1
+                ''', (telegram_user_id,))
+                conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Ошибка при отметке истёкшего уведомления для пользователя {telegram_user_id}: {e}")
             return False
     
     def add_payment(self, payment_id: str, user_id: int, amount: int, 

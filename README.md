@@ -15,8 +15,8 @@ Telegram бот для продажи VPN доступа с интеграцие
 
 | Период | Telegram Stars | ЮKassa |
 |--------|----------------|--------|
-| 14 дней | 100 Stars | 150 ₽ |
-| 30 дней | 200 Stars | 300 ₽ |
+| 14 дней | ENV TARIFF_14_DAYS_STARS (по умолчанию 100) Stars | ENV TARIFF_14_DAYS_RUB (по умолчанию 150) ₽ |
+| 30 дней | ENV TARIFF_30_DAYS_STARS (по умолчанию 200) Stars | ENV TARIFF_30_DAYS_RUB (по умолчанию 300) ₽ |
 
 ## 🛠 Установка
 
@@ -77,6 +77,15 @@ YOOKASSA_SECRET_KEY=your_yookassa_secret_key_here
 # Webhook Configuration
 WEBHOOK_URL=https://your-domain.com/webhook/yookassa
 DOMAIN=your-domain.com
+
+# Support URL
+SUPPORT_URL=https://t.me/straycat0789
+
+# Tariffs (prices)
+TARIFF_14_DAYS_STARS=100
+TARIFF_14_DAYS_RUB=150
+TARIFF_30_DAYS_STARS=200
+TARIFF_30_DAYS_RUB=300
 
 # Logging
 LOG_LEVEL=INFO
@@ -190,6 +199,7 @@ wgbot/
 - `stars_paid` - Количество оплаченных звезд
 - `last_payment_date` - Дата последней оплаты
 - `notification_sent` - Отправлено ли уведомление
+- `expired_notification_sent` - Отправлено ли уведомление об истечении (однократно)
 - `tariff_key` - Ключ тарифа
 - `payment_method` - Способ оплаты
 - `rub_paid` - Количество оплаченных рублей

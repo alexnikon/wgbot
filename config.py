@@ -26,28 +26,28 @@ YOOKASSA_SECRET_KEY = os.getenv('YOOKASSA_SECRET_KEY')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 DOMAIN = os.getenv('DOMAIN')
 
-# Tariff Configuration
+# Support
+SUPPORT_URL = os.getenv('SUPPORT_URL', 'https://t.me/straycat0789')
+
+# Tariff Configuration (env-driven with sensible defaults)
+TARIFF_14_DAYS_STARS = int(os.getenv('TARIFF_14_DAYS_STARS', 100))
+TARIFF_14_DAYS_RUB = int(os.getenv('TARIFF_14_DAYS_RUB', 150))
+TARIFF_30_DAYS_STARS = int(os.getenv('TARIFF_30_DAYS_STARS', 200))
+TARIFF_30_DAYS_RUB = int(os.getenv('TARIFF_30_DAYS_RUB', 300))
+
 TARIFFS = {
     '14_days': {
         'days': 14,
-        'stars_price': 100,  # 100 звезд
-        'rub_price': 150,    # 150 рублей
+        'stars_price': TARIFF_14_DAYS_STARS,
+        'rub_price': TARIFF_14_DAYS_RUB,
         'name': '14 дней',
         'description': 'Доступ на 2 недели'
     },
     '30_days': {
         'days': 30,
-        'stars_price': 200,  # 200 звезд
-        'rub_price': 300,    # 300 рублей
+        'stars_price': TARIFF_30_DAYS_STARS,
+        'rub_price': TARIFF_30_DAYS_RUB,
         'name': '30 дней',
         'description': 'Доступ на месяц'
     }
-    # Тариф 90 дней временно отключен
-    # '90_days': {
-    #     'days': 90,
-    #     'stars_price': 500,  # 500 звезд
-    #     'rub_price': 750,    # 750 рублей
-    #     'name': '90 дней',
-    #     'description': 'Доступ на 3 месяца'
-    # }
 }

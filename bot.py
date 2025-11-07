@@ -8,7 +8,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
 
-from config import TELEGRAM_BOT_TOKEN
+from config import TELEGRAM_BOT_TOKEN, SUPPORT_URL
 from wg_api import WGDashboardAPI
 from database import Database
 from payment import PaymentManager
@@ -37,6 +37,76 @@ dp = Dispatcher(storage=storage)
 wg_api = WGDashboardAPI()
 db = Database()
 payment_manager = PaymentManager(bot)
+# Хелпер: создать или восстановить пира и вернуть конфиг
+async def create_or_restore_peer_for_user(user_id: int, username: str | None, tariff_key: str | None = None) -> tuple[bool, str]:
+    """Создаёт нового пира либо восстанавливает, если он отсутствует на сервере. Возвращает (success, error_message)."""
+    try:
+        existing_peer = db.get_peer_by_telegram_id(user_id)
+
+        # Определяем срок действия
+        if existing_peer and existing_peer.get('expire_date'):
+            # Восстановление по существующей дате
+            target_expire_date = existing_peer['expire_date']
+        else:
+            # Новый пользователь или нет даты — возьмём из тарифа
+            access_days = 30
+            if tariff_key:
+                tariff_data = payment_manager.tariffs.get(tariff_key, {})
+                access_days = tariff_data.get('days', 30)
+            from datetime import datetime, timedelta
+            target_expire_date = (datetime.now() + timedelta(days=access_days)).strftime('%Y-%m-%d %H:%M:%S')
+
+        # Имя пира
+        peer_name = existing_peer['peer_name'] if existing_peer else generate_peer_name(username, user_id)
+
+        # Создаём пира в WG
+        peer_result = wg_api.add_peer(peer_name)
+        if not peer_result or 'id' not in peer_result:
+            return False, "Ошибка при создании пира на сервере"
+
+        peer_id = peer_result['id']
+
+        # Создаём/обновляем job по целевой дате
+        if existing_peer and existing_peer.get('job_id'):
+            try:
+                wg_api.update_job_expire_date(existing_peer['job_id'], peer_id, target_expire_date)
+                new_job_id = existing_peer['job_id']
+            except Exception:
+                job_result, new_job_id, _ = wg_api.create_restrict_job(peer_id, target_expire_date)
+        else:
+            job_result, new_job_id, _ = wg_api.create_restrict_job(peer_id, target_expire_date)
+
+        # Сохраняем/обновляем запись в БД
+        if existing_peer:
+            db.update_peer_info(peer_name, peer_id, new_job_id, target_expire_date)
+        else:
+            # Новый peer: пометим как paid, если уже была оплата извне
+            db.add_peer(
+                peer_name=peer_name,
+                peer_id=peer_id,
+                job_id=new_job_id,
+                telegram_user_id=user_id,
+                telegram_username=username or "",
+                expire_date=target_expire_date,
+                payment_status='paid'
+            )
+
+        # Скачиваем и отправляем конфиг
+        config_content = wg_api.download_peer_config(peer_id)
+        filename = "nikonVPN.conf"
+        await bot.send_document(
+            chat_id=user_id,
+            document=types.BufferedInputFile(
+                file=config_content,
+                filename=filename
+            ),
+            caption="📁 Твоя VPN конфигурация"
+        )
+
+        return True, ""
+    except Exception as e:
+        logger.error(f"Ошибка в create_or_restore_peer_for_user: {e}")
+        return False, "Ошибка при создании/восстановлении доступа"
 
 # Состояния для FSM
 class PeerStates(StatesGroup):
@@ -176,60 +246,41 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
             )
             return
         
-        # Пользователь оплатил доступ, отправляем конфигурацию
+        # Пользователь оплатил доступ, пытаемся отдать конфиг или восстановить при отсутствии
         try:
-            # Получаем конфигурацию пира
-            peer_config = wg_api.download_peer_config(existing_peer['peer_id'])
-            if peer_config:
-                # Отправляем конфигурацию как файл (это создает новое сообщение)
-                config_filename = "nikonVPN.conf"
-                
-                # Проверяем, нужно ли кодировать в байты
-                if isinstance(peer_config, str):
-                    config_bytes = peer_config.encode('utf-8')
-                else:
-                    config_bytes = peer_config
-                
-                await callback_query.message.reply_document(
-                    document=types.BufferedInputFile(
-                        config_bytes,
-                        filename=config_filename
-                    ),
-                    caption="Вот твой файл конфигурации, добавь его в приложение AmneziaWG"
-                )
-                
-                # Возвращаемся к главному меню
-                user_id = callback_query.from_user.id
-                
-                success_text = """
+            peer_exists = wg_api.check_peer_exists(existing_peer['peer_id'])
+            if not peer_exists:
+                ok, err = await create_or_restore_peer_for_user(user_id, username, existing_peer.get('tariff_key'))
+                if not ok:
+                    await callback_query.message.edit_text(
+                        f"❌ {err}\n\nВыбери действие с помощью кнопок ниже:",
+                        reply_markup=create_main_menu_keyboard(user_id)
+                    )
+                    return
+            # Если существует или успешно восстановили — скачиваем
+            peer_config = wg_api.download_peer_config(db.get_peer_by_telegram_id(user_id)['peer_id'])
+            config_filename = "nikonVPN.conf"
+            config_bytes = peer_config if isinstance(peer_config, (bytes, bytearray)) else peer_config.encode('utf-8')
+            await callback_query.message.reply_document(
+                document=types.BufferedInputFile(
+                    config_bytes,
+                    filename=config_filename
+                ),
+                caption="Вот твой файл конфигурации, добавь его в приложение AmneziaWG"
+            )
+            success_text = """
 ✅ Конфигурация отправлена!
-
-Выбери действие с помощью кнопок ниже:
-                """
-                
-                await callback_query.message.edit_text(
-                    success_text,
-                    reply_markup=create_main_menu_keyboard(user_id)
-                )
-            else:
-                error_text = """
-❌ Ошибка при получении конфигурации.
-
-Выбери действие с помощью кнопок ниже:
-                """
-                await callback_query.message.edit_text(
-                    error_text,
-                    reply_markup=create_main_menu_keyboard(user_id)
-                )
-        except Exception as e:
-            logger.error(f"Ошибка при получении конфигурации: {e}")
-            error_text = """
-❌ Ошибка при получении конфигурации.
 
 Выбери действие с помощью кнопок ниже:
             """
             await callback_query.message.edit_text(
-                error_text,
+                success_text,
+                reply_markup=create_main_menu_keyboard(user_id)
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при получении/восстановлении конфигурации: {e}")
+            await callback_query.message.edit_text(
+                "❌ Ошибка при получении конфигурации.",
                 reply_markup=create_main_menu_keyboard(user_id)
             )
     else:
@@ -470,43 +521,11 @@ async def cmd_connect(message: types.Message):
                 await message.reply("❌ Ошибка при получении конфигурации.")
                 return
         else:
-            # Пир не существует на сервере, но есть в базе - создаем новый
             await message.reply("Создаю новый конфиг...")
-            
-            try:
-                # Создаем новый пир с тем же именем
-                peer_result = wg_api.add_peer(existing_peer['peer_name'])
-                
-                if not peer_result or 'id' not in peer_result:
-                    await message.reply("❌ Ошибка при создании нового пира.")
-                    return
-                
-                new_peer_id = peer_result['id']
-                
-                # Создаем новый job с той же датой истечения
-                job_result, new_job_id, new_expire_date = wg_api.create_restrict_job(new_peer_id, existing_peer['expire_date'])
-                
-                # Обновляем информацию в базе данных
-                db.update_peer_info(existing_peer['peer_name'], new_peer_id, new_job_id, new_expire_date)
-                
-                # Скачиваем и отправляем конфигурацию
-                config_content = wg_api.download_peer_config(new_peer_id)
-                filename = "nikonVPN.conf"
-                
-                await bot.send_document(
-                    chat_id=message.chat.id,
-                    document=types.BufferedInputFile(
-                        file=config_content,
-                        filename=filename
-                    ),
-                    caption="📁 Твоя VPN конфигурация"
-                )
-                return
-                
-            except Exception as e:
-                logger.error(f"Ошибка при восстановлении пира: {e}")
-                await message.reply("❌ Ошибка при восстановлении пира.")
-                return
+            ok, err = await create_or_restore_peer_for_user(user_id, username, existing_peer.get('tariff_key'))
+            if not ok:
+                await message.reply(f"❌ {err}")
+            return
     
     # Новый пользователь - нужно оплатить доступ
     payment_info = payment_manager.get_payment_info()
@@ -715,6 +734,45 @@ async def handle_pay_yookassa_disabled_callback(callback_query: types.CallbackQu
         "🔧 Для настройки ЮKassa обратитесь к администратору."
     )
 
+# Повторное создание конфига после успешной оплаты, если первоначально упало
+@dp.callback_query(F.data.startswith('retry_peer_'))
+async def handle_retry_peer_callback(callback_query: types.CallbackQuery):
+    try:
+        parts = callback_query.data.split('_')
+        # retry_peer_{tariff_key}_{user_id}
+        tariff_key = f"{parts[2]}_{parts[3]}" if len(parts) >= 5 else parts[2]
+        passed_user_id = int(parts[-1])
+        if callback_query.from_user.id != passed_user_id:
+            await callback_query.answer("❌ Ошибка: неверный пользователь")
+            return
+        await callback_query.answer()
+
+        user_id = callback_query.from_user.id
+        username = callback_query.from_user.username
+
+        await callback_query.message.edit_text("🔄 Повторяю создание VPN доступа...")
+        ok, err = await create_or_restore_peer_for_user(user_id, username, tariff_key)
+        if ok:
+            await callback_query.message.edit_text(
+                "✅ Доступ создан и конфигурация отправлена!",
+                reply_markup=create_main_menu_keyboard(user_id)
+            )
+        else:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔁 Повторить ещё раз", callback_data=f"retry_peer_{tariff_key}_{user_id}")],
+                [InlineKeyboardButton(text="🆘 Поддержка", url=SUPPORT_URL)]
+            ])
+            await callback_query.message.edit_text(
+                f"❌ {err}\n\nПопробуй ещё раз или обратись в поддержку.",
+                reply_markup=keyboard
+            )
+    except Exception as e:
+        logger.error(f"Ошибка в обработчике retry_peer: {e}")
+        await callback_query.message.edit_text(
+            "❌ Ошибка при повторном создании. Попробуй ещё раз позже.",
+            reply_markup=create_main_menu_keyboard(callback_query.from_user.id)
+        )
+
 # Обработчики платежей
 @dp.pre_checkout_query()
 async def process_pre_checkout_query(pre_checkout_query):
@@ -753,7 +811,15 @@ async def process_successful_payment(message: types.Message):
     
     payment_method = 'stars'
     
-    # Обновляем статус оплаты в базе данных
+    # Логируем платеж и обновляем статус оплаты
+    try:
+        payment_id = getattr(successful_payment, 'telegram_payment_charge_id', None) or getattr(successful_payment, 'provider_payment_charge_id', None) or f"stars_{user_id}_{tariff_key}"
+        db.add_payment(payment_id=payment_id, user_id=user_id, amount=amount_paid, payment_method='stars', tariff_key=tariff_key, metadata={'source': 'telegram_stars'})
+        db.update_payment_status_by_id(payment_id, 'succeeded')
+    except Exception as e:
+        logger.warning(f"Не удалось зафиксировать платеж Stars в БД: {e}")
+
+    # Обновляем статус оплаты для пользователя
     db.update_payment_status(user_id, 'paid', amount_paid, payment_method, tariff_key)
     
     # Определяем период доступа на основе тарифа
@@ -800,61 +866,28 @@ async def process_successful_payment(message: types.Message):
         # Создаем новый пир для пользователя
         try:
             await message.reply("🔄 Создаю VPN доступ...")
-            
-            # Генерируем имя пира
-            peer_name = generate_peer_name(username, user_id)
-            
-            # Создаем пира
-            peer_result = wg_api.add_peer(peer_name)
-            
-            if not peer_result or 'id' not in peer_result:
-                await message.reply("❌ Ошибка при создании пира. Обратитесь в поддержку.")
+            ok, err = await create_or_restore_peer_for_user(user_id, username, tariff_key)
+            if not ok:
+                # Предлагаем повторить и поддержку
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔁 Повторить создание", callback_data=f"retry_peer_{tariff_key}_{user_id}")],
+                    [InlineKeyboardButton(text="🆘 Поддержка", url=SUPPORT_URL)]
+                ])
+                await message.reply(
+                    "❌ Ошибка при создании VPN доступа. Ты можешь попробовать ещё раз или обратиться в поддержку.",
+                    reply_markup=keyboard
+                )
                 return
-            
-            peer_id = peer_result['id']
-            
-            # Создаем job для ограничения через определенное количество дней
-            from datetime import datetime, timedelta
-            expire_date = (datetime.now() + timedelta(days=access_days)).strftime('%Y-%m-%d %H:%M:%S')
-            job_result, job_id, expire_date = wg_api.create_restrict_job(peer_id, expire_date)
-            
-            # Сохраняем в базу данных с оплаченным статусом
-            success = db.add_peer(
-                peer_name=peer_name,
-                peer_id=peer_id,
-                job_id=job_id,
-                telegram_user_id=user_id,
-                telegram_username=username,
-                expire_date=expire_date,
-                payment_status='paid',
-                stars_paid=amount_paid if payment_method == 'stars' else 0,
-                tariff_key=tariff_key,
-                payment_method=payment_method,
-                rub_paid=amount_paid if payment_method == 'yookassa' else 0
-            )
-            
-            if not success:
-                await message.reply("❌ Ошибка при сохранении данных. Обратитесь в поддержку.")
-                return
-            
-            # Скачиваем и отправляем конфигурацию
-            config_content = wg_api.download_peer_config(peer_id)
-            filename = "nikonVPN.conf"
-            
-            await bot.send_document(
-                chat_id=message.chat.id,
-                document=types.BufferedInputFile(
-                    file=config_content,
-                    filename=filename
-                ),
-                caption=f"✅ Платеж успешно обработан!\n💳 Способ оплаты: ⭐ Telegram Stars\n🎉 VPN доступ на {access_days} дней!\n📁 Ваша VPN конфигурация готова!"
-            )
-            
-            # Не отправляем дополнительное сообщение после создания нового доступа
-            
         except Exception as e:
             logger.error(f"Ошибка при создании пира после оплаты: {e}")
-            await message.reply("❌ Ошибка при создании VPN доступа. Обратитесь в поддержку.")
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔁 Повторить создание", callback_data=f"retry_peer_{tariff_key}_{user_id}")],
+                [InlineKeyboardButton(text="🆘 Поддержка", url=SUPPORT_URL)]
+            ])
+            await message.reply(
+                "❌ Ошибка при создании VPN доступа. Ты можешь попробовать ещё раз или обратиться в поддержку.",
+                reply_markup=keyboard
+            )
 
 
 # Обработчик неизвестных команд
@@ -888,6 +921,7 @@ async def check_expired_peers():
                         text=f"⚠️ Твой VPN доступ истек!\n\n"
                              f"Используй /extend для продления доступа на 30 дней."
                     )
+                    db.mark_expired_notification_sent(peer['telegram_user_id'])
                 except TelegramAPIError:
                     logger.warning(f"Не удалось отправить уведомление об истечении пользователю {peer['telegram_user_id']}")
             
