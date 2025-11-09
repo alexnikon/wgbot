@@ -30,24 +30,33 @@ DOMAIN = os.getenv('DOMAIN')
 SUPPORT_URL = os.getenv('SUPPORT_URL', 'https://t.me/straycat0789')
 
 # Tariff Configuration (env-driven with sensible defaults)
-TARIFF_14_DAYS_STARS = int(os.getenv('TARIFF_14_DAYS_STARS', 100))
-TARIFF_14_DAYS_RUB = int(os.getenv('TARIFF_14_DAYS_RUB', 150))
-TARIFF_30_DAYS_STARS = int(os.getenv('TARIFF_30_DAYS_STARS', 200))
-TARIFF_30_DAYS_RUB = int(os.getenv('TARIFF_30_DAYS_RUB', 300))
-
-TARIFFS = {
-    '14_days': {
-        'days': 14,
-        'stars_price': TARIFF_14_DAYS_STARS,
-        'rub_price': TARIFF_14_DAYS_RUB,
-        'name': '14 дней',
-        'description': 'Доступ на 2 недели'
-    },
-    '30_days': {
-        'days': 30,
-        'stars_price': TARIFF_30_DAYS_STARS,
-        'rub_price': TARIFF_30_DAYS_RUB,
-        'name': '30 дней',
-        'description': 'Доступ на месяц'
+def get_tariffs():
+    """Получает тарифы из переменных окружения (динамически перезагружаемые)"""
+    # Перезагружаем переменные окружения для получения актуальных значений
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+    
+    tariff_14_days_stars = int(os.getenv('TARIFF_14_DAYS_STARS', 100))
+    tariff_14_days_rub = int(os.getenv('TARIFF_14_DAYS_RUB', 150))
+    tariff_30_days_stars = int(os.getenv('TARIFF_30_DAYS_STARS', 200))
+    tariff_30_days_rub = int(os.getenv('TARIFF_30_DAYS_RUB', 300))
+    
+    return {
+        '14_days': {
+            'days': 14,
+            'stars_price': tariff_14_days_stars,
+            'rub_price': tariff_14_days_rub,
+            'name': '14 дней',
+            'description': 'Доступ на 2 недели'
+        },
+        '30_days': {
+            'days': 30,
+            'stars_price': tariff_30_days_stars,
+            'rub_price': tariff_30_days_rub,
+            'name': '30 дней',
+            'description': 'Доступ на месяц'
+        }
     }
-}
+
+# Инициализируем тарифы при импорте
+TARIFFS = get_tariffs()

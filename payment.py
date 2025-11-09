@@ -3,7 +3,7 @@ from typing import Optional, Dict, Any
 from aiogram import Bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
 from aiogram.exceptions import TelegramAPIError
-from config import TARIFFS, WEBHOOK_URL, DOMAIN
+from config import get_tariffs, WEBHOOK_URL, DOMAIN
 from yookassa_client import YooKassaClient
 from database import Database
 
@@ -14,11 +14,15 @@ class PaymentManager:
     
     def __init__(self, bot: Bot):
         self.bot = bot
-        self.tariffs = TARIFFS  # Конфигурация тарифов
         self.yookassa_client = YooKassaClient()
         self.db = Database()
         self.webhook_url = WEBHOOK_URL
         self.domain = DOMAIN
+    
+    @property
+    def tariffs(self):
+        """Получает актуальные тарифы из конфигурации (динамически перезагружаемые)"""
+        return get_tariffs()
     
     async def create_payment_selection_keyboard(self, user_id: int) -> InlineKeyboardMarkup:
         """

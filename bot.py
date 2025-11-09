@@ -116,37 +116,64 @@ class PeerStates(StatesGroup):
 def is_access_active(existing_peer: dict) -> bool:
     """Проверяет, есть ли у пользователя активный (оплаченный и не истекший) доступ"""
     if not existing_peer:
+        logger.debug("is_access_active: нет existing_peer")
         return False
     
-    if existing_peer.get('payment_status') != 'paid':
+    payment_status = existing_peer.get('payment_status')
+    if payment_status != 'paid':
+        logger.debug(f"is_access_active: payment_status={payment_status}, не 'paid'")
         return False
     
     # Проверяем срок действия
     expire_date_str = existing_peer.get('expire_date')
     if not expire_date_str:
+        logger.debug("is_access_active: нет expire_date")
         return False
     
     try:
         from datetime import datetime
-        expire_date = datetime.strptime(expire_date_str, "%Y-%m-%d %H:%M:%S")
+        # Пробуем разные форматы даты
+        try:
+            expire_date = datetime.strptime(expire_date_str, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            # Пробуем формат без времени
+            try:
+                expire_date = datetime.strptime(expire_date_str, "%Y-%m-%d")
+            except ValueError:
+                logger.error(f"is_access_active: неверный формат даты: {expire_date_str}")
+                return False
+        
         now = datetime.now()
-        return expire_date > now
-    except (ValueError, TypeError):
+        is_active = expire_date > now
+        logger.debug(f"is_access_active: expire_date={expire_date_str}, now={now}, is_active={is_active}")
+        return is_active
+    except (ValueError, TypeError) as e:
+        logger.error(f"is_access_active: ошибка при парсинге даты {expire_date_str}: {e}")
         return False
 
 # Функция для создания главного меню с inline кнопками
 def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     """Создает главное меню с inline кнопками"""
     # Проверяем, есть ли у пользователя активный (оплаченный и не истекший) доступ
+    # ВАЖНО: всегда получаем свежие данные из БД при создании клавиатуры
     existing_peer = db.get_peer_by_telegram_id(user_id)
     has_active_access = is_access_active(existing_peer)
+    
+    # Логируем для отладки
+    if existing_peer:
+        logger.debug(f"create_main_menu_keyboard user_id={user_id}, payment_status={existing_peer.get('payment_status')}, expire_date={existing_peer.get('expire_date')}, has_active_access={has_active_access}")
+    else:
+        logger.debug(f"create_main_menu_keyboard user_id={user_id}, existing_peer=None, has_active_access={has_active_access}")
+    
+    button_text = "✅ Доступ приобретен" if has_active_access else "💎 Купить доступ"
+    button_callback = "already_paid" if has_active_access else "pay"
     
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="💎 Купить доступ" if not has_active_access else "✅ Доступ приобретен",
-                    callback_data="pay" if not has_active_access else "already_paid"
+                    text=button_text,
+                    callback_data=button_callback
                 )
             ],
             [
@@ -225,13 +252,23 @@ async def handle_pay_callback(callback_query: types.CallbackQuery):
 async def handle_already_paid_callback(callback_query: types.CallbackQuery):
     """Обработчик кнопки 'Доступ приобретен'"""
     user_id = callback_query.from_user.id
+    # ВАЖНО: получаем свежие данные из БД
     existing_peer = db.get_peer_by_telegram_id(user_id)
     
-    # Проверяем, активен ли доступ
+    # Проверяем, активен ли доступ (проверяем заново при каждом нажатии)
     if not is_access_active(existing_peer):
-        # Доступ истек, но был оплачен
+        # Доступ истек, но был оплачен - обновляем клавиатуру на "Купить доступ"
         expire_date_str = existing_peer.get('expire_date', 'Неизвестно') if existing_peer else 'Неизвестно'
         await callback_query.answer("⚠️ Твой VPN доступ истек!")
+        
+        # Получаем актуальные тарифы
+        payment_info = payment_manager.get_payment_info()
+        tariffs = payment_info['tariffs']
+        tariff_text = ""
+        for tariff_key, tariff_data in tariffs.items():
+            tariff_text += f"⭐ {tariff_data['name']} - {tariff_data['stars_price']} Stars\n"
+            tariff_text += f"💳 {tariff_data['name']} - {tariff_data['rub_price']} руб.\n\n"
+        
         expired_text = f"""
 ⚠️ Твой VPN доступ истек!
 
@@ -239,8 +276,10 @@ async def handle_already_paid_callback(callback_query: types.CallbackQuery):
 
 💎 Для продолжения использования VPN необходимо продлить доступ.
 
-Выбери действие с помощью кнопок ниже:
+💎 Доступные тарифы:
+{tariff_text}Выбери действие с помощью кнопок ниже:
         """
+        # Обновляем сообщение с новой клавиатурой, где кнопка будет "Купить доступ"
         await callback_query.message.edit_text(
             expired_text,
             reply_markup=create_main_menu_keyboard(user_id)
@@ -258,6 +297,7 @@ async def handle_already_paid_callback(callback_query: types.CallbackQuery):
 Используй кнопки ниже для управления доступом:
     """
     
+    # Обновляем сообщение с актуальной клавиатурой
     await callback_query.message.edit_text(
         already_paid_text,
         reply_markup=create_main_menu_keyboard(user_id)
@@ -306,8 +346,27 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
         
         # Пользователь имеет активный доступ, пытаемся отдать конфиг или восстановить при отсутствии
         try:
-            peer_exists = wg_api.check_peer_exists(existing_peer['peer_id'])
-            if not peer_exists:
+            # Сначала пытаемся проверить существование пира
+            peer_exists = False
+            try:
+                peer_exists = wg_api.check_peer_exists(existing_peer['peer_id'])
+            except Exception as e:
+                logger.warning(f"Не удалось проверить существование пира {existing_peer['peer_id']}: {e}, попробуем скачать")
+            
+            # Пытаемся скачать конфиг
+            config_downloaded = False
+            peer_config = None
+            if peer_exists:
+                try:
+                    peer_config = wg_api.download_peer_config(existing_peer['peer_id'])
+                    config_downloaded = True
+                except Exception as e:
+                    logger.warning(f"Не удалось скачать конфиг существующего пира: {e}, попробуем создать новый")
+                    config_downloaded = False
+            
+            # Если не удалось скачать конфиг (пир не существует или ошибка), создаем новый
+            if not config_downloaded or not peer_config:
+                logger.info(f"Создаю новый пир для пользователя {user_id}, так как существующий недоступен")
                 ok, err = await create_or_restore_peer_for_user(user_id, username, existing_peer.get('tariff_key'))
                 if not ok:
                     await callback_query.message.edit_text(
@@ -315,8 +374,26 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                         reply_markup=create_main_menu_keyboard(user_id)
                     )
                     return
-            # Если существует или успешно восстановили — скачиваем
-            peer_config = wg_api.download_peer_config(db.get_peer_by_telegram_id(user_id)['peer_id'])
+                # После создания нового пира, получаем обновленные данные и скачиваем конфиг
+                updated_peer = db.get_peer_by_telegram_id(user_id)
+                if updated_peer:
+                    try:
+                        peer_config = wg_api.download_peer_config(updated_peer['peer_id'])
+                    except Exception as e:
+                        logger.error(f"Не удалось скачать конфиг после создания нового пира: {e}")
+                        await callback_query.message.edit_text(
+                            f"❌ Ошибка при получении конфигурации: {e}\n\nВыбери действие с помощью кнопок ниже:",
+                            reply_markup=create_main_menu_keyboard(user_id)
+                        )
+                        return
+                else:
+                    await callback_query.message.edit_text(
+                        "❌ Ошибка: не удалось получить данные о созданном пире.\n\nВыбери действие с помощью кнопок ниже:",
+                        reply_markup=create_main_menu_keyboard(user_id)
+                    )
+                    return
+            
+            # Отправляем конфиг
             config_filename = "nikonVPN.conf"
             config_bytes = peer_config if isinstance(peer_config, (bytes, bytearray)) else peer_config.encode('utf-8')
             await callback_query.message.reply_document(
@@ -336,11 +413,43 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                 reply_markup=create_main_menu_keyboard(user_id)
             )
         except Exception as e:
-            logger.error(f"Ошибка при получении/восстановлении конфигурации: {e}")
-            await callback_query.message.edit_text(
-                "❌ Ошибка при получении конфигурации.",
-                reply_markup=create_main_menu_keyboard(user_id)
-            )
+            logger.error(f"Ошибка при получении/восстановлении конфигурации: {e}", exc_info=True)
+            # При любой ошибке пытаемся создать новый пир (только если доступ оплачен)
+            try:
+                logger.info(f"Попытка создать новый пир после ошибки для пользователя {user_id}")
+                ok, err = await create_or_restore_peer_for_user(user_id, username, existing_peer.get('tariff_key'))
+                if ok:
+                    # Если удалось создать, пытаемся скачать конфиг
+                    updated_peer = db.get_peer_by_telegram_id(user_id)
+                    if updated_peer:
+                        try:
+                            peer_config = wg_api.download_peer_config(updated_peer['peer_id'])
+                            config_filename = "nikonVPN.conf"
+                            config_bytes = peer_config if isinstance(peer_config, (bytes, bytearray)) else peer_config.encode('utf-8')
+                            await callback_query.message.reply_document(
+                                document=types.BufferedInputFile(
+                                    config_bytes,
+                                    filename=config_filename
+                                ),
+                                caption="Вот твой файл конфигурации, добавь его в приложение AmneziaWG"
+                            )
+                            await callback_query.message.edit_text(
+                                "✅ Конфигурация отправлена!\n\nВыбери действие с помощью кнопок ниже:",
+                                reply_markup=create_main_menu_keyboard(user_id)
+                            )
+                            return
+                        except Exception as e2:
+                            logger.error(f"Ошибка при скачивании конфига после создания нового пира: {e2}")
+                await callback_query.message.edit_text(
+                    f"❌ Ошибка при получении конфигурации: {err if not ok else 'Не удалось скачать конфиг'}.\n\nВыбери действие с помощью кнопок ниже:",
+                    reply_markup=create_main_menu_keyboard(user_id)
+                )
+            except Exception as e2:
+                logger.error(f"Критическая ошибка при создании нового пира: {e2}")
+                await callback_query.message.edit_text(
+                    "❌ Ошибка при получении конфигурации. Попробуй позже или обратись в поддержку.",
+                    reply_markup=create_main_menu_keyboard(user_id)
+                )
     else:
         # Пользователь не имеет пира
         error_text = """
@@ -602,35 +711,52 @@ async def cmd_connect(message: types.Message):
             return
         
         # Пользователь имеет активный доступ
-        # Проверяем, существует ли пир на сервере
-        peer_exists = wg_api.check_peer_exists(existing_peer['peer_id'])
-        
-        if peer_exists:
-            # Если пир существует, отправляем его конфигурацию
+        # Проверяем, существует ли пир на сервере и можем ли скачать конфиг
+        try:
+            peer_exists = False
             try:
-                await message.reply("Скачиваю конфиг...")
-                config_content = wg_api.download_peer_config(existing_peer['peer_id'])
-                filename = "nikonVPN.conf"
-                
-                await bot.send_document(
-                    chat_id=message.chat.id,
-                    document=types.BufferedInputFile(
-                        file=config_content,
-                        filename=filename
-                    ),
-                    caption="📁 Твой файл конфигурации"
-                )
-                return
+                peer_exists = wg_api.check_peer_exists(existing_peer['peer_id'])
             except Exception as e:
-                logger.error(f"Ошибка при скачивании существующей конфигурации: {e}")
-                await message.reply("❌ Ошибка при получении конфигурации.")
+                logger.warning(f"Не удалось проверить существование пира: {e}, попробуем скачать")
+            
+            config_downloaded = False
+            if peer_exists:
+                try:
+                    await message.reply("Скачиваю конфиг...")
+                    config_content = wg_api.download_peer_config(existing_peer['peer_id'])
+                    filename = "nikonVPN.conf"
+                    
+                    await bot.send_document(
+                        chat_id=message.chat.id,
+                        document=types.BufferedInputFile(
+                            file=config_content,
+                            filename=filename
+                        ),
+                        caption="📁 Твой файл конфигурации"
+                    )
+                    return
+                except Exception as e:
+                    logger.warning(f"Не удалось скачать конфиг существующего пира: {e}, попробуем создать новый")
+                    config_downloaded = False
+            
+            # Если не удалось скачать конфиг, создаем новый пир
+            if not config_downloaded:
+                await message.reply("Создаю новый конфиг...")
+                ok, err = await create_or_restore_peer_for_user(user_id, username, existing_peer.get('tariff_key'))
+                if not ok:
+                    await message.reply(f"❌ {err}")
                 return
-        else:
-            await message.reply("Создаю новый конфиг...")
-            ok, err = await create_or_restore_peer_for_user(user_id, username, existing_peer.get('tariff_key'))
-            if not ok:
-                await message.reply(f"❌ {err}")
-            return
+        except Exception as e:
+            logger.error(f"Ошибка при получении конфига в /connect: {e}", exc_info=True)
+            # Пытаемся создать новый пир при любой ошибке
+            try:
+                await message.reply("Попытка создать новый конфиг...")
+                ok, err = await create_or_restore_peer_for_user(user_id, username, existing_peer.get('tariff_key'))
+                if not ok:
+                    await message.reply(f"❌ {err}")
+            except Exception as e2:
+                logger.error(f"Критическая ошибка при создании нового пира: {e2}")
+                await message.reply("❌ Ошибка при получении конфигурации. Попробуй позже или обратись в поддержку.")
     
     # Новый пользователь - нужно оплатить доступ
     payment_info = payment_manager.get_payment_info()
