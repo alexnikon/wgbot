@@ -182,35 +182,43 @@ class YooKassaClient:
             data: Распарсенные данные webhook
             
         Returns:
-            True если структура валидна
+            True если структура валидна или может быть обработана
         """
         try:
-            # Проверяем обязательные поля
-            required_fields = ['type', 'event', 'object']
-            for field in required_fields:
-                if field not in data:
-                    logger.error(f"Отсутствует обязательное поле '{field}' в webhook")
-                    return False
+            logger.debug(f"Валидация webhook структуры: ключи={list(data.keys())}")
             
-            # Проверяем тип уведомления
-            if data.get('type') != 'notification':
-                logger.error(f"Неверный тип уведомления: {data.get('type')}")
+            # Проверяем наличие type (может быть 'notification' или отсутствовать)
+            notification_type = data.get('type', '')
+            
+            # Если type есть, проверяем что это 'notification'
+            if notification_type and notification_type != 'notification':
+                logger.warning(f"Неожиданный тип уведомления: {notification_type}, но продолжаем обработку")
+            
+            # Проверяем наличие event или event_type
+            event = data.get('event') or data.get('event_type', '')
+            if not event:
+                # Если нет event, возможно это прямой объект платежа
+                if 'id' in data and 'status' in data:
+                    logger.info("Webhook содержит прямой объект платежа без обертки notification")
+                    return True
+                logger.error(f"Отсутствует поле 'event' в webhook. Доступные ключи: {list(data.keys())}")
                 return False
             
-            # Проверяем, что event является строкой
-            if not isinstance(data.get('event'), str):
-                logger.error("Поле 'event' должно быть строкой")
+            # Проверяем наличие object или payment
+            event_object = data.get('object') or data.get('payment', data)
+            if not event_object or not isinstance(event_object, dict):
+                # Если object отсутствует, но есть прямые данные платежа в корне
+                if 'id' in data and 'status' in data:
+                    logger.info("Webhook содержит данные платежа в корне объекта")
+                    return True
+                logger.error(f"Отсутствует или неверный параметр 'object' в webhook. Тип: {type(event_object)}")
                 return False
             
-            # Проверяем, что object является словарем
-            if not isinstance(data.get('object'), dict):
-                logger.error("Поле 'object' должно быть объектом")
-                return False
-            
+            logger.debug(f"Webhook структура валидна: type={notification_type}, event={event}")
             return True
             
         except Exception as e:
-            logger.error(f"Ошибка валидации структуры webhook: {e}")
+            logger.error(f"Ошибка валидации структуры webhook: {e}", exc_info=True)
             return False
     
     def is_payment_succeeded(self, payment_data: Dict[str, Any]) -> bool:
