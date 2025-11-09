@@ -112,19 +112,41 @@ async def create_or_restore_peer_for_user(user_id: int, username: str | None, ta
 class PeerStates(StatesGroup):
     waiting_for_peer_name = State()
 
+# Вспомогательная функция для проверки активного доступа
+def is_access_active(existing_peer: dict) -> bool:
+    """Проверяет, есть ли у пользователя активный (оплаченный и не истекший) доступ"""
+    if not existing_peer:
+        return False
+    
+    if existing_peer.get('payment_status') != 'paid':
+        return False
+    
+    # Проверяем срок действия
+    expire_date_str = existing_peer.get('expire_date')
+    if not expire_date_str:
+        return False
+    
+    try:
+        from datetime import datetime
+        expire_date = datetime.strptime(expire_date_str, "%Y-%m-%d %H:%M:%S")
+        now = datetime.now()
+        return expire_date > now
+    except (ValueError, TypeError):
+        return False
+
 # Функция для создания главного меню с inline кнопками
 def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     """Создает главное меню с inline кнопками"""
-    # Проверяем, есть ли у пользователя оплаченный доступ
+    # Проверяем, есть ли у пользователя активный (оплаченный и не истекший) доступ
     existing_peer = db.get_peer_by_telegram_id(user_id)
-    has_paid_access = existing_peer and existing_peer.get('payment_status') == 'paid'
+    has_active_access = is_access_active(existing_peer)
     
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="💎 Купить доступ" if not has_paid_access else "✅ Доступ приобретен",
-                    callback_data="pay" if not has_paid_access else "already_paid"
+                    text="💎 Купить доступ" if not has_active_access else "✅ Доступ приобретен",
+                    callback_data="pay" if not has_active_access else "already_paid"
                 )
             ],
             [
@@ -202,10 +224,32 @@ async def handle_pay_callback(callback_query: types.CallbackQuery):
 @dp.callback_query(F.data == "already_paid")
 async def handle_already_paid_callback(callback_query: types.CallbackQuery):
     """Обработчик кнопки 'Доступ приобретен'"""
+    user_id = callback_query.from_user.id
+    existing_peer = db.get_peer_by_telegram_id(user_id)
+    
+    # Проверяем, активен ли доступ
+    if not is_access_active(existing_peer):
+        # Доступ истек, но был оплачен
+        expire_date_str = existing_peer.get('expire_date', 'Неизвестно') if existing_peer else 'Неизвестно'
+        await callback_query.answer("⚠️ Твой VPN доступ истек!")
+        expired_text = f"""
+⚠️ Твой VPN доступ истек!
+
+📅 Дата истечения: {expire_date_str}
+
+💎 Для продолжения использования VPN необходимо продлить доступ.
+
+Выбери действие с помощью кнопок ниже:
+        """
+        await callback_query.message.edit_text(
+            expired_text,
+            reply_markup=create_main_menu_keyboard(user_id)
+        )
+        return
+    
     await callback_query.answer("✅ У тебя уже есть доступ!")
     
     # Обновляем сообщение с информацией о доступе
-    user_id = callback_query.from_user.id
     payment_info = payment_manager.get_payment_info()
     
     already_paid_text = """
@@ -230,23 +274,37 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
     # Проверяем, есть ли уже активный пир у пользователя
     existing_peer = db.get_peer_by_telegram_id(user_id)
     if existing_peer:
-        # Проверяем статус оплаты
-        if existing_peer.get('payment_status') != 'paid':
-            # Пользователь не оплатил доступ
-            error_text = """
+        # Проверяем, активен ли доступ (оплачен и не истек)
+        if not is_access_active(existing_peer):
+            # Доступ истек или не оплачен
+            if existing_peer.get('payment_status') == 'paid':
+                # Доступ был оплачен, но истек
+                expire_date_str = existing_peer.get('expire_date', 'Неизвестно')
+                error_text = f"""
+⚠️ Твой VPN доступ истек!
+
+📅 Дата истечения: {expire_date_str}
+
+💎 Для получения VPN конфигурации необходимо продлить доступ.
+
+Выбери действие с помощью кнопок ниже:
+                """
+            else:
+                # Доступ не оплачен
+                error_text = """
 ❌ У тебя нет активного доступа.
 
 💎 Для получения VPN конфигурации необходимо оплатить доступ.
 
 Выбери действие с помощью кнопок ниже:
-            """
+                """
             await callback_query.message.edit_text(
                 error_text,
                 reply_markup=create_main_menu_keyboard(user_id)
             )
             return
         
-        # Пользователь оплатил доступ, пытаемся отдать конфиг или восстановить при отсутствии
+        # Пользователь имеет активный доступ, пытаемся отдать конфиг или восстановить при отсутствии
         try:
             peer_exists = wg_api.check_peer_exists(existing_peer['peer_id'])
             if not peer_exists:
@@ -363,41 +421,73 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
         )
         return
     
-    # Проверяем статус оплаты
-    if existing_peer.get('payment_status') != 'paid':
-        error_text = """
-❌ У тебя нет оплаченного доступа.
-
-💎 Для получения доступа необходимо его оплатить.
-
-Выбери действие с помощью кнопок ниже:
-        """
-        await callback_query.message.edit_text(
-            error_text,
-            reply_markup=create_main_menu_keyboard(user_id)
-        )
-        return
-    
     # Получаем информацию о пире из базы данных
     try:
-        # Создаем простую информацию о пире из данных базы
-        peer_info = {
-            'name': existing_peer['peer_name'],
-            'id': existing_peer['peer_id'],
-            'expire_date': existing_peer.get('expire_date', 'Неизвестно'),
-            'created_at': existing_peer.get('created_at', 'Неизвестно'),
-            'payment_status': existing_peer.get('payment_status', 'Неизвестно')
-        }
+        expire_date_str = existing_peer.get('expire_date', 'Неизвестно')
+        created_at_str = existing_peer.get('created_at', 'Неизвестно')
+        
+        # Проверяем, истек ли доступ
+        from datetime import datetime
+        is_expired = False
+        if expire_date_str and expire_date_str != 'Неизвестно':
+            try:
+                expire_date = datetime.strptime(expire_date_str, "%Y-%m-%d %H:%M:%S")
+                now = datetime.now()
+                is_expired = expire_date <= now
+            except (ValueError, TypeError):
+                pass
         
         # Форматируем информацию о пире
-        status_text = f"""
+        if is_expired:
+            status_text = f"""
 📊 Статус доступа:
 
-📅 Доступ приобретен: {peer_info['created_at']}
-⏰ Доступ закончится: {peer_info['expire_date']}
+📅 Доступ приобретен: {created_at_str}
+⏰ Доступ закончился: {expire_date_str}
+
+⚠️ Твой VPN доступ истек!
+
+💎 Для продолжения использования VPN необходимо продлить доступ.
 
 Выбери действие с помощью кнопок ниже:
-        """
+            """
+        else:
+            # Доступ активен, рассчитываем оставшееся время
+            try:
+                expire_date = datetime.strptime(expire_date_str, "%Y-%m-%d %H:%M:%S")
+                now = datetime.now()
+                time_left = expire_date - now
+                days_left = time_left.days
+                hours_left = time_left.seconds // 3600
+                minutes_left = (time_left.seconds % 3600) // 60
+                
+                status_text = f"""
+📊 Статус доступа:
+
+📅 Доступ приобретен: {created_at_str}
+⏰ Доступ закончится: {expire_date_str}
+                """
+                
+                if days_left > 0:
+                    status_text += f"\n⏰ Осталось: {days_left} дн. {hours_left} ч. {minutes_left} мин."
+                elif hours_left > 0:
+                    status_text += f"\n⏰ Осталось: {hours_left} ч. {minutes_left} мин."
+                else:
+                    status_text += f"\n⏰ Осталось: {minutes_left} мин."
+                
+                if days_left <= 3:
+                    status_text += "\n\n⚠️ Доступ истекает скоро! Используй /extend для продления."
+                
+                status_text += "\n\nВыбери действие с помощью кнопок ниже:"
+            except (ValueError, TypeError):
+                status_text = f"""
+📊 Статус доступа:
+
+📅 Доступ приобретен: {created_at_str}
+⏰ Доступ закончится: {expire_date_str}
+
+Выбери действие с помощью кнопок ниже:
+                """
         
         await callback_query.message.edit_text(
             status_text,
@@ -482,21 +572,36 @@ async def cmd_connect(message: types.Message):
     # Проверяем, есть ли уже активный пир у пользователя
     existing_peer = db.get_peer_by_telegram_id(user_id)
     if existing_peer:
-        # Проверяем статус оплаты
-        if existing_peer.get('payment_status') != 'paid':
-            # Пользователь не оплатил доступ
+        # Проверяем, активен ли доступ (оплачен и не истек)
+        if not is_access_active(existing_peer):
+            # Доступ истек или не оплачен
             payment_info = payment_manager.get_payment_info()
-            await message.reply(
-                f"❌ Доступ не оплачен!\n\n"
-                f"💎 Стоимость за {payment_info['period']}:\n"
-                f"⭐ Telegram Stars: {payment_info['stars_price']} Stars\n"
-                f"💳 Банковская карта: {payment_info['rub_price']} руб.\n\n"
-                f"Для получения конфигурации необходимо оплатить доступ."
-            )
+            if existing_peer.get('payment_status') == 'paid':
+                # Доступ был оплачен, но истек
+                expire_date_str = existing_peer.get('expire_date', 'Неизвестно')
+                await message.reply(
+                    f"⚠️ Твой VPN доступ истек!\n\n"
+                    f"📅 Дата истечения: {expire_date_str}\n\n"
+                    f"💎 Для получения конфигурации необходимо продлить доступ.\n\n"
+                    f"Стоимость за {payment_info['period']}:\n"
+                    f"⭐ Telegram Stars: {payment_info['stars_price']} Stars\n"
+                    f"💳 Банковская карта: {payment_info['rub_price']} руб."
+                )
+            else:
+                # Доступ не оплачен
+                await message.reply(
+                    f"❌ Доступ не оплачен!\n\n"
+                    f"💎 Стоимость за {payment_info['period']}:\n"
+                    f"⭐ Telegram Stars: {payment_info['stars_price']} Stars\n"
+                    f"💳 Банковская карта: {payment_info['rub_price']} руб.\n\n"
+                    f"Для получения конфигурации необходимо оплатить доступ."
+                )
             
             # Отправляем выбор способа оплаты
             await payment_manager.send_payment_selection(message.chat.id, user_id)
             return
+        
+        # Пользователь имеет активный доступ
         # Проверяем, существует ли пир на сервере
         peer_exists = wg_api.check_peer_exists(existing_peer['peer_id'])
         
