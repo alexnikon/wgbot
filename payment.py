@@ -142,6 +142,8 @@ class PaymentManager:
                 'description': f'VPN доступ на {tariff_data["name"]}'
             }
             
+            logger.info(f"Создание платежа ЮKassa для пользователя {user_id}, тариф {tariff_key}, сумма {amount} копеек, метаданные: {metadata}")
+            
             # Создаем платеж в ЮKassa
             payment_data = await self.yookassa_client.create_payment(
                 amount=amount,
@@ -150,6 +152,9 @@ class PaymentManager:
                 return_url=return_url,
                 metadata=metadata
             )
+            
+            if payment_data:
+                logger.info(f"Платеж создан: ID={payment_data.get('id')}, статус={payment_data.get('status')}, метаданные в ответе={payment_data.get('metadata', {})}")
             
             if not payment_data:
                 logger.error("Не удалось создать платеж в ЮKassa")

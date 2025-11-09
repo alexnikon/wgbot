@@ -357,6 +357,17 @@ async def webhook_health_check():
     """Проверка здоровья webhook endpoint"""
     return {"status": "webhook_healthy", "endpoint": "/webhook/yookassa"}
 
+@app.get("/webhook/yookassa/test")
+async def webhook_test():
+    """Тестовый endpoint для проверки webhook"""
+    return {
+        "status": "ok",
+        "message": "Webhook endpoint доступен",
+        "endpoint": "/webhook/yookassa",
+        "method": "POST",
+        "expected_events": ["payment.succeeded", "payment.canceled", "payment.waiting_for_capture", "refund.succeeded"]
+    }
+
 @app.post("/webhook/yookassa")
 async def yookassa_webhook(request: Request):
     """Обработчик webhook от ЮKassa"""
