@@ -15,8 +15,7 @@ services:
         condition: service_healthy
       webhook:
         condition: service_healthy
-    networks:
-      - wgbot-network
+    network_mode: host
 
   wgbot:
     build: .
@@ -37,8 +36,7 @@ services:
     volumes:
       - ./wgbot-data:/app/data
       - ./wgbot-logs:/app/logs
-    networks:
-      - wgbot-network
+    network_mode: host
     healthcheck:
       test:
         [
@@ -70,21 +68,11 @@ services:
     volumes:
       - ./wgbot-data:/app/data
       - ./wgbot-logs:/app/logs
-    networks:
-      - wgbot-network
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import requests; requests.get('http://localhost:8001/health')",
-        ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-
-networks:
-  wgbot-network:
-    external: true
+    network_mode: host
+    #healthcheck:
+    #test:
+    #["CMD","python","-c", "import requests; requests.get('http://localhost:8001/health')",]
+    #interval: 30s
+    #timeout: 10s
+    #retries: 3
+    #start_period: 30s
