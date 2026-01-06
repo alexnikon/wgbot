@@ -10,8 +10,8 @@ services:
     depends_on:
       wgbot:
         condition: service_healthy
-      webhook:
-        condition: service_healthy
+      #webhook:
+      #condition: service_healthy
     network_mode: host
 
   wgbot:
