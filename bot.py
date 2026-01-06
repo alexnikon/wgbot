@@ -111,7 +111,7 @@ async def create_or_restore_peer_for_user(
 
         # Скачиваем и отправляем конфиг
         config_content = wg_api.download_peer_config(peer_id)
-        filename = "vpnbox.conf"
+        filename = "nikonVPN.conf"
         await bot.send_document(
             chat_id=user_id,
             document=types.BufferedInputFile(file=config_content, filename=filename),
@@ -432,7 +432,7 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                     return
 
             # Отправляем конфиг
-            config_filename = "vpnbox.conf"
+            config_filename = "nikonVPN.conf"
             config_bytes = (
                 peer_config
                 if isinstance(peer_config, (bytes, bytearray))
@@ -472,7 +472,7 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                             peer_config = wg_api.download_peer_config(
                                 updated_peer["peer_id"]
                             )
-                            config_filename = "vpnbox.conf"
+                            config_filename = "nikonVPN.conf"
                             config_bytes = (
                                 peer_config
                                 if isinstance(peer_config, (bytes, bytearray))
@@ -783,7 +783,7 @@ async def cmd_connect(message: types.Message):
                     config_content = wg_api.download_peer_config(
                         existing_peer["peer_id"]
                     )
-                    filename = "vpnbox.conf"
+                    filename = "nikonVPN.conf"
 
                     await bot.send_document(
                         chat_id=message.chat.id,
