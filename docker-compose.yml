@@ -1,7 +1,7 @@
 services:
   nginx:
     image: nginx:alpine
-    container_name: wgbot-nginx
+    container_name: nginx
     restart: unless-stopped
     ports:
       - "80:80"
@@ -40,7 +40,13 @@ services:
     networks:
       - wgbot-network
     healthcheck:
-      test: ["CMD", "python", "-c", "import os; exit(0 if os.getenv('TELEGRAM_BOT_TOKEN') else 1)"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os; exit(0 if os.getenv('TELEGRAM_BOT_TOKEN') else 1)",
+        ]
       interval: 60s
       timeout: 10s
       retries: 2
@@ -48,7 +54,7 @@ services:
 
   webhook:
     build: .
-    container_name: wgbot-webhook
+    container_name: webhook
     restart: unless-stopped
     command: ["python", "webhook_server.py"]
     env_file:
@@ -67,7 +73,13 @@ services:
     networks:
       - wgbot-network
     healthcheck:
-      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8001/health')"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import requests; requests.get('http://localhost:8001/health')",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
