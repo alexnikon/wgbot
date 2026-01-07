@@ -126,6 +126,20 @@ async def create_or_restore_peer_for_user(
         return False, "Ошибка при создании/восстановлении доступа"
 
 
+# Вспомогательная функция для безопасного ответа на callback query
+async def safe_answer_callback(callback_query: types.CallbackQuery, text: str = None):
+    """Безопасно отвечает на callback query, игнорируя ошибки истекших запросов"""
+    try:
+        await callback_query.answer(text=text)
+    except TelegramAPIError as e:
+        # Игнорируем ошибки истекших callback queries (возникают при перезапуске бота)
+        if "query is too old" in str(e) or "query ID is invalid" in str(e):
+            logger.debug(f"Callback query expired: {e}")
+        else:
+            # Другие ошибки логируем
+            logger.error(f"Error answering callback query: {e}")
+
+
 # Состояния для FSM
 class PeerStates(StatesGroup):
     waiting_for_peer_name = State()
@@ -250,7 +264,7 @@ async def handle_pay_callback(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
     username = callback_query.from_user.username
 
-    await callback_query.answer()
+    await safe_answer_callback(callback_query)
 
     # Отправляем выбор способа оплаты (это создает новое сообщение с инвойсом)
     await payment_manager.send_payment_selection(
@@ -270,7 +284,7 @@ async def handle_already_paid_callback(callback_query: types.CallbackQuery):
         # Доступ истек, но был оплачен - обновляем клавиатуру на "Купить доступ"
         expire_date_str = existing_peer.get("expire_date", "Неизвестно") if existing_peer else "Неизвестно"
         expire_date_formatted = format_date_for_user(expire_date_str) if expire_date_str != "Неизвестно" else "Неизвестно"
-        await callback_query.answer("⚠️ Твой VPN доступ истек!")
+        await safe_answer_callback(callback_query, "⚠️ Твой VPN доступ истек!")
 
         # Получаем актуальные тарифы
         payment_info = payment_manager.get_payment_info()
@@ -300,7 +314,7 @@ async def handle_already_paid_callback(callback_query: types.CallbackQuery):
         )
         return
 
-    await callback_query.answer("✅ У тебя уже есть доступ!")
+    await safe_answer_callback(callback_query, "✅ У тебя уже есть доступ!")
 
     # Обновляем сообщение с информацией о доступе
     payment_info = payment_manager.get_payment_info()
@@ -320,7 +334,7 @@ async def handle_already_paid_callback(callback_query: types.CallbackQuery):
 @dp.callback_query(F.data == "get_config")
 async def handle_get_config_callback(callback_query: types.CallbackQuery):
     """Обработчик кнопки 'Получить конфиг'"""
-    await callback_query.answer()
+    await safe_answer_callback(callback_query)
 
     user_id = callback_query.from_user.id
     username = callback_query.from_user.username
@@ -508,7 +522,7 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
 @dp.callback_query(F.data == "extend")
 async def handle_extend_callback(callback_query: types.CallbackQuery):
     """Обработчик кнопки 'Продлить доступ'"""
-    await callback_query.answer()
+    await safe_answer_callback(callback_query)
 
     user_id = callback_query.from_user.id
     username = callback_query.from_user.username
@@ -551,7 +565,7 @@ async def handle_extend_callback(callback_query: types.CallbackQuery):
 @dp.callback_query(F.data == "status")
 async def handle_status_callback(callback_query: types.CallbackQuery):
     """Обработчик кнопки 'Статус доступа'"""
-    await callback_query.answer()
+    await safe_answer_callback(callback_query)
 
     user_id = callback_query.from_user.id
     username = callback_query.from_user.username
@@ -665,7 +679,7 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
 @dp.callback_query(F.data == "guide")
 async def handle_guide_callback(callback_query: types.CallbackQuery):
     """Обработчик кнопки 'Инструкция'"""
-    await callback_query.answer()
+    await safe_answer_callback(callback_query)
 
     guide_text = """
 📖 Инструкция по использованию VPN:
@@ -697,7 +711,7 @@ async def handle_guide_callback(callback_query: types.CallbackQuery):
 @dp.callback_query(F.data == "main")
 async def handle_main_callback(callback_query: types.CallbackQuery):
     """Обработчик кнопки 'Вернуться в меню'"""
-    await callback_query.answer()
+    await safe_answer_callback(callback_query)
 
     user_id = callback_query.from_user.id
     payment_info = payment_manager.get_payment_info()
@@ -956,10 +970,10 @@ async def handle_pay_stars_callback(callback_query: types.CallbackQuery):
 
     # Проверяем, что callback от правильного пользователя
     if callback_query.from_user.id != user_id:
-        await callback_query.answer("❌ Ошибка: неверный пользователь")
+        await safe_answer_callback(callback_query, "❌ Ошибка: неверный пользователь")
         return
 
-    await callback_query.answer()
+    await safe_answer_callback(callback_query)
 
     # Отправляем инвойс для оплаты через Stars
     success = await payment_manager.send_stars_payment_request(
@@ -990,10 +1004,10 @@ async def handle_pay_yookassa_callback(callback_query: types.CallbackQuery):
 
     # Проверяем, что callback от правильного пользователя
     if callback_query.from_user.id != user_id:
-        await callback_query.answer("❌ Ошибка: неверный пользователь")
+        await safe_answer_callback(callback_query, "❌ Ошибка: неверный пользователь")
         return
 
-    await callback_query.answer()
+    await safe_answer_callback(callback_query)
 
     # Проверяем, настроен ли ЮKassa
     if (
@@ -1032,10 +1046,10 @@ async def handle_pay_yookassa_disabled_callback(callback_query: types.CallbackQu
 
     # Проверяем, что callback от правильного пользователя
     if callback_query.from_user.id != user_id:
-        await callback_query.answer("❌ Ошибка: неверный пользователь")
+        await safe_answer_callback(callback_query, "❌ Ошибка: неверный пользователь")
         return
 
-    await callback_query.answer()
+    await safe_answer_callback(callback_query)
 
     await callback_query.message.reply(
         "❌ Оплата через банковскую карту временно недоступна.\n\n"
@@ -1054,9 +1068,9 @@ async def handle_retry_peer_callback(callback_query: types.CallbackQuery):
         tariff_key = f"{parts[2]}_{parts[3]}" if len(parts) >= 5 else parts[2]
         passed_user_id = int(parts[-1])
         if callback_query.from_user.id != passed_user_id:
-            await callback_query.answer("❌ Ошибка: неверный пользователь")
+            await safe_answer_callback(callback_query, "❌ Ошибка: неверный пользователь")
             return
-        await callback_query.answer()
+        await safe_answer_callback(callback_query)
 
         user_id = callback_query.from_user.id
         username = callback_query.from_user.username
