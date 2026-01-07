@@ -57,6 +57,51 @@ def parse_datetime(date_str: str) -> datetime.datetime:
     """
     return datetime.datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
 
+def parse_date_flexible(date_str: str) -> datetime.datetime:
+    """
+    Парсит строку даты, поддерживая несколько форматов
+    
+    Args:
+        date_str: Строка даты в формате "YYYY-MM-DD HH:MM:SS" или "YYYY-MM-DD"
+        
+    Returns:
+        Объект datetime
+        
+    Raises:
+        ValueError: Если формат даты не распознан
+    """
+    if not date_str:
+        raise ValueError("Пустая строка даты")
+    
+    # Пробуем формат с временем
+    try:
+        return datetime.datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        pass
+    
+    # Пробуем формат без времени
+    try:
+        return datetime.datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError(f"Неверный формат даты: {date_str}")
+
+def format_date_for_user(date_str: str) -> str:
+    """
+    Форматирует дату для отображения пользователю в формате ДД-ММ-ГГГГ
+    
+    Args:
+        date_str: Строка даты в формате "YYYY-MM-DD HH:MM:SS" или "YYYY-MM-DD"
+        
+    Returns:
+        Отформатированная строка в формате "ДД-ММ-ГГГГ"
+    """
+    try:
+        dt = parse_date_flexible(date_str)
+        return dt.strftime("%d-%m-%Y")
+    except (ValueError, TypeError) as e:
+        logger.error(f"Ошибка форматирования даты {date_str}: {e}")
+        return date_str  # Возвращаем исходную строку в случае ошибки
+
 def calculate_expiry_date(days: int = 30) -> str:
     """
     Вычисляет дату истечения через указанное количество дней

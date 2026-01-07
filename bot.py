@@ -18,6 +18,8 @@ from utils import (
     generate_peer_name,
     sanitize_filename,
     validate_peer_name,
+    parse_date_flexible,
+    format_date_for_user,
 )
 from wg_api import WGDashboardAPI
 
@@ -150,19 +152,7 @@ def is_access_active(existing_peer: dict) -> bool:
     try:
         from datetime import datetime
 
-        # Пробуем разные форматы даты
-        try:
-            expire_date = datetime.strptime(expire_date_str, "%Y-%m-%d")
-        except ValueError:
-            # Пробуем формат без времени
-            try:
-                expire_date = datetime.strptime(expire_date_str, "%Y-%m-%d")
-            except ValueError:
-                logger.error(
-                    f"is_access_active: неверный формат даты: {expire_date_str}"
-                )
-                return False
-
+        expire_date = parse_date_flexible(expire_date_str)
         now = datetime.now()
         is_active = expire_date > now
         logger.debug(
@@ -278,11 +268,8 @@ async def handle_already_paid_callback(callback_query: types.CallbackQuery):
     # Проверяем, активен ли доступ (проверяем заново при каждом нажатии)
     if not is_access_active(existing_peer):
         # Доступ истек, но был оплачен - обновляем клавиатуру на "Купить доступ"
-        expire_date_str = (
-            existing_peer.get("expire_date", "Неизвестно")
-            if existing_peer
-            else "Неизвестно"
-        )
+        expire_date_str = existing_peer.get("expire_date", "Неизвестно") if existing_peer else "Неизвестно"
+        expire_date_formatted = format_date_for_user(expire_date_str) if expire_date_str != "Неизвестно" else "Неизвестно"
         await callback_query.answer("⚠️ Твой VPN доступ истек!")
 
         # Получаем актуальные тарифы
@@ -300,7 +287,7 @@ async def handle_already_paid_callback(callback_query: types.CallbackQuery):
         expired_text = f"""
 ⚠️ Твой доступ к VPN истек!
 
-📅 Дата истечения: {expire_date_str}
+📅 Дата истечения: {expire_date_formatted}
 
 💎 Для продолжения использования VPN необходимо продлить доступ.
 
@@ -347,10 +334,11 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
             if existing_peer.get("payment_status") == "paid":
                 # Доступ был оплачен, но истек
                 expire_date_str = existing_peer.get("expire_date", "Неизвестно")
+                expire_date_formatted = format_date_for_user(expire_date_str) if expire_date_str != "Неизвестно" else "Неизвестно"
                 error_text = f"""
 ⚠️ Твой доступ к VPN истек!
 
-📅 Дата истечения: {expire_date_str}
+📅 Дата истечения: {expire_date_formatted}
 
 💎 Для получения VPN конфигурации необходимо продлить доступ.
 
@@ -587,6 +575,10 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
     try:
         expire_date_str = existing_peer.get("expire_date", "Неизвестно")
         created_at_str = existing_peer.get("created_at", "Неизвестно")
+        
+        # Форматируем даты для отображения
+        expire_date_formatted = format_date_for_user(expire_date_str) if expire_date_str != "Неизвестно" else "Неизвестно"
+        created_at_formatted = format_date_for_user(created_at_str) if created_at_str != "Неизвестно" else "Неизвестно"
 
         # Проверяем, истек ли доступ
         from datetime import datetime
@@ -594,7 +586,7 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
         is_expired = False
         if expire_date_str and expire_date_str != "Неизвестно":
             try:
-                expire_date = datetime.strptime(expire_date_str, "%Y-%m-%d")
+                expire_date = parse_date_flexible(expire_date_str)
                 now = datetime.now()
                 is_expired = expire_date <= now
             except (ValueError, TypeError):
@@ -605,8 +597,8 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
             status_text = f"""
 📊 Статус доступа:
 
-📅 Доступ приобретен: {created_at_str}
-⏰ Доступ закончился: {expire_date_str}
+📅 Доступ приобретен: {created_at_formatted}
+⏰ Доступ закончился: {expire_date_formatted}
 
 ⚠️ Твой VPN доступ истек!
 
@@ -617,7 +609,7 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
         else:
             # Доступ активен, рассчитываем оставшееся время
             try:
-                expire_date = datetime.strptime(expire_date_str, "%Y-%m-%d")
+                expire_date = parse_date_flexible(expire_date_str)
                 now = datetime.now()
                 time_left = expire_date - now
                 days_left = time_left.days
@@ -627,8 +619,8 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
                 status_text = f"""
 📊 Статус доступа:
 
-📅 Доступ приобретен: {created_at_str}
-⏰ Доступ закончится: {expire_date_str}
+📅 Доступ приобретен: {created_at_formatted}
+⏰ Доступ закончится: {expire_date_formatted}
                 """
 
                 if days_left > 0:
@@ -648,8 +640,8 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
                 status_text = f"""
 📊 Статус доступа:
 
-📅 Доступ приобретен: {created_at_str}
-⏰ Доступ закончится: {expire_date_str}
+📅 Доступ приобретен: {created_at_formatted}
+⏰ Доступ закончится: {expire_date_formatted}
 
 Выбери действие с помощью кнопок ниже:
                 """
@@ -743,9 +735,10 @@ async def cmd_connect(message: types.Message):
             if existing_peer.get("payment_status") == "paid":
                 # Доступ был оплачен, но истек
                 expire_date_str = existing_peer.get("expire_date", "Неизвестно")
+                expire_date_formatted = format_date_for_user(expire_date_str) if expire_date_str != "Неизвестно" else "Неизвестно"
                 await message.reply(
                     f"⚠️ Твой VPN доступ истек!\n\n"
-                    f"📅 Дата истечения: {expire_date_str}\n\n"
+                    f"📅 Дата истечения: {expire_date_formatted}\n\n"
                     f"💎 Для получения конфигурации необходимо продлить доступ.\n\n"
                     f"Стоимость за {payment_info['period']}:\n"
                     f"⭐ Telegram Stars: {payment_info['stars_price']} Stars\n"
