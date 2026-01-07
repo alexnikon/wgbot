@@ -152,7 +152,7 @@ def is_access_active(existing_peer: dict) -> bool:
 
         # Пробуем разные форматы даты
         try:
-            expire_date = datetime.strptime(expire_date_str, "%Y-%m-%d %H:%M:%S")
+            expire_date = datetime.strptime(expire_date_str, "%Y-%m-%d")
         except ValueError:
             # Пробуем формат без времени
             try:
@@ -594,7 +594,7 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
         is_expired = False
         if expire_date_str and expire_date_str != "Неизвестно":
             try:
-                expire_date = datetime.strptime(expire_date_str, "%Y-%m-%d %H:%M:%S")
+                expire_date = datetime.strptime(expire_date_str, "%Y-%m-%d")
                 now = datetime.now()
                 is_expired = expire_date <= now
             except (ValueError, TypeError):
@@ -617,7 +617,7 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
         else:
             # Доступ активен, рассчитываем оставшееся время
             try:
-                expire_date = datetime.strptime(expire_date_str, "%Y-%m-%d %H:%M:%S")
+                expire_date = datetime.strptime(expire_date_str, "%Y-%m-%d")
                 now = datetime.now()
                 time_left = expire_date - now
                 days_left = time_left.days
@@ -897,7 +897,7 @@ async def cmd_status(message: types.Message):
     try:
         from datetime import datetime
 
-        expire_date = datetime.strptime(expire_date_str, "%Y-%m-%d %H:%M:%S")
+        expire_date = datetime.strptime(expire_date_str, "%Y-%m-%d")
         now = datetime.now()
 
         if expire_date <= now:
@@ -915,7 +915,7 @@ async def cmd_status(message: types.Message):
         # Формируем сообщение
         status_text = f"📊 Статус твоего VPN доступа:\n\n"
         status_text += (
-            f"📅 Дата истечения: {expire_date.strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"📅 Дата истечения: {expire_date.strftime('%d.%m.%Y')}\n\n"
         )
 
         if days_left > 0:
