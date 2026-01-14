@@ -256,12 +256,12 @@ class WGDashboardAPI:
             result = response.json()
             logger.info(f"Ответ API для пира {peer_id[:20]}...: {result}")
             
-            if result and 'data' in result and 'file' in result['data']:
+            if result and result.get('data') and 'file' in result['data']:
                 config_content = result['data']['file']
                 return config_content.encode('utf-8')
             else:
-                logger.error(f"Неверный формат ответа API: {result}")
-                raise Exception("Неверный формат ответа API")
+                logger.error(f"Неверный формат ответа API или пир еще не готов: {result}")
+                raise Exception(f"API Error: {result.get('message', 'Unknown error')}")
                 
         except requests.exceptions.RequestException as e:
             logger.error(f"Ошибка при скачивании конфигурации пира {peer_id}: {e}")
