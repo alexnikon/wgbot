@@ -124,9 +124,13 @@ async def create_or_restore_peer_for_user(
         # Скачиваем конфиг (для проверки что он есть) с повторными попытками
         config_content = None
         for attempt in range(3):
-            config_content = wg_api.download_peer_config(peer_id)
-            if config_content:
-                break
+            try:
+                config_content = wg_api.download_peer_config(peer_id)
+                if config_content:
+                    break
+            except Exception as e:
+                logger.warning(f"Попытка {attempt + 1}: конфиг не готов ({e})")
+            
             logger.info(f"Конфиг для {peer_id} пока не готов, попытка {attempt + 1}/3... Ждем 1 сек.")
             await asyncio.sleep(1)
             
