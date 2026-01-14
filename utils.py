@@ -238,7 +238,61 @@ def sanitize_filename(filename: str) -> str:
     # Удаляем пробелы в начале и конце
     filename = filename.strip()
     # Ограничиваем длину
-    if len(filename) > 100:
-        filename = filename[:100]
-    
     return filename
+
+
+import json
+import os
+import logging
+from typing import List, Dict
+
+logger = logging.getLogger(__name__)
+
+class ClientsJsonManager:
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+
+    def _read_clients(self) -> List[Dict[str, str]]:
+        if not os.path.exists(self.file_path):
+            return []
+        try:
+            with open(self.file_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            logger.error(f"Error reading clients.json: {e}")
+            return []
+
+    def _write_clients(self, clients: List[Dict[str, str]]) -> bool:
+        try:
+            with open(self.file_path, 'w', encoding='utf-8') as f:
+                json.dump(clients, f, indent=2, ensure_ascii=False)
+            return True
+        except IOError as e:
+            logger.error(f"Error writing clients.json: {e}")
+            return False
+
+    def add_update_client(self, client_id: str, public_key: str) -> bool:
+        """
+        Adds or updates a client in the JSON file.
+        client_id: The Telegram username (or ID) used as identifier.
+        public_key: The WireGuard public key.
+        """
+        clients = self._read_clients()
+        
+        updated = False
+        found = False
+        for client in clients:
+            if client.get("clientId") == client_id:
+                found = True
+                if client.get("publicKey") != public_key:
+                    client["publicKey"] = public_key
+                    updated = True
+                break
+        
+        if not found:
+            clients.append({"clientId": client_id, "publicKey": public_key})
+            updated = True
+            
+        if updated:
+            return self._write_clients(clients)
+        return True

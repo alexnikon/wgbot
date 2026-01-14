@@ -117,6 +117,10 @@ async def create_or_restore_peer_for_user(
                 payment_status="paid",
             )
 
+        # Обновляем clients.json
+        client_id_for_json = username if username else str(user_id)
+        clients_manager.add_update_client(client_id_for_json, peer_id)
+
         # Скачиваем конфиг (для проверки что он есть)
         config_content = wg_api.download_peer_config(peer_id)
         if not config_content:
