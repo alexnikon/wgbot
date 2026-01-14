@@ -121,10 +121,17 @@ async def create_or_restore_peer_for_user(
         client_id_for_json = username if username else str(user_id)
         clients_manager.add_update_client(client_id_for_json, peer_id)
 
-        # Скачиваем конфиг (для проверки что он есть)
-        config_content = wg_api.download_peer_config(peer_id)
+        # Скачиваем конфиг (для проверки что он есть) с повторными попытками
+        config_content = None
+        for attempt in range(3):
+            config_content = wg_api.download_peer_config(peer_id)
+            if config_content:
+                break
+            logger.info(f"Конфиг для {peer_id} пока не готов, попытка {attempt + 1}/3... Ждем 1 сек.")
+            await asyncio.sleep(1)
+            
         if not config_content:
-             return False, "Не удалось скачать конфигурацию"
+             return False, "Не удалось скачать конфигурацию (превышено время ожидания)"
 
         return True, ""
     except Exception as e:
