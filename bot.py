@@ -123,19 +123,21 @@ async def create_or_restore_peer_for_user(
 
         # Скачиваем конфиг (для проверки что он есть) с повторными попытками
         config_content = None
-        for attempt in range(5):
+        # Увеличиваем время ожидания: 10 попыток по 2 секунды = 20 секунд макс
+        for attempt in range(10):
             try:
                 config_content = wg_api.download_peer_config(peer_id)
                 if config_content:
                     break
             except Exception as e:
-                logger.warning(f"Попытка {attempt + 1}: конфиг не готов ({e})")
+                logger.info(f"Попытка {attempt + 1}: конфиг для {peer_id} еще не готов (ошибка: {e})")
             
-            logger.info(f"Конфиг для {peer_id} пока не готов, попытка {attempt + 1}/5... Ждем 1 сек.")
-            await asyncio.sleep(1)
+            if attempt < 9: # Не ждать после последней попытки
+                logger.info(f"Ждем 2 сек перед следующей попыткой...")
+                await asyncio.sleep(2)
             
         if not config_content:
-             return False, "Не удалось скачать конфигурацию (превышено время ожидания)", None
+             return False, "Не удалось скачать конфигурацию (превышено время ожидания 20с)", None
 
         return True, "", config_content
     except Exception as e:
