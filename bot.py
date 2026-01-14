@@ -67,11 +67,10 @@ async def create_or_restore_peer_for_user(
             ).strftime("%Y-%m-%d %H:%M:%S")
 
         # Имя пира
-        peer_name = (
-            existing_peer["peer_name"]
-            if existing_peer
-            else generate_peer_name(username, user_id)
-        )
+        # Имя пира
+        # Всегда стараемся использовать формат username_id, если есть username
+        # Это исправляет ситуацию, когда старый пир был user_id, а теперь у пользователя есть username
+        peer_name = generate_peer_name(username, user_id)
 
         # Создаём пира в WG
         peer_result = wg_api.add_peer(peer_name)
@@ -81,21 +80,28 @@ async def create_or_restore_peer_for_user(
         peer_id = peer_result["id"]
 
         # Создаём/обновляем job по целевой дате
+        job_updated = False
+        new_job_id = None
+        
         if existing_peer and existing_peer.get("job_id"):
             try:
-                wg_api.update_job_expire_date(
+                # Пытаемся обновить существующий job
+                update_result = wg_api.update_job_expire_date(
                     existing_peer["job_id"], peer_id, target_expire_date
                 )
-                new_job_id = existing_peer["job_id"]
-            except Exception:
-                job_result, new_job_id, _ = wg_api.create_restrict_job(
-                    peer_id, target_expire_date
-                )
-        else:
+                # API может вернуть True/False или объект. Проверяем успех
+                if update_result and (isinstance(update_result, bool) or update_result.get("status") is True):
+                     job_updated = True
+                     new_job_id = existing_peer["job_id"]
+            except Exception as e:
+                logger.warning(f"Не удалось обновить job {existing_peer.get('job_id')}: {e}")
+        
+        # Если не удалось обновить (или не было job_id), создаем новый
+        if not job_updated:
+            logger.info(f"Создаем новый job для пира {peer_id}")
             job_result, new_job_id, _ = wg_api.create_restrict_job(
                 peer_id, target_expire_date
             )
-
         # Сохраняем/обновляем запись в БД
         if existing_peer:
             db.update_peer_info(peer_name, peer_id, new_job_id, target_expire_date)
@@ -111,14 +117,10 @@ async def create_or_restore_peer_for_user(
                 payment_status="paid",
             )
 
-        # Скачиваем и отправляем конфиг
+        # Скачиваем конфиг (для проверки что он есть)
         config_content = wg_api.download_peer_config(peer_id)
-        filename = "nikonVPN.conf"
-        await bot.send_document(
-            chat_id=user_id,
-            document=types.BufferedInputFile(file=config_content, filename=filename),
-            caption="📁 Твоя VPN конфигурация",
-        )
+        if not config_content:
+             return False, "Не удалось скачать конфигурацию"
 
         return True, ""
     except Exception as e:
