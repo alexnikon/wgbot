@@ -676,17 +676,17 @@ async def handle_guide_callback(callback_query: types.CallbackQuery):
     guide_text = """
 📖 Инструкция по использованию VPN:
 
-1️⃣ Скачайте клиент WireGuard:
-   • Windows/Mac/Linux: https://www.wireguard.com/install/
-   • Android: WireGuard в Google Play
-   • iOS: WireGuard в App Store
+1️⃣ Скачайте клиент AmneziaWG:
+   • Windows: https://github.com/amnezia-vpn/amneziawg-windows-client/releases
+   • Android: Google Play https://play.google.com/store/apps/details?id=org.amnezia.awg
+   • iOS/macOS: App Store https://apps.apple.com/pl/app/amneziawg/id6478942365
 
 2️⃣ Получите конфигурацию:
    • Нажмите "📁 Получить конфиг"
    • Скачайте .conf файл
 
 3️⃣ Импортируйте конфигурацию:
-   • Откройте WireGuard
+   • Откройте AmneziaWG
    • Нажмите "Добавить туннель"
    • Выберите скачанный файл
 
