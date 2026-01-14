@@ -331,21 +331,60 @@ async def process_refund_succeeded(refund_data: dict):
             return
         
         user_id = payment_info['user_id']
+        tariff_key = payment_info.get('tariff_key', '30_days')
         amount = refund_data.get('amount', {}).get('value', '0')
+        
+        # Определяем количество дней для уменьшения
+        from config import get_tariffs
+        tariffs = get_tariffs()
+        tariff_data = tariffs.get(tariff_key, tariffs.get('30_days', {'days': 30}))
+        days_to_reduce = tariff_data.get('days', 30)
+        
+        logger.info(f"Обработка возврата для пользователя {user_id}: уменьшаем доступ на {days_to_reduce} дней (тариф {tariff_key})")
+        
+        # Уменьшаем срок доступа в базе данных
+        success, new_expire_date = db.decrease_access(user_id, days_to_reduce)
+        
+        if success:
+            logger.info(f"Доступ уменьшен для пользователя {user_id}, новая дата: {new_expire_date}")
+            
+            # Получаем информацию о пире для обновления job
+            peer_info = db.get_peer_by_telegram_id(user_id)
+            if peer_info:
+                # Обновляем job в WGDashboard
+                try:
+                    job_update_result = wg_api.update_job_expire_date(
+                        peer_info['job_id'], 
+                        peer_info['peer_id'], 
+                        new_expire_date
+                    )
+                    
+                    if job_update_result and job_update_result.get('status'):
+                        logger.info(f"Job обновлен для пользователя {user_id} после возврата, новая дата: {new_expire_date}")
+                    else:
+                        logger.error(f"Ошибка при обновлении job для пользователя {user_id} после возврата: {job_update_result}")
+                        
+                except Exception as e:
+                    logger.error(f"Ошибка при обновлении job в WGDashboard после возврата: {e}")
+            else:
+                logger.warning(f"Не найден пир для пользователя {user_id} при обработке возврата")
+        else:
+            logger.error(f"Не удалось уменьшить доступ для пользователя {user_id} при обработке возврата")
         
         await send_telegram_message(
             user_id,
             f"💰 Возврат успешно обработан!\n\n"
             f"💳 Сумма возврата: {amount} руб.\n"
-            f"📧 Деньги будут возвращены на карту в течение 1-3 рабочих дней.\n\n"
-            f"❓ Если у вас есть вопросы, обратитесь в поддержку."
+            f"📉 Ваш оплаченный период был уменьшен на {days_to_reduce} дней в связи с возвратом.\n"
+            f"📅 Срок действия доступа обновлен.\n\n"
+            f"📧 Деньги будут возвращены на карту в течение 1-3 рабочих дней."
         )
         
         # Обновляем статус платежа в базе данных
         db.update_payment_status_by_id(payment_id, 'refunded')
         
     except Exception as e:
-        logger.error(f"Ошибка при обработке возврата: {e}")
+        logger.error(f"Ошибка при обработке возврата: {e}", exc_info=True)
 
 @app.get("/health")
 async def health_check():

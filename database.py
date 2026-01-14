@@ -544,6 +544,70 @@ class Database:
             )
             return False, ""
 
+    def decrease_access(self, telegram_user_id: int, days: int) -> tuple[bool, str]:
+        """
+        Уменьшает срок доступа пользователя на указанное количество дней
+        
+        Args:
+            telegram_user_id: ID пользователя Telegram
+            days: Количество дней для уменьшения
+            
+        Returns:
+            Tuple (success: bool, new_expire_date: str)
+        """
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                cursor = conn.cursor()
+                
+                # Получаем текущую дату истечения
+                cursor.execute(
+                    """
+                    SELECT expire_date FROM peers 
+                    WHERE telegram_user_id = ? AND is_active = 1
+                    """,
+                    (telegram_user_id,),
+                )
+                result = cursor.fetchone()
+                
+                if not result:
+                    return False, ""
+                
+                current_expire_date_str = result[0]
+                
+                # Вычитаем дни
+                cursor.execute(
+                    """
+                    SELECT datetime(?, '-{} days')
+                    """.format(days),
+                    (current_expire_date_str,),
+                )
+                new_expire_date = cursor.fetchone()[0]
+                
+                # Обновляем дату истечения
+                cursor.execute(
+                    """
+                    UPDATE peers 
+                    SET expire_date = ?
+                    WHERE telegram_user_id = ? AND is_active = 1
+                    """,
+                    (new_expire_date, telegram_user_id),
+                )
+                conn.commit()
+                
+                # Логируем операцию
+                self.log_operation(
+                    f"user_{telegram_user_id}", 
+                    "DECREASE_ACCESS", 
+                    f"Уменьшен доступ на {days} дней. Новая дата: {new_expire_date}"
+                )
+                return cursor.rowcount > 0, new_expire_date
+                
+        except Exception as e:
+            logger.error(
+                f"Ошибка при уменьшении доступа для пользователя {telegram_user_id}: {e}"
+            )
+            return False, ""
+
     def get_users_for_notification(self, days_before: int = 3) -> List[Dict[str, Any]]:
         """
         Получает пользователей, которым нужно отправить уведомление о скором истечении доступа
