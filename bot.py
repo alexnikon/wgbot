@@ -45,8 +45,8 @@ payment_manager = PaymentManager(bot)
 # Хелпер: создать или восстановить пира и вернуть конфиг
 async def create_or_restore_peer_for_user(
     user_id: int, username: str | None, tariff_key: str | None = None
-) -> tuple[bool, str]:
-    """Создаёт нового пира либо восстанавливает, если он отсутствует на сервере. Возвращает (success, error_message)."""
+) -> tuple[bool, str, bytes | None]:
+    """Создаёт нового пира либо восстанавливает, если он отсутствует на сервере. Возвращает (success, error_message, config_content)."""
     try:
         existing_peer = db.get_peer_by_telegram_id(user_id)
 
@@ -123,7 +123,7 @@ async def create_or_restore_peer_for_user(
 
         # Скачиваем конфиг (для проверки что он есть) с повторными попытками
         config_content = None
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 config_content = wg_api.download_peer_config(peer_id)
                 if config_content:
@@ -131,16 +131,16 @@ async def create_or_restore_peer_for_user(
             except Exception as e:
                 logger.warning(f"Попытка {attempt + 1}: конфиг не готов ({e})")
             
-            logger.info(f"Конфиг для {peer_id} пока не готов, попытка {attempt + 1}/3... Ждем 1 сек.")
+            logger.info(f"Конфиг для {peer_id} пока не готов, попытка {attempt + 1}/5... Ждем 1 сек.")
             await asyncio.sleep(1)
             
         if not config_content:
-             return False, "Не удалось скачать конфигурацию (превышено время ожидания)"
+             return False, "Не удалось скачать конфигурацию (превышено время ожидания)", None
 
-        return True, ""
+        return True, "", config_content
     except Exception as e:
         logger.error(f"Ошибка в create_or_restore_peer_for_user: {e}")
-        return False, "Ошибка при создании/восстановлении доступа"
+        return False, "Ошибка при создании/восстановлении доступа", None
 
 
 # Вспомогательная функция для безопасного ответа на callback query
@@ -418,7 +418,7 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                 logger.info(
                     f"Создаю новый пир для пользователя {user_id}, так как существующий недоступен"
                 )
-                ok, err = await create_or_restore_peer_for_user(
+                ok, err, new_config = await create_or_restore_peer_for_user(
                     user_id, username, existing_peer.get("tariff_key")
                 )
                 if not ok:
@@ -427,28 +427,9 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                         reply_markup=create_main_menu_keyboard(user_id),
                     )
                     return
-                # После создания нового пира, получаем обновленные данные и скачиваем конфиг
-                updated_peer = db.get_peer_by_telegram_id(user_id)
-                if updated_peer:
-                    try:
-                        peer_config = wg_api.download_peer_config(
-                            updated_peer["peer_id"]
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"Не удалось скачать конфиг после создания нового пира: {e}"
-                        )
-                        await callback_query.message.edit_text(
-                            f"❌ Ошибка при получении конфигурации: {e}\n\nВыбери действие с помощью кнопок ниже:",
-                            reply_markup=create_main_menu_keyboard(user_id),
-                        )
-                        return
-                else:
-                    await callback_query.message.edit_text(
-                        "❌ Ошибка: не удалось получить данные о созданном пире.\n\nВыбери действие с помощью кнопок ниже:",
-                        reply_markup=create_main_menu_keyboard(user_id),
-                    )
-                    return
+                
+                # Используем полученный конфиг
+                peer_config = new_config
 
             # Отправляем конфиг
             config_filename = "nikonVPN.conf"
@@ -480,38 +461,29 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                 logger.info(
                     f"Попытка создать новый пир после ошибки для пользователя {user_id}"
                 )
-                ok, err = await create_or_restore_peer_for_user(
+                ok, err, new_config = await create_or_restore_peer_for_user(
                     user_id, username, existing_peer.get("tariff_key")
                 )
-                if ok:
-                    # Если удалось создать, пытаемся скачать конфиг
-                    updated_peer = db.get_peer_by_telegram_id(user_id)
-                    if updated_peer:
-                        try:
-                            peer_config = wg_api.download_peer_config(
-                                updated_peer["peer_id"]
-                            )
-                            config_filename = "nikonVPN.conf"
-                            config_bytes = (
-                                peer_config
-                                if isinstance(peer_config, (bytes, bytearray))
-                                else peer_config.encode("utf-8")
-                            )
-                            await callback_query.message.reply_document(
-                                document=types.BufferedInputFile(
-                                    config_bytes, filename=config_filename
-                                ),
-                                caption="Вот твой файл конфигурации, добавь его в приложение AmneziaWG",
-                            )
-                            await callback_query.message.edit_text(
-                                "✅ Конфигурация отправлена!\n\nВыбери действие с помощью кнопок ниже:",
-                                reply_markup=create_main_menu_keyboard(user_id),
-                            )
-                            return
-                        except Exception as e2:
-                            logger.error(
-                                f"Ошибка при скачивании конфига после создания нового пира: {e2}"
-                            )
+                if ok and new_config:
+                    # Если удалось создать, отправляем конфиг
+                    config_filename = "nikonVPN.conf"
+                    config_bytes = (
+                        new_config
+                        if isinstance(new_config, (bytes, bytearray))
+                        else new_config.encode("utf-8")
+                    )
+                    await callback_query.message.reply_document(
+                        document=types.BufferedInputFile(
+                            config_bytes, filename=config_filename
+                        ),
+                        caption="Вот твой файл конфигурации, добавь его в приложение AmneziaWG",
+                    )
+                    await callback_query.message.edit_text(
+                        "✅ Конфигурация отправлена!\n\nВыбери действие с помощью кнопок ниже:",
+                        reply_markup=create_main_menu_keyboard(user_id),
+                    )
+                    return
+
                 await callback_query.message.edit_text(
                     f"❌ Ошибка при получении конфигурации: {err if not ok else 'Не удалось скачать конфиг'}.\n\nВыбери действие с помощью кнопок ниже:",
                     reply_markup=create_main_menu_keyboard(user_id),
