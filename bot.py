@@ -20,6 +20,7 @@ from utils import (
     validate_peer_name,
     parse_date_flexible,
     format_date_for_user,
+    ClientsJsonManager,
 )
 from wg_api import WGDashboardAPI
 
