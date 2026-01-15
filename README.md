@@ -1,6 +1,6 @@
 # nikonVPN Telegram Bot
 
-Telegram бот для продажи VPN доступа с интеграцией WGDashboard и поддержкой платежей через Telegram Stars и ЮKassa с внешними ссылками.
+Telegram бот для продажи VPN доступа с интеграцией WGDashboard и поддержкой платежей через Telegram Stars и ЮKassa.
 
 ## 🚀 Возможности
 
@@ -15,8 +15,8 @@ Telegram бот для продажи VPN доступа с интеграцие
 
 | Период | Telegram Stars | ЮKassa |
 |--------|----------------|--------|
-| 14 дней | ENV TARIFF_14_DAYS_STARS (по умолчанию 100) Stars | ENV TARIFF_14_DAYS_RUB (по умолчанию 150) ₽ |
-| 30 дней | ENV TARIFF_30_DAYS_STARS (по умолчанию 200) Stars | ENV TARIFF_30_DAYS_RUB (по умолчанию 300) ₽ |
+| 14 дней | ENV TARIFF_14_DAYS_STARS | ENV TARIFF_14_DAYS_RUB |
+| 30 дней | ENV TARIFF_30_DAYS_STARS | ENV TARIFF_30_DAYS_RUB |
 
 ## 🛠 Установка
 
@@ -79,13 +79,13 @@ WEBHOOK_URL=https://your-domain.com/webhook/yookassa
 DOMAIN=your-domain.com
 
 # Support URL
-SUPPORT_URL=https://t.me/straycat0789
+SUPPORT_URL=
 
 # Tariffs (prices)
-TARIFF_14_DAYS_STARS=100
-TARIFF_14_DAYS_RUB=150
-TARIFF_30_DAYS_STARS=200
-TARIFF_30_DAYS_RUB=300
+TARIFF_14_DAYS_STARS=
+TARIFF_14_DAYS_RUB=
+TARIFF_30_DAYS_STARS=
+TARIFF_30_DAYS_RUB=
 
 # Logging
 LOG_LEVEL=INFO

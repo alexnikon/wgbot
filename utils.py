@@ -296,3 +296,18 @@ class ClientsJsonManager:
         if updated:
             return self._write_clients(clients)
         return True
+
+    def remove_client(self, client_id: str) -> bool:
+        """
+        Removes a client from the JSON file by client_id.
+        """
+        clients = self._read_clients()
+        original_length = len(clients)
+        
+        # Фильтруем список, оставляя только тех, у кого не совпадает client_id
+        new_clients = [c for c in clients if c.get("clientId") != client_id]
+        
+        if len(new_clients) < original_length:
+            return self._write_clients(new_clients)
+        
+        return True
