@@ -234,7 +234,10 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
                 ),
             ],
             [InlineKeyboardButton(text="📊 Статус доступа", callback_data="status")],
-            [InlineKeyboardButton(text="📖 Инструкция", callback_data="guide")],
+            [
+                InlineKeyboardButton(text="📖 Инструкция", callback_data="guide"),
+                InlineKeyboardButton(text="❓ Есть вопрос?", url=SUPPORT_URL),
+            ],
         ]
     )
     return keyboard
