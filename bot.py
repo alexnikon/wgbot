@@ -9,7 +9,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from config import SUPPORT_URL, TELEGRAM_BOT_TOKEN
+from config import SUPPORT_URL, TELEGRAM_BOT_TOKEN, CLIENTS_JSON_PATH
 from database import Database
 from payment import PaymentManager
 from utils import (
@@ -40,6 +40,7 @@ dp = Dispatcher(storage=storage)
 wg_api = WGDashboardAPI()
 db = Database()
 payment_manager = PaymentManager(bot)
+clients_manager = ClientsJsonManager(CLIENTS_JSON_PATH)
 
 
 # Хелпер: создать или восстановить пира и вернуть конфиг
