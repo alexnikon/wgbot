@@ -60,6 +60,20 @@ def get_tariffs():
             "name": "30 дней",
             "description": "Доступ на месяц",
         },
+        "90_days": {
+            "days": 90,
+            "stars_price": int(os.getenv("TARIFF_90_DAYS_STARS", 500)),
+            "rub_price": int(os.getenv("TARIFF_90_DAYS_RUB", 800)),
+            "name": "90 дней",
+            "description": "Доступ на 3 месяца",
+        },
+        "180_days": {
+            "days": 180,
+            "stars_price": int(os.getenv("TARIFF_180_DAYS_STARS", 900)),
+            "rub_price": int(os.getenv("TARIFF_180_DAYS_RUB", 1500)),
+            "name": "180 дней",
+            "description": "Доступ на 6 месяцев",
+        },
     }
 
 
