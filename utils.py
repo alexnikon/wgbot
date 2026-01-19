@@ -316,13 +316,15 @@ class PromoManager:
     def __init__(self, promo_file_path: str):
         self.promo_file_path = promo_file_path
 
-    def get_user_discount(self, user_id: int) -> int:
+    def get_user_promo_factor(self, user_id: int) -> float:
         """
-        Возвращает размер скидки для пользователя в процентах (0-100).
+        Возвращает множитель цены для пользователя.
+        Если значение в файле <= 100, оно считается скидкой (например, 20 -> 0.8).
+        Если значение > 100, оно считается новой ценой в процентах (например, 150 -> 1.5).
         Считывает файл promo.txt при каждом вызове для поддержки горячего обновления.
         """
         if not os.path.exists(self.promo_file_path):
-            return 0
+            return 1.0
         
         try:
             with open(self.promo_file_path, 'r', encoding='utf-8') as f:
@@ -332,16 +334,22 @@ class PromoManager:
                         continue
                     
                     try:
-                        uid_str, discount_str = line.split('=')
+                        uid_str, val_str = line.split('=')
                         uid = int(uid_str.strip())
-                        discount = int(discount_str.strip())
+                        val = int(val_str.strip())
                         
                         if uid == user_id:
-                            # Ограничиваем скидку от 0 до 100
-                            return max(0, min(100, discount))
+                            if val <= 100:
+                                # Скидка (20 -> 0.8)
+                                return 1.0 - (val / 100.0)
+                            else:
+                                # Наценка (150 -> 1.5)
+                                return val / 100.0
                     except ValueError:
                         continue
         except Exception as e:
-            logger.error(f"Ошибка при чтении файла промокодов: {e}")
+            # logger.error(f"Ошибка при чтении файла промокодов: {e}") 
+            # Не ломаем работу если файл кривой, просто без скидки
+            pass
             
-        return 0
+        return 1.0

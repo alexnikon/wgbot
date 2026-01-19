@@ -28,23 +28,23 @@ class PaymentManager:
         
     def get_user_tariffs(self, user_id: int) -> Dict[str, Any]:
         """
-        Возвращает тарифы с учетом персональной скидки пользователя
+        Возвращает тарифы с учетом персональной скидки/наценки пользователя
         """
         base_tariffs = self.tariffs.copy()
-        discount = self.promo_manager.get_user_discount(user_id)
+        factor = self.promo_manager.get_user_promo_factor(user_id)
         
-        if discount == 0:
+        if factor == 1.0:
             return base_tariffs
             
-        # Применяем скидку
+        # Применяем множитель
         discounted_tariffs = {}
         for key, data in base_tariffs.items():
             # Копируем словарь, чтобы не менять глобальные тарифы
             new_data = data.copy()
             
             # Считаем новую цену
-            new_stars = int(data['stars_price'] * (1 - discount / 100))
-            new_rub = int(data['rub_price'] * (1 - discount / 100))
+            new_stars = int(data['stars_price'] * factor)
+            new_rub = int(data['rub_price'] * factor)
             
             # Гарантируем минимальную цену 1
             new_data['stars_price'] = max(1, new_stars)
