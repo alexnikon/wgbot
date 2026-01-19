@@ -259,12 +259,6 @@ def create_guide_keyboard() -> InlineKeyboardMarkup:
 async def cmd_start(message: types.Message):
     """Обработчик команды /start"""
     user_id = message.from_user.id
-    payment_info = payment_manager.get_payment_info()
-    tariffs = payment_info["tariffs"]
-
-    # Формируем текст с доступными тарифами
-    tariff_text = ""
-    for tariff_key, tariff_data in tariffs.items():
     welcome_text = """
 Привет! Здесь ты можешь подключиться к быстрому и безопасному VPN, который не подвержен блокировкам.
 
