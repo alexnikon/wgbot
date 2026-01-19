@@ -34,6 +34,7 @@ services:
       - ./wgbot-data:/app/data
       - ./wgbot-logs:/app/logs
       - ./clients.json:/app/clients.json
+      - ./promo.txt:/app/promo.txt
     network_mode: host
     healthcheck:
       test: [ "CMD", "python", "-c", "import os; exit(0 if os.getenv('TELEGRAM_BOT_TOKEN') else 1)" ]
