@@ -31,6 +31,9 @@ DOMAIN = os.getenv("DOMAIN")
 # Support
 SUPPORT_URL = os.getenv("SUPPORT_URL")
 
+# Promo Configuration
+PROMO_FILE_PATH = os.getenv("PROMO_FILE_PATH", "promo.txt")
+
 
 # Tariff Configuration (env-driven with sensible defaults)
 def get_tariffs():

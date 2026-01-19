@@ -3,9 +3,10 @@ from typing import Optional, Dict, Any
 from aiogram import Bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
 from aiogram.exceptions import TelegramAPIError
-from config import get_tariffs, WEBHOOK_URL, DOMAIN
+from config import get_tariffs, WEBHOOK_URL, DOMAIN, PROMO_FILE_PATH
 from yookassa_client import YooKassaClient
 from database import Database
+from utils import PromoManager
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +19,40 @@ class PaymentManager:
         self.db = Database()
         self.webhook_url = WEBHOOK_URL
         self.domain = DOMAIN
+        self.promo_manager = PromoManager(PROMO_FILE_PATH)
     
     @property
     def tariffs(self):
         """Получает актуальные тарифы из конфигурации (динамически перезагружаемые)"""
         return get_tariffs()
+        
+    def get_user_tariffs(self, user_id: int) -> Dict[str, Any]:
+        """
+        Возвращает тарифы с учетом персональной скидки пользователя
+        """
+        base_tariffs = self.tariffs.copy()
+        discount = self.promo_manager.get_user_discount(user_id)
+        
+        if discount == 0:
+            return base_tariffs
+            
+        # Применяем скидку
+        discounted_tariffs = {}
+        for key, data in base_tariffs.items():
+            # Копируем словарь, чтобы не менять глобальные тарифы
+            new_data = data.copy()
+            
+            # Считаем новую цену
+            new_stars = int(data['stars_price'] * (1 - discount / 100))
+            new_rub = int(data['rub_price'] * (1 - discount / 100))
+            
+            # Гарантируем минимальную цену 1
+            new_data['stars_price'] = max(1, new_stars)
+            new_data['rub_price'] = max(1, new_rub)
+            
+            discounted_tariffs[key] = new_data
+            
+        return discounted_tariffs
     
     async def create_payment_selection_keyboard(self, user_id: int) -> InlineKeyboardMarkup:
         """
@@ -39,8 +69,11 @@ class PaymentManager:
         
         buttons = []
         
+        # Получаем тарифы с учетом скидки
+        user_tariffs = self.get_user_tariffs(user_id)
+        
         # Создаем кнопки для каждого тарифа
-        for tariff_key, tariff_data in self.tariffs.items():
+        for tariff_key, tariff_data in user_tariffs.items():
             # Кнопка для оплаты через Stars
             buttons.append([InlineKeyboardButton(
                 text=f"{tariff_data['name']} - {tariff_data['stars_price']} ⭐",
@@ -75,11 +108,13 @@ class PaymentManager:
             Словарь с информацией об инвойсе или None при ошибке
         """
         try:
-            if tariff_key not in self.tariffs:
+            # Получаем тарифы для пользователя
+            user_tariffs = self.get_user_tariffs(user_id)
+            if tariff_key not in user_tariffs:
                 logger.error(f"Неизвестный тариф: {tariff_key}")
                 return None
                 
-            tariff_data = self.tariffs[tariff_key]
+            tariff_data = user_tariffs[tariff_key]
             
             # Создаем кнопку для оплаты
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -124,11 +159,13 @@ class PaymentManager:
                 logger.error("Не настроен YooKassa")
                 return None
                 
-            if tariff_key not in self.tariffs:
+            # Получаем тарифы для пользователя
+            user_tariffs = self.get_user_tariffs(user_id)
+            if tariff_key not in user_tariffs:
                 logger.error(f"Неизвестный тариф: {tariff_key}")
                 return None
                 
-            tariff_data = self.tariffs[tariff_key]
+            tariff_data = user_tariffs[tariff_key]
             amount = tariff_data['rub_price'] * 100  # В копейках
             
             # Создаем URL для возврата
@@ -208,8 +245,9 @@ class PaymentManager:
             yookassa_available = bool(self.yookassa_client.shop_id and self.yookassa_client.secret_key)
             
             # Формируем текст с доступными тарифами
+            user_tariffs = self.get_user_tariffs(user_id)
             tariff_text = ""
-            for tariff_key, tariff_data in self.tariffs.items():
+            for tariff_key, tariff_data in user_tariffs.items():
                 tariff_text += f"⭐ {tariff_data['name']} - {tariff_data['stars_price']} ⭐\n"
                 tariff_text += f"💳 {tariff_data['name']} - {tariff_data['rub_price']} руб.\n\n"
             
@@ -340,8 +378,10 @@ class PaymentManager:
                 # Платеж через Stars - извлекаем тариф из payload
                 payload_parts = payload.split('_')
                 if len(payload_parts) >= 4:
-                    tariff_key = f"{payload_parts[3]}_{payload_parts[4]}"
-                    tariff_data = self.tariffs.get(tariff_key, {})
+                    tariff_key = f"{payload_parts[3]}_{payload_parts[4]}" # type: ignore
+                    user_id = int(payload_parts[-1]) # type: ignore
+                    user_tariffs = self.get_user_tariffs(user_id)
+                    tariff_data = user_tariffs.get(tariff_key, {})
                     expected_amount = tariff_data.get('stars_price', 1)
                     if pre_checkout_query.total_amount != expected_amount:
                         await pre_checkout_query.answer(ok=False, error_message="Неверная сумма платежа")
@@ -350,8 +390,10 @@ class PaymentManager:
                 # Платеж через ЮKassa - извлекаем тариф из payload
                 payload_parts = payload.split('_')
                 if len(payload_parts) >= 4:
-                    tariff_key = f"{payload_parts[3]}_{payload_parts[4]}"
-                    tariff_data = self.tariffs.get(tariff_key, {})
+                    tariff_key = f"{payload_parts[3]}_{payload_parts[4]}" # type: ignore
+                    user_id = int(payload_parts[-1]) # type: ignore
+                    user_tariffs = self.get_user_tariffs(user_id)
+                    tariff_data = user_tariffs.get(tariff_key, {})
                     expected_amount = tariff_data.get('rub_price', 0) * 100  # В копейках
                     if pre_checkout_query.total_amount != expected_amount:
                         await pre_checkout_query.answer(ok=False, error_message="Неверная сумма платежа")

@@ -311,3 +311,37 @@ class ClientsJsonManager:
             return self._write_clients(new_clients)
         
         return True
+
+class PromoManager:
+    def __init__(self, promo_file_path: str):
+        self.promo_file_path = promo_file_path
+
+    def get_user_discount(self, user_id: int) -> int:
+        """
+        Возвращает размер скидки для пользователя в процентах (0-100).
+        Считывает файл promo.txt при каждом вызове для поддержки горячего обновления.
+        """
+        if not os.path.exists(self.promo_file_path):
+            return 0
+        
+        try:
+            with open(self.promo_file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or '=' not in line:
+                        continue
+                    
+                    try:
+                        uid_str, discount_str = line.split('=')
+                        uid = int(uid_str.strip())
+                        discount = int(discount_str.strip())
+                        
+                        if uid == user_id:
+                            # Ограничиваем скидку от 0 до 100
+                            return max(0, min(100, discount))
+                    except ValueError:
+                        continue
+        except Exception as e:
+            logger.error(f"Ошибка при чтении файла промокодов: {e}")
+            
+        return 0
