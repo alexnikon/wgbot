@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 config/
 clients.json
+promo.txt
 
 # C extensions
 *.so

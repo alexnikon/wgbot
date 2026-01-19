@@ -1305,13 +1305,15 @@ async def check_expired_peers():
                     tariff_text = ""
                     for tariff_key, tariff_data in tariffs.items():
                         tariff_text += f"⭐ {tariff_data['name']} - {tariff_data['stars_price']} Stars\n"
-                        tariff_text += f"💳 {tariff_data['name']} - {tariff_data['rub_price']} руб.\n\n"
 
                     await bot.send_message(
                         chat_id=user["telegram_user_id"],
                         text=f"⏰ Твой VPN доступ истекает завтра!\n\n"
-                        f"💎 Доступные тарифы для продления:\n{tariff_text}"
-                        f"Используй кнопки ниже для продления доступа.",
+     🚀 Добро пожаловать в VPN бот!
+        
+Используй безопасный и быстрый VPN на базе WireGuard.
+
+Нажми кнопку ниже, чтобы купить доступ.а.",
                     )
 
                     # Отмечаем, что уведомление отправлено

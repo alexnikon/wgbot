@@ -244,17 +244,10 @@ class PaymentManager:
             # Проверяем доступность ЮKassa
             yookassa_available = bool(self.yookassa_client.shop_id and self.yookassa_client.secret_key)
             
-            # Формируем текст с доступными тарифами
-            user_tariffs = self.get_user_tariffs(user_id)
-            tariff_text = ""
-            for tariff_key, tariff_data in user_tariffs.items():
-                tariff_text += f"⭐ {tariff_data['name']} - {tariff_data['stars_price']} ⭐\n"
-                tariff_text += f"💳 {tariff_data['name']} - {tariff_data['rub_price']} руб.\n\n"
-            
-            payment_text = f"""
+            payment_text = """
 ⏰ Выбери тариф VPN доступа:
 
-{tariff_text}Выбери удобный для тебя тариф:
+Выбери удобный для тебя тариф:
             """
             
             await self.bot.send_message(
