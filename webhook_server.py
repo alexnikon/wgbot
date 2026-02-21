@@ -136,6 +136,7 @@ async def process_successful_payment(payment_data: dict):
         
         # Проверяем, есть ли уже пир у пользователя
         existing_peer = db.get_peer_by_telegram_id(user_id)
+        target_expire_date = None
         
         if existing_peer:
             logger.info(f"Пользователь {user_id} уже имеет пир, продлеваем доступ")
@@ -144,39 +145,65 @@ async def process_successful_payment(payment_data: dict):
             
             if success:
                 logger.info(f"Доступ продлен для пользователя {user_id}, новая дата: {new_expire_date}")
-                # Обновляем job в WGDashboard
+                # Проверяем, существует ли пир в WGDashboard
+                peer_exists = False
                 try:
-                    job_update_result = wg_api.update_job_expire_date(
-                        existing_peer['job_id'], 
-                        existing_peer['peer_id'], 
-                        new_expire_date
-                    )
-                    
-                    if job_update_result and job_update_result.get('status'):
-                        logger.info(f"Job обновлен для пользователя {user_id}, новая дата: {new_expire_date}")
-                    else:
-                        logger.error(f"Ошибка при обновлении job для пользователя {user_id}: {job_update_result}")
-                        
+                    peer_exists = wg_api.check_peer_exists(existing_peer['peer_id'])
                 except Exception as e:
-                    logger.error(f"Ошибка при обновлении job в WGDashboard: {e}")
-                
-                # Обновляем статус оплаты в таблице peers (amount в копейках, конвертируем в рубли)
-                db.update_payment_status(user_id, 'paid', amount // 100, 'yookassa', tariff_key)
-                
-                await send_telegram_message(
-                    user_id,
-                    f"✅ Платеж успешно обработан!\n"
-                    f"🎉 Продлили тебе доступ на {access_days} дней!\n"
-                    f"💳 Способ оплаты: Банковская карта\n\n"
-                    f"Текущая конфигурация остается актуальной."
-                )
+                    logger.error(f"Ошибка при проверке существования пира в WGDashboard: {e}")
+
+                if peer_exists:
+                    # Если пир есть - снимаем restricted и обновляем job
+                    try:
+                        allow_result = wg_api.allow_access_peer(existing_peer['peer_id'])
+                        if allow_result and allow_result.get('status'):
+                            logger.info(f"Restricted снят для пользователя {user_id}")
+                        else:
+                            logger.warning(
+                                f"Не удалось снять restricted для пользователя {user_id}: {allow_result}"
+                            )
+                    except Exception as e:
+                        logger.error(f"Ошибка при снятии restricted в WGDashboard: {e}")
+
+                    try:
+                        job_update_result = wg_api.update_job_expire_date(
+                            existing_peer['job_id'], 
+                            existing_peer['peer_id'], 
+                            new_expire_date
+                        )
+                        
+                        if job_update_result and job_update_result.get('status'):
+                            logger.info(f"Job обновлен для пользователя {user_id}, новая дата: {new_expire_date}")
+                        else:
+                            logger.error(f"Ошибка при обновлении job для пользователя {user_id}: {job_update_result}")
+                            
+                    except Exception as e:
+                        logger.error(f"Ошибка при обновлении job в WGDashboard: {e}")
+                    
+                    # Обновляем статус оплаты в таблице peers (amount в копейках, конвертируем в рубли)
+                    db.update_payment_status(user_id, 'paid', amount // 100, 'yookassa', tariff_key)
+                    
+                    await send_telegram_message(
+                        user_id,
+                        f"✅ Платеж успешно обработан!\n"
+                        f"🎉 Продлили тебе доступ на {access_days} дней!\n"
+                        f"💳 Способ оплаты: Банковская карта\n\n"
+                        f"Текущая конфигурация остается актуальной."
+                    )
+                else:
+                    logger.warning(
+                        f"Пир пользователя {user_id} не найден в WGDashboard, создаем новый"
+                    )
+                    # Если пира в WGDashboard нет — выполняем сценарий создания ниже
+                    target_expire_date = new_expire_date
+                    existing_peer = None
             else:
                 logger.error(f"Ошибка при продлении доступа для пользователя {user_id}")
                 await send_telegram_message(
                     user_id,
                     "❌ Ошибка при продлении доступа. Обратитесь в поддержку."
                 )
-        else:
+        if not existing_peer:
             # Создаем новый пир для пользователя
             logger.info(f"Создаем новый пир для пользователя {user_id}")
             # Получаем username из базы или генерируем имя
@@ -185,9 +212,9 @@ async def process_successful_payment(payment_data: dict):
 
             from datetime import datetime, timedelta
 
-            expire_date = (datetime.now() + timedelta(days=access_days)).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
+            expire_date = target_expire_date or (
+                datetime.now() + timedelta(days=access_days)
+            ).strftime("%Y-%m-%d %H:%M:%S")
 
             # Шаг 1. Сначала staging-запись в БД
             stage_info = db.stage_peer_record(

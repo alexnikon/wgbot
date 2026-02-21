@@ -318,7 +318,11 @@ class PaymentManager:
             if not payment_url:
                 return False
             
-            tariff_data = self.tariffs[tariff_key]
+            user_tariffs = self.get_user_tariffs(user_id)
+            tariff_data = user_tariffs.get(tariff_key)
+            if not tariff_data:
+                logger.error(f"Неизвестный тариф для пользователя {user_id}: {tariff_key}")
+                return False
             
             # Создаем клавиатуру с кнопкой для оплаты
             keyboard = InlineKeyboardMarkup(inline_keyboard=[

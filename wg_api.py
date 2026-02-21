@@ -79,6 +79,19 @@ class WGDashboardAPI:
         """
         data = {"peers": [peer_id]}
         return self._make_request("POST", f"/api/deletePeers/{self.config_name}", data)
+
+    def allow_access_peer(self, peer_id: str) -> Dict[str, Any]:
+        """
+        Снимает restricted для пира (разрешает доступ).
+
+        Args:
+            peer_id: ID пира (public_key)
+
+        Returns:
+            Результат операции
+        """
+        data = {"peers": [peer_id]}
+        return self._make_request("POST", f"/api/allowAccessPeers/{self.config_name}", data)
     
     def create_restrict_job(self, peer_id: str, expire_date_str: str = None) -> Tuple[Dict[str, Any], str, str]:
         """

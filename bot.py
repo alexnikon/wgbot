@@ -807,7 +807,7 @@ async def cmd_connect(message: types.Message):
             # Если не удалось скачать конфиг, создаем новый пир
             if not config_downloaded:
                 await message.reply("Создаю новый конфиг...")
-                ok, err = await create_or_restore_peer_for_user(
+                ok, err, _ = await create_or_restore_peer_for_user(
                     user_id, username, existing_peer.get("tariff_key")
                 )
                 if not ok:
@@ -818,7 +818,7 @@ async def cmd_connect(message: types.Message):
             # Пытаемся создать новый пир при любой ошибке
             try:
                 await message.reply("Попытка создать новый конфиг...")
-                ok, err = await create_or_restore_peer_for_user(
+                ok, err, _ = await create_or_restore_peer_for_user(
                     user_id, username, existing_peer.get("tariff_key")
                 )
                 if not ok:
@@ -979,7 +979,8 @@ async def handle_pay_stars_callback(callback_query: types.CallbackQuery):
     )
 
     if not success:
-        tariff_data = payment_manager.tariffs.get(tariff_key, {})
+        user_tariffs = payment_manager.get_user_tariffs(user_id)
+        tariff_data = user_tariffs.get(tariff_key, {})
         tariff_name = tariff_data.get("name", "неизвестный тариф")
         stars_price = tariff_data.get("stars_price", 1)
         await callback_query.message.reply(
@@ -1025,7 +1026,8 @@ async def handle_pay_yookassa_callback(callback_query: types.CallbackQuery):
     )
 
     if not success:
-        tariff_data = payment_manager.tariffs.get(tariff_key, {})
+        user_tariffs = payment_manager.get_user_tariffs(user_id)
+        tariff_data = user_tariffs.get(tariff_key, {})
         tariff_name = tariff_data.get("name", "неизвестный тариф")
         rub_price = tariff_data.get("rub_price", 0)
         await callback_query.message.reply(
@@ -1074,7 +1076,7 @@ async def handle_retry_peer_callback(callback_query: types.CallbackQuery):
         username = callback_query.from_user.username
 
         await callback_query.message.edit_text("🔄 Повторяю создание VPN доступа...")
-        ok, err = await create_or_restore_peer_for_user(user_id, username, tariff_key)
+        ok, err, _ = await create_or_restore_peer_for_user(user_id, username, tariff_key)
         if ok:
             await callback_query.message.edit_text(
                 "✅ Доступ создан и конфигурация отправлена!",
@@ -1185,38 +1187,78 @@ async def process_successful_payment(message: types.Message):
             )
             return
 
-        # Обновляем job в WGDashboard
+        # Проверяем существование пира в WGDashboard
+        peer_exists = False
         try:
-            job_update_result = wg_api.update_job_expire_date(
-                existing_peer["job_id"], existing_peer["peer_id"], new_expire_date
-            )
-
-            if job_update_result and job_update_result.get("status"):
-                logger.info(
-                    f"Job обновлен для пользователя {user_id}, новая дата: {new_expire_date}"
-                )
-            else:
-                logger.error(
-                    f"Ошибка при обновлении job для пользователя {user_id}: {job_update_result}"
-                )
-
+            peer_exists = wg_api.check_peer_exists(existing_peer["peer_id"])
         except Exception as e:
-            logger.error(f"Ошибка при обновлении job в WGDashboard: {e}")
+            logger.error(f"Ошибка при проверке существования пира в WGDashboard: {e}")
 
-        # При продлении не отправляем конфигурацию повторно
-        await message.reply(
-            f"✅ Платеж успешно обработан!\n"
-            f"🎉 Продлили тебе доступ на {access_days} дней!\n"
-            f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
-            f"Текущая конфигурация остается актуальной."
-        )
+        if peer_exists:
+            # Снимаем restricted и обновляем job
+            try:
+                allow_result = wg_api.allow_access_peer(existing_peer["peer_id"])
+                if allow_result and allow_result.get("status"):
+                    logger.info(f"Restricted снят для пользователя {user_id}")
+                else:
+                    logger.warning(
+                        f"Не удалось снять restricted для пользователя {user_id}: {allow_result}"
+                    )
+            except Exception as e:
+                logger.error(f"Ошибка при снятии restricted в WGDashboard: {e}")
+
+            try:
+                job_update_result = wg_api.update_job_expire_date(
+                    existing_peer["job_id"], existing_peer["peer_id"], new_expire_date
+                )
+
+                if job_update_result and job_update_result.get("status"):
+                    logger.info(
+                        f"Job обновлен для пользователя {user_id}, новая дата: {new_expire_date}"
+                    )
+                else:
+                    logger.error(
+                        f"Ошибка при обновлении job для пользователя {user_id}: {job_update_result}"
+                    )
+
+            except Exception as e:
+                logger.error(f"Ошибка при обновлении job в WGDashboard: {e}")
+
+            # При продлении не отправляем конфигурацию повторно
+            await message.reply(
+                f"✅ Платеж успешно обработан!\n"
+                f"🎉 Продлили тебе доступ на {access_days} дней!\n"
+                f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
+                f"Текущая конфигурация остается актуальной."
+            )
+        else:
+            logger.warning(
+                f"Пир пользователя {user_id} не найден в WGDashboard, создаем новый"
+            )
+            await message.reply("🔄 Восстанавливаю VPN доступ...")
+            ok, err, _ = await create_or_restore_peer_for_user(user_id, username, tariff_key)
+            if not ok:
+                await message.reply(
+                    "❌ Ошибка при восстановлении VPN доступа. Обратитесь в поддержку."
+                )
+                logger.error(
+                    f"Не удалось пересоздать пир для пользователя {user_id}: {err}"
+                )
+                return
+
+            await message.reply(
+                f"✅ Платеж успешно обработан!\n"
+                f"🎉 Продлили тебе доступ на {access_days} дней!\n"
+                f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
+                f"Доступ восстановлен, используй /connect для получения актуального конфига."
+            )
 
         # Не отправляем дополнительное сообщение после продления доступа
     else:
         # Создаем новый пир для пользователя
         try:
             await message.reply("🔄 Создаю VPN доступ...")
-            ok, err = await create_or_restore_peer_for_user(
+            ok, err, _ = await create_or_restore_peer_for_user(
                 user_id, username, tariff_key
             )
             if not ok:
