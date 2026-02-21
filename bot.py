@@ -69,59 +69,72 @@ async def create_or_restore_peer_for_user(
             ).strftime("%Y-%m-%d %H:%M:%S")
 
         # Имя пира
-        # Имя пира
         # Всегда стараемся использовать формат username_id, если есть username
         # Это исправляет ситуацию, когда старый пир был user_id, а теперь у пользователя есть username
         peer_name = generate_peer_name(username, user_id)
 
-        # Создаём пира в WG
-        peer_result = wg_api.add_peer(peer_name)
-        if not peer_result or "id" not in peer_result:
-            return False, "Ошибка при создании пира на сервере"
+        # Шаг 1. Сначала staging-запись в БД
+        stage_info = db.stage_peer_record(
+            peer_name=peer_name,
+            telegram_user_id=user_id,
+            telegram_username=username or "",
+            expire_date=target_expire_date,
+            payment_status="paid",
+            tariff_key=tariff_key,
+        )
+        if not stage_info:
+            return False, "Ошибка при сохранении клиента в БД", None
 
-        peer_id = peer_result["id"]
+        peer_id = None
+        try:
+            # Шаг 2. Создаём peer в WGDashboard
+            peer_result = wg_api.add_peer(peer_name)
+            if not peer_result or "id" not in peer_result:
+                raise Exception("Ошибка при создании пира на сервере")
+            peer_id = peer_result["id"]
 
-        # Создаём/обновляем job по целевой дате
-        job_updated = False
-        new_job_id = None
-        
-        if existing_peer and existing_peer.get("job_id"):
-            try:
-                # Пытаемся обновить существующий job
-                update_result = wg_api.update_job_expire_date(
-                    existing_peer["job_id"], peer_id, target_expire_date
-                )
-                # API может вернуть True/False или объект. Проверяем успех
-                if update_result and (isinstance(update_result, bool) or update_result.get("status") is True):
-                     job_updated = True
-                     new_job_id = existing_peer["job_id"]
-            except Exception as e:
-                logger.warning(f"Не удалось обновить job {existing_peer.get('job_id')}: {e}")
-        
-        # Если не удалось обновить (или не было job_id), создаем новый
-        if not job_updated:
+            # Шаг 3. Создаём job в WGDashboard
             logger.info(f"Создаем новый job для пира {peer_id}")
-            job_result, new_job_id, _ = wg_api.create_restrict_job(
+            job_result, new_job_id, final_expire_date = wg_api.create_restrict_job(
                 peer_id, target_expire_date
             )
-        # Сохраняем/обновляем запись в БД
-        if existing_peer:
-            db.update_peer_info(peer_name, peer_id, new_job_id, target_expire_date)
-        else:
-            # Новый peer: пометим как paid, если уже была оплата извне
-            db.add_peer(
+            if not job_result or (
+                isinstance(job_result, dict) and job_result.get("status") is False
+            ):
+                raise Exception("Ошибка при создании job на сервере")
+
+            # Финализируем запись в БД реальными peer_id/job_id
+            finalized = db.finalize_staged_peer(
+                telegram_user_id=user_id,
+                stage_info=stage_info,
                 peer_name=peer_name,
                 peer_id=peer_id,
                 job_id=new_job_id,
-                telegram_user_id=user_id,
+                expire_date=final_expire_date,
                 telegram_username=username or "",
-                expire_date=target_expire_date,
                 payment_status="paid",
+                tariff_key=tariff_key,
             )
+            if not finalized:
+                raise Exception("Ошибка при финализации клиента в БД")
 
-        # Обновляем clients.json
-        client_id_for_json = username if username else str(user_id)
-        clients_manager.add_update_client(client_id_for_json, peer_id)
+            # Шаг 4. Обновляем clients.json
+            client_id_for_json = username if username else str(user_id)
+            if not clients_manager.add_update_client(client_id_for_json, peer_id):
+                raise Exception("Ошибка при обновлении clients.json")
+        except Exception as e:
+            # Компенсация: удаляем уже созданный peer, затем откатываем staged-запись в БД
+            if peer_id:
+                try:
+                    wg_api.delete_peer(peer_id)
+                except Exception as delete_error:
+                    logger.error(f"Не удалось удалить peer {peer_id} после ошибки: {delete_error}")
+
+            rollback_ok = db.rollback_staged_peer(user_id, stage_info)
+            if not rollback_ok:
+                logger.error(f"Не удалось откатить staged-запись пользователя {user_id}")
+            logger.error(f"Ошибка в процессе создания/пересоздания пира: {e}")
+            return False, "Ошибка при создании/восстановлении доступа", None
 
         # Скачиваем конфиг (для проверки что он есть) с повторными попытками
         config_content = None

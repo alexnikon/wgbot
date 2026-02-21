@@ -7,8 +7,8 @@ import uvicorn
 from yookassa_client import YooKassaClient
 from database import Database
 from wg_api import WGDashboardAPI
-from utils import generate_peer_name
-from config import TELEGRAM_BOT_TOKEN
+from utils import ClientsJsonManager, generate_peer_name
+from config import CLIENTS_JSON_PATH, TELEGRAM_BOT_TOKEN
 import httpx
 
 # Настройка логирования
@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 yookassa_client = YooKassaClient()
 db = Database()
 wg_api = WGDashboardAPI()
+clients_manager = ClientsJsonManager(CLIENTS_JSON_PATH)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -178,107 +179,157 @@ async def process_successful_payment(payment_data: dict):
         else:
             # Создаем новый пир для пользователя
             logger.info(f"Создаем новый пир для пользователя {user_id}")
+            # Получаем username из базы или генерируем имя
+            peer_name = generate_peer_name(None, user_id)
+            logger.info(f"Генерируем имя пира: {peer_name}")
+
+            from datetime import datetime, timedelta
+
+            expire_date = (datetime.now() + timedelta(days=access_days)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+
+            # Шаг 1. Сначала staging-запись в БД
+            stage_info = db.stage_peer_record(
+                peer_name=peer_name,
+                telegram_user_id=user_id,
+                telegram_username="",
+                expire_date=expire_date,
+                payment_status="paid",
+                tariff_key=tariff_key,
+                payment_method="yookassa",
+                rub_paid=amount // 100,
+            )
+            if not stage_info:
+                logger.error(f"Ошибка при сохранении staging-записи в БД для пользователя {user_id}")
+                await send_telegram_message(
+                    user_id,
+                    "❌ Ошибка при сохранении данных. Обратитесь в поддержку.",
+                )
+                return
+
+            peer_id = None
             try:
-                # Получаем username из базы или генерируем имя
-                peer_name = generate_peer_name(None, user_id)
-                logger.info(f"Генерируем имя пира: {peer_name}")
-                
-                # Создаем пира
+                # Шаг 2. Создаем peer в WGDashboard
                 peer_result = wg_api.add_peer(peer_name)
-                
-                if not peer_result or 'id' not in peer_result:
-                    logger.error(f"Ошибка при создании пира для пользователя {user_id}: {peer_result}")
-                    await send_telegram_message(
-                        user_id,
-                        "❌ Ошибка при создании пира. Обратитесь в поддержку."
-                    )
-                    return
-                
-                peer_id = peer_result['id']
+                if not peer_result or "id" not in peer_result:
+                    raise Exception(f"Ошибка при создании пира: {peer_result}")
+
+                peer_id = peer_result["id"]
                 logger.info(f"Пир создан успешно: {peer_id}")
-                
-                # Создаем job для ограничения через определенное количество дней
-                from datetime import datetime, timedelta
-                expire_date = (datetime.now() + timedelta(days=access_days)).strftime('%Y-%m-%d %H:%M:%S')
-                logger.info(f"Создаем job для пира {peer_id}, дата истечения: {expire_date}")
-                job_result, job_id, expire_date = wg_api.create_restrict_job(peer_id, expire_date)
+
+                # Шаг 3. Создаем job в WGDashboard
+                logger.info(
+                    f"Создаем job для пира {peer_id}, дата истечения: {expire_date}"
+                )
+                job_result, job_id, final_expire_date = wg_api.create_restrict_job(
+                    peer_id, expire_date
+                )
+                if not job_result or (
+                    isinstance(job_result, dict) and job_result.get("status") is False
+                ):
+                    raise Exception(f"Ошибка при создании job: {job_result}")
+
                 logger.info(f"Job создан: {job_id}")
-                
-                # Сохраняем в базу данных с оплаченным статусом
-                success = db.add_peer(
+
+                # Финализация записи в БД реальными peer_id/job_id
+                success = db.finalize_staged_peer(
+                    telegram_user_id=user_id,
+                    stage_info=stage_info,
                     peer_name=peer_name,
                     peer_id=peer_id,
                     job_id=job_id,
-                    telegram_user_id=user_id,
-                    telegram_username=None,
-                    expire_date=expire_date,
-                    payment_status='paid',
-                    stars_paid=0,
+                    expire_date=final_expire_date,
+                    telegram_username="",
+                    payment_status="paid",
                     tariff_key=tariff_key,
-                    payment_method='yookassa',
-                    rub_paid=amount // 100  # Конвертируем из копеек в рубли
+                    payment_method="yookassa",
+                    rub_paid=amount // 100,
                 )
-                
                 if not success:
-                    logger.error(f"Ошибка при сохранении пира в БД для пользователя {user_id}")
-                    await send_telegram_message(
-                        user_id,
-                        "❌ Ошибка при сохранении данных. Обратитесь в поддержку."
-                    )
-                    return
-                
-                logger.info(f"Пир сохранен в БД для пользователя {user_id}")
-                
+                    raise Exception("Ошибка при финализации данных клиента в БД")
+
+                # Шаг 4. Обновляем clients.json
+                if not clients_manager.add_update_client(str(user_id), peer_id):
+                    raise Exception("Ошибка при обновлении clients.json")
+
+                logger.info(f"Пир сохранен в БД и clients.json для пользователя {user_id}")
+
                 # Обновляем статус оплаты в таблице peers
-                db.update_payment_status(user_id, 'paid', amount // 100, 'yookassa', tariff_key)
-                
+                db.update_payment_status(user_id, "paid", amount // 100, "yookassa", tariff_key)
+
                 # Скачиваем и отправляем конфигурацию
                 try:
                     logger.info(f"Скачиваем конфигурацию для пира {peer_id}")
                     config_content = wg_api.download_peer_config(peer_id)
                     filename = "nikonVPN.conf"
-                    
+
                     logger.info(f"Отправляем конфигурацию пользователю {user_id}")
                     # Отправляем конфигурацию через Telegram API
                     async with httpx.AsyncClient() as client:
                         files = {
-                            'document': (filename, config_content, 'application/octet-stream')
+                            "document": (filename, config_content, "application/octet-stream")
                         }
                         data = {
-                            'chat_id': user_id,
-                            'caption': f"✅ Платеж успешно обработан!\n💳 Способ оплаты: Банковская карта\n🎉 VPN доступ на {access_days} дней!\n📁 Ваша VPN конфигурация готова!"
+                            "chat_id": user_id,
+                            "caption": (
+                                "✅ Платеж успешно обработан!\n"
+                                "💳 Способ оплаты: Банковская карта\n"
+                                f"🎉 VPN доступ на {access_days} дней!\n"
+                                "📁 Ваша VPN конфигурация готова!"
+                            ),
                         }
-                        
+
                         response = await client.post(
                             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
                             files=files,
                             data=data,
-                            timeout=30.0
+                            timeout=30.0,
                         )
-                        
+
                         if response.status_code == 200:
                             logger.info(f"Конфигурация успешно отправлена пользователю {user_id}")
                         else:
-                            logger.error(f"Ошибка отправки конфигурации: {response.status_code} - {response.text}")
+                            logger.error(
+                                f"Ошибка отправки конфигурации: {response.status_code} - {response.text}"
+                            )
                             await send_telegram_message(
                                 user_id,
                                 f"✅ Платеж успешно обработан!\n💳 Способ оплаты: Банковская карта\n🎉 VPN доступ на {access_days} дней!\n\n"
-                                f"❌ Ошибка при отправке конфигурации. Используйте команду /connect для получения конфига."
+                                f"❌ Ошибка при отправке конфигурации. Используйте команду /connect для получения конфига.",
                             )
-                            
+
                 except Exception as e:
-                    logger.error(f"Ошибка при скачивании/отправке конфигурации для пользователя {user_id}: {e}", exc_info=True)
+                    logger.error(
+                        f"Ошибка при скачивании/отправке конфигурации для пользователя {user_id}: {e}",
+                        exc_info=True,
+                    )
                     await send_telegram_message(
                         user_id,
                         f"✅ Платеж успешно обработан!\n💳 Способ оплаты: Банковская карта\n🎉 VPN доступ на {access_days} дней!\n\n"
-                        f"❌ Ошибка при отправке конфигурации. Используйте команду /connect для получения конфига."
+                        f"❌ Ошибка при отправке конфигурации. Используйте команду /connect для получения конфига.",
                     )
-                
+
             except Exception as e:
-                logger.error(f"Ошибка при создании пира после оплаты для пользователя {user_id}: {e}", exc_info=True)
+                if peer_id:
+                    try:
+                        wg_api.delete_peer(peer_id)
+                    except Exception as delete_error:
+                        logger.error(
+                            f"Не удалось удалить peer {peer_id} после ошибки: {delete_error}"
+                        )
+
+                rollback_ok = db.rollback_staged_peer(user_id, stage_info)
+                if not rollback_ok:
+                    logger.error(f"Не удалось откатить staged-запись пользователя {user_id}")
+
+                logger.error(
+                    f"Ошибка при создании пира после оплаты для пользователя {user_id}: {e}",
+                    exc_info=True,
+                )
                 await send_telegram_message(
                     user_id,
-                    "❌ Ошибка при создании VPN доступа. Обратитесь в поддержку."
+                    "❌ Ошибка при создании VPN доступа. Обратитесь в поддержку.",
                 )
         
     except Exception as e:

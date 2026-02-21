@@ -1,6 +1,7 @@
 import json
 import logging
 import sqlite3
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -198,6 +199,255 @@ class Database:
 
         except sqlite3.IntegrityError as e:
             logger.error(f"Ошибка при добавлении пира {peer_name}: {e}")
+            return False
+
+    def stage_peer_record(
+        self,
+        peer_name: str,
+        telegram_user_id: int,
+        telegram_username: str,
+        expire_date: str,
+        payment_status: str = "paid",
+        tariff_key: str = None,
+        payment_method: str = None,
+        rub_paid: int = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Создает/обновляет запись пира в промежуточный pending-статус.
+        Это позволяет соблюдать порядок: БД -> WG peer -> WG job -> clients.json.
+        """
+        pending_peer_id = f"pending_peer_{uuid.uuid4()}"
+        pending_job_id = f"pending_job_{uuid.uuid4()}"
+
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT * FROM peers WHERE telegram_user_id = ? AND is_active = 1",
+                    (telegram_user_id,),
+                )
+                existing = cursor.fetchone()
+
+                if existing:
+                    existing_dict = dict(existing)
+                    cursor.execute(
+                        """
+                        UPDATE peers
+                        SET peer_name = ?,
+                            peer_id = ?,
+                            job_id = ?,
+                            telegram_username = ?,
+                            expire_date = ?,
+                            payment_status = ?,
+                            tariff_key = COALESCE(?, tariff_key),
+                            payment_method = COALESCE(?, payment_method),
+                            rub_paid = CASE WHEN ? IS NULL THEN rub_paid ELSE ? END
+                        WHERE id = ?
+                        """,
+                        (
+                            peer_name,
+                            pending_peer_id,
+                            pending_job_id,
+                            telegram_username,
+                            expire_date,
+                            payment_status,
+                            tariff_key,
+                            payment_method,
+                            rub_paid,
+                            rub_paid,
+                            existing_dict["id"],
+                        ),
+                    )
+                    conn.commit()
+                    return {
+                        "mode": "update",
+                        "pending_peer_id": pending_peer_id,
+                        "pending_job_id": pending_job_id,
+                        "previous": {
+                            "peer_name": existing_dict.get("peer_name"),
+                            "peer_id": existing_dict.get("peer_id"),
+                            "job_id": existing_dict.get("job_id"),
+                            "telegram_username": existing_dict.get("telegram_username"),
+                            "expire_date": existing_dict.get("expire_date"),
+                            "payment_status": existing_dict.get("payment_status"),
+                            "tariff_key": existing_dict.get("tariff_key"),
+                            "payment_method": existing_dict.get("payment_method"),
+                            "rub_paid": existing_dict.get("rub_paid"),
+                        },
+                    }
+
+                cursor.execute(
+                    """
+                    INSERT INTO peers (peer_name, peer_id, job_id, telegram_user_id,
+                                     telegram_username, created_at, expire_date, is_active,
+                                     payment_status, stars_paid, last_payment_date,
+                                     notification_sent, tariff_key, payment_method, rub_paid)
+                    VALUES (?, ?, ?, ?, ?, datetime('now'), ?, 1, ?, 0, NULL, 0, ?, ?, ?)
+                    """,
+                    (
+                        peer_name,
+                        pending_peer_id,
+                        pending_job_id,
+                        telegram_user_id,
+                        telegram_username,
+                        expire_date,
+                        payment_status,
+                        tariff_key,
+                        payment_method,
+                        0 if rub_paid is None else rub_paid,
+                    ),
+                )
+                conn.commit()
+                return {
+                    "mode": "create",
+                    "pending_peer_id": pending_peer_id,
+                    "pending_job_id": pending_job_id,
+                }
+
+        except sqlite3.IntegrityError as e:
+            logger.error(f"Ошибка при staging пира {peer_name}: {e}")
+            return None
+
+    def finalize_staged_peer(
+        self,
+        telegram_user_id: int,
+        stage_info: Dict[str, Any],
+        peer_name: str,
+        peer_id: str,
+        job_id: str,
+        expire_date: str,
+        telegram_username: str,
+        payment_status: str = "paid",
+        tariff_key: str = None,
+        payment_method: str = None,
+        rub_paid: int = None,
+    ) -> bool:
+        """Финализирует pending-запись, проставляя реальные peer_id/job_id."""
+        if not stage_info:
+            return False
+
+        pending_peer_id = stage_info.get("pending_peer_id")
+        pending_job_id = stage_info.get("pending_job_id")
+        mode = stage_info.get("mode", "update")
+
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    UPDATE peers
+                    SET peer_name = ?,
+                        peer_id = ?,
+                        job_id = ?,
+                        telegram_username = ?,
+                        expire_date = ?,
+                        payment_status = ?,
+                        tariff_key = COALESCE(?, tariff_key),
+                        payment_method = COALESCE(?, payment_method),
+                        rub_paid = CASE WHEN ? IS NULL THEN rub_paid ELSE ? END
+                    WHERE telegram_user_id = ?
+                      AND peer_id = ?
+                      AND job_id = ?
+                      AND is_active = 1
+                    """,
+                    (
+                        peer_name,
+                        peer_id,
+                        job_id,
+                        telegram_username,
+                        expire_date,
+                        payment_status,
+                        tariff_key,
+                        payment_method,
+                        rub_paid,
+                        rub_paid,
+                        telegram_user_id,
+                        pending_peer_id,
+                        pending_job_id,
+                    ),
+                )
+                conn.commit()
+                if cursor.rowcount <= 0:
+                    return False
+
+                operation = "CREATE_PEER" if mode == "create" else "UPDATE_PEER"
+                details = (
+                    f"Создан пир {peer_name}, тариф {tariff_key}"
+                    if mode == "create"
+                    else f"Обновлен пир {peer_name} с новым ID"
+                )
+                self.log_operation(peer_name, operation, details)
+                return True
+
+        except Exception as e:
+            logger.error(f"Ошибка при финализации пира {peer_name}: {e}")
+            return False
+
+    def rollback_staged_peer(self, telegram_user_id: int, stage_info: Dict[str, Any]) -> bool:
+        """Откатывает pending-запись при ошибках создания/обновления."""
+        if not stage_info:
+            return False
+
+        pending_peer_id = stage_info.get("pending_peer_id")
+        pending_job_id = stage_info.get("pending_job_id")
+        mode = stage_info.get("mode")
+
+        try:
+            with sqlite3.connect(self.db_file) as conn:
+                cursor = conn.cursor()
+
+                if mode == "create":
+                    cursor.execute(
+                        """
+                        DELETE FROM peers
+                        WHERE telegram_user_id = ?
+                          AND peer_id = ?
+                          AND job_id = ?
+                          AND is_active = 1
+                        """,
+                        (telegram_user_id, pending_peer_id, pending_job_id),
+                    )
+                else:
+                    previous = stage_info.get("previous") or {}
+                    cursor.execute(
+                        """
+                        UPDATE peers
+                        SET peer_name = ?,
+                            peer_id = ?,
+                            job_id = ?,
+                            telegram_username = ?,
+                            expire_date = ?,
+                            payment_status = ?,
+                            tariff_key = ?,
+                            payment_method = ?,
+                            rub_paid = ?
+                        WHERE telegram_user_id = ?
+                          AND peer_id = ?
+                          AND job_id = ?
+                          AND is_active = 1
+                        """,
+                        (
+                            previous.get("peer_name"),
+                            previous.get("peer_id"),
+                            previous.get("job_id"),
+                            previous.get("telegram_username"),
+                            previous.get("expire_date"),
+                            previous.get("payment_status"),
+                            previous.get("tariff_key"),
+                            previous.get("payment_method"),
+                            previous.get("rub_paid"),
+                            telegram_user_id,
+                            pending_peer_id,
+                            pending_job_id,
+                        ),
+                    )
+
+                conn.commit()
+                return cursor.rowcount > 0
+
+        except Exception as e:
+            logger.error(f"Ошибка при откате staged-пира пользователя {telegram_user_id}: {e}")
             return False
 
     def get_peer_by_name(self, peer_name: str) -> Optional[Dict[str, Any]]:
