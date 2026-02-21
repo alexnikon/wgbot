@@ -113,6 +113,9 @@ async def process_successful_payment(payment_data: dict):
         
         user_id = int(metadata.get('user_id', 0))
         tariff_key = metadata.get('tariff_key', '30_days')
+        metadata_username = (metadata.get('username') or '').strip()
+        if metadata_username.startswith('@'):
+            metadata_username = metadata_username[1:]
         amount = yookassa_client.get_payment_amount(payment_data)
         
         if not user_id:
@@ -137,6 +140,9 @@ async def process_successful_payment(payment_data: dict):
         # Проверяем, есть ли уже пир у пользователя
         existing_peer = db.get_peer_by_telegram_id(user_id)
         target_expire_date = None
+        effective_username = metadata_username or (
+            (existing_peer or {}).get('telegram_username', '').strip()
+        )
         
         if existing_peer:
             logger.info(f"Пользователь {user_id} уже имеет пир, продлеваем доступ")
@@ -146,25 +152,26 @@ async def process_successful_payment(payment_data: dict):
             if success:
                 logger.info(f"Доступ продлен для пользователя {user_id}, новая дата: {new_expire_date}")
                 # Проверяем, существует ли пир в WGDashboard
-                peer_exists = False
+                peer_exists = None
                 try:
                     peer_exists = wg_api.check_peer_exists(existing_peer['peer_id'])
                 except Exception as e:
                     logger.error(f"Ошибка при проверке существования пира в WGDashboard: {e}")
 
-                if peer_exists:
-                    # Если пир есть - снимаем restricted и обновляем job
-                    try:
-                        allow_result = wg_api.allow_access_peer(existing_peer['peer_id'])
-                        if allow_result and allow_result.get('status'):
-                            logger.info(f"Restricted снят для пользователя {user_id}")
-                        else:
-                            logger.warning(
-                                f"Не удалось снять restricted для пользователя {user_id}: {allow_result}"
-                            )
-                    except Exception as e:
-                        logger.error(f"Ошибка при снятии restricted в WGDashboard: {e}")
+                allow_result = None
+                try:
+                    allow_result = wg_api.allow_access_peer(existing_peer['peer_id'])
+                    if allow_result and allow_result.get('status'):
+                        logger.info(f"Restricted снят для пользователя {user_id}")
+                        peer_exists = True
+                    else:
+                        logger.warning(
+                            f"Не удалось снять restricted для пользователя {user_id}: {allow_result}"
+                        )
+                except Exception as e:
+                    logger.error(f"Ошибка при снятии restricted в WGDashboard: {e}")
 
+                if peer_exists is True:
                     try:
                         job_update_result = wg_api.update_job_expire_date(
                             existing_peer['job_id'], 
@@ -190,24 +197,33 @@ async def process_successful_payment(payment_data: dict):
                         f"💳 Способ оплаты: Банковская карта\n\n"
                         f"Текущая конфигурация остается актуальной."
                     )
-                else:
+                elif peer_exists is False:
                     logger.warning(
                         f"Пир пользователя {user_id} не найден в WGDashboard, создаем новый"
                     )
                     # Если пира в WGDashboard нет — выполняем сценарий создания ниже
                     target_expire_date = new_expire_date
                     existing_peer = None
+                else:
+                    logger.error(
+                        f"Статус пира пользователя {user_id} не определен, пересоздание отменено чтобы избежать дубля"
+                    )
+                    await send_telegram_message(
+                        user_id,
+                        "❌ Не удалось проверить статус VPN на сервере. Попробуйте еще раз через минуту или обратитесь в поддержку.",
+                    )
+                    return
             else:
                 logger.error(f"Ошибка при продлении доступа для пользователя {user_id}")
                 await send_telegram_message(
                     user_id,
                     "❌ Ошибка при продлении доступа. Обратитесь в поддержку."
                 )
+                return
         if not existing_peer:
             # Создаем новый пир для пользователя
             logger.info(f"Создаем новый пир для пользователя {user_id}")
-            # Получаем username из базы или генерируем имя
-            peer_name = generate_peer_name(None, user_id)
+            peer_name = generate_peer_name(effective_username or None, user_id)
             logger.info(f"Генерируем имя пира: {peer_name}")
 
             from datetime import datetime, timedelta
@@ -220,7 +236,7 @@ async def process_successful_payment(payment_data: dict):
             stage_info = db.stage_peer_record(
                 peer_name=peer_name,
                 telegram_user_id=user_id,
-                telegram_username="",
+                telegram_username=effective_username or "",
                 expire_date=expire_date,
                 payment_status="paid",
                 tariff_key=tariff_key,
@@ -267,7 +283,7 @@ async def process_successful_payment(payment_data: dict):
                     peer_id=peer_id,
                     job_id=job_id,
                     expire_date=final_expire_date,
-                    telegram_username="",
+                    telegram_username=effective_username or "",
                     payment_status="paid",
                     tariff_key=tariff_key,
                     payment_method="yookassa",
@@ -277,7 +293,8 @@ async def process_successful_payment(payment_data: dict):
                     raise Exception("Ошибка при финализации данных клиента в БД")
 
                 # Шаг 4. Обновляем clients.json
-                if not clients_manager.add_update_client(str(user_id), peer_id):
+                client_id_for_json = effective_username if effective_username else str(user_id)
+                if not clients_manager.add_update_client(client_id_for_json, peer_id):
                     raise Exception("Ошибка при обновлении clients.json")
 
                 logger.info(f"Пир сохранен в БД и clients.json для пользователя {user_id}")

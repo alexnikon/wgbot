@@ -1188,25 +1188,26 @@ async def process_successful_payment(message: types.Message):
             return
 
         # Проверяем существование пира в WGDashboard
-        peer_exists = False
+        peer_exists = None
         try:
             peer_exists = wg_api.check_peer_exists(existing_peer["peer_id"])
         except Exception as e:
             logger.error(f"Ошибка при проверке существования пира в WGDashboard: {e}")
 
-        if peer_exists:
-            # Снимаем restricted и обновляем job
-            try:
-                allow_result = wg_api.allow_access_peer(existing_peer["peer_id"])
-                if allow_result and allow_result.get("status"):
-                    logger.info(f"Restricted снят для пользователя {user_id}")
-                else:
-                    logger.warning(
-                        f"Не удалось снять restricted для пользователя {user_id}: {allow_result}"
-                    )
-            except Exception as e:
-                logger.error(f"Ошибка при снятии restricted в WGDashboard: {e}")
+        allow_result = None
+        try:
+            allow_result = wg_api.allow_access_peer(existing_peer["peer_id"])
+            if allow_result and allow_result.get("status"):
+                logger.info(f"Restricted снят для пользователя {user_id}")
+                peer_exists = True
+            else:
+                logger.warning(
+                    f"Не удалось снять restricted для пользователя {user_id}: {allow_result}"
+                )
+        except Exception as e:
+            logger.error(f"Ошибка при снятии restricted в WGDashboard: {e}")
 
+        if peer_exists is True:
             try:
                 job_update_result = wg_api.update_job_expire_date(
                     existing_peer["job_id"], existing_peer["peer_id"], new_expire_date
@@ -1231,7 +1232,7 @@ async def process_successful_payment(message: types.Message):
                 f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
                 f"Текущая конфигурация остается актуальной."
             )
-        else:
+        elif peer_exists is False:
             logger.warning(
                 f"Пир пользователя {user_id} не найден в WGDashboard, создаем новый"
             )
@@ -1252,6 +1253,14 @@ async def process_successful_payment(message: types.Message):
                 f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
                 f"Доступ восстановлен, используй /connect для получения актуального конфига."
             )
+        else:
+            await message.reply(
+                "❌ Не удалось проверить статус VPN на сервере. Попробуйте еще раз через минуту или обратитесь в поддержку."
+            )
+            logger.error(
+                f"Статус пира пользователя {user_id} не определен, пересоздание отменено чтобы избежать дубля"
+            )
+            return
 
         # Не отправляем дополнительное сообщение после продления доступа
     else:

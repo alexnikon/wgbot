@@ -170,12 +170,22 @@ class PaymentManager:
             
             # Создаем URL для возврата
             return_url = "https://t.me/nikonvpn_bot"
+
+            effective_username = (username or "").strip()
+            if effective_username.startswith("@"):
+                effective_username = effective_username[1:]
+            if not effective_username:
+                existing_peer = self.db.get_peer_by_telegram_id(user_id)
+                if existing_peer:
+                    effective_username = (existing_peer.get("telegram_username") or "").strip()
+            if effective_username.startswith("@"):
+                effective_username = effective_username[1:]
             
             # Метаданные для платежа
             metadata = {
                 'user_id': str(user_id),
                 'tariff_key': tariff_key,
-                'username': username or '',
+                'username': effective_username,
                 'description': f'VPN доступ на {tariff_data["name"]}'
             }
             
