@@ -8,7 +8,8 @@ from yookassa_client import YooKassaClient
 from database import Database
 from wg_api import WGDashboardAPI
 from utils import ClientsJsonManager, generate_peer_name
-from config import CLIENTS_JSON_PATH, TELEGRAM_BOT_TOKEN
+from config import CLIENTS_JSON_PATH, CUSTOM_CLIENTS_PATH, TELEGRAM_BOT_TOKEN
+from custom_clients import CustomClientsManager, sync_custom_peers_access
 import httpx
 
 # Настройка логирования
@@ -27,6 +28,28 @@ yookassa_client = YooKassaClient()
 db = Database()
 wg_api = WGDashboardAPI()
 clients_manager = ClientsJsonManager(CLIENTS_JSON_PATH)
+custom_clients_manager = CustomClientsManager(CUSTOM_CLIENTS_PATH)
+
+
+def sync_bound_custom_peers_for_user(
+    user_id: int,
+    expire_date: str,
+    allow_access: bool = True,
+    exclude_peer_id: str | None = None,
+):
+    exclude_peer_ids = {exclude_peer_id} if exclude_peer_id else set()
+    result = sync_custom_peers_access(
+        wg_api=wg_api,
+        custom_clients_manager=custom_clients_manager,
+        user_id=user_id,
+        expire_date=expire_date,
+        allow_access=allow_access,
+        exclude_peer_ids=exclude_peer_ids,
+    )
+    if result["total"] > 0:
+        logger.info(
+            f"Синхронизация custom peers user_id={user_id}: total={result['total']}, updated={result['updated']}, failed={result['failed']}"
+        )
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -197,6 +220,12 @@ async def process_successful_payment(payment_data: dict):
                         f"💳 Способ оплаты: Банковская карта\n\n"
                         f"Текущая конфигурация остается актуальной."
                     )
+                    sync_bound_custom_peers_for_user(
+                        user_id=user_id,
+                        expire_date=new_expire_date,
+                        allow_access=True,
+                        exclude_peer_id=existing_peer["peer_id"],
+                    )
                 elif peer_exists is False:
                     logger.warning(
                         f"Пир пользователя {user_id} не найден в WGDashboard, создаем новый"
@@ -294,10 +323,20 @@ async def process_successful_payment(payment_data: dict):
 
                 # Шаг 4. Обновляем clients.json
                 client_id_for_json = effective_username if effective_username else str(user_id)
-                if not clients_manager.add_update_client(client_id_for_json, peer_id):
+                if effective_username:
+                    clients_manager.remove_client(str(user_id))
+                if not clients_manager.add_update_client(
+                    client_id_for_json, peer_id, force_write=True
+                ):
                     raise Exception("Ошибка при обновлении clients.json")
 
                 logger.info(f"Пир сохранен в БД и clients.json для пользователя {user_id}")
+                sync_bound_custom_peers_for_user(
+                    user_id=user_id,
+                    expire_date=final_expire_date,
+                    allow_access=True,
+                    exclude_peer_id=peer_id,
+                )
 
                 # Обновляем статус оплаты в таблице peers
                 db.update_payment_status(user_id, "paid", amount // 100, "yookassa", tariff_key)
@@ -461,6 +500,13 @@ async def process_refund_succeeded(refund_data: dict):
                         
                 except Exception as e:
                     logger.error(f"Ошибка при обновлении job в WGDashboard после возврата: {e}")
+
+                sync_bound_custom_peers_for_user(
+                    user_id=user_id,
+                    expire_date=new_expire_date,
+                    allow_access=False,
+                    exclude_peer_id=peer_info["peer_id"],
+                )
             else:
                 logger.warning(f"Не найден пир для пользователя {user_id} при обработке возврата")
         else:

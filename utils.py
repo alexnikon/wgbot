@@ -271,7 +271,7 @@ class ClientsJsonManager:
             logger.error(f"Error writing clients.json: {e}")
             return False
 
-    def add_update_client(self, client_id: str, public_key: str) -> bool:
+    def add_update_client(self, client_id: str, public_key: str, force_write: bool = False) -> bool:
         """
         Adds or updates a client in the JSON file.
         client_id: The Telegram username (or ID) used as identifier.
@@ -284,8 +284,9 @@ class ClientsJsonManager:
         for client in clients:
             if client.get("clientId") == client_id:
                 found = True
-                if client.get("publicKey") != public_key:
-                    client["publicKey"] = public_key
+                old_public_key = client.get("publicKey")
+                client["publicKey"] = public_key
+                if old_public_key != public_key or force_write:
                     updated = True
                 break
         
@@ -293,7 +294,7 @@ class ClientsJsonManager:
             clients.append({"clientId": client_id, "publicKey": public_key})
             updated = True
             
-        if updated:
+        if updated or force_write:
             return self._write_clients(clients)
         return True
 

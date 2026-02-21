@@ -9,7 +9,13 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from config import SUPPORT_URL, TELEGRAM_BOT_TOKEN, CLIENTS_JSON_PATH
+from config import (
+    CLIENTS_JSON_PATH,
+    CUSTOM_CLIENTS_PATH,
+    SUPPORT_URL,
+    TELEGRAM_BOT_TOKEN,
+)
+from custom_clients import CustomClientsManager, sync_custom_peers_access
 from database import Database
 from payment import PaymentManager
 from utils import (
@@ -42,6 +48,28 @@ wg_api = WGDashboardAPI()
 db = Database()
 payment_manager = PaymentManager(bot)
 clients_manager = ClientsJsonManager(CLIENTS_JSON_PATH)
+custom_clients_manager = CustomClientsManager(CUSTOM_CLIENTS_PATH)
+
+
+def sync_bound_custom_peers_for_user(
+    user_id: int,
+    expire_date: str,
+    allow_access: bool = True,
+    exclude_peer_id: str | None = None,
+) -> None:
+    exclude_peer_ids = {exclude_peer_id} if exclude_peer_id else set()
+    result = sync_custom_peers_access(
+        wg_api=wg_api,
+        custom_clients_manager=custom_clients_manager,
+        user_id=user_id,
+        expire_date=expire_date,
+        allow_access=allow_access,
+        exclude_peer_ids=exclude_peer_ids,
+    )
+    if result["total"] > 0:
+        logger.info(
+            f"Синхронизация custom peers user_id={user_id}: total={result['total']}, updated={result['updated']}, failed={result['failed']}"
+        )
 
 
 # Хелпер: создать или восстановить пира и вернуть конфиг
@@ -120,8 +148,19 @@ async def create_or_restore_peer_for_user(
 
             # Шаг 4. Обновляем clients.json
             client_id_for_json = username if username else str(user_id)
-            if not clients_manager.add_update_client(client_id_for_json, peer_id):
+            if username:
+                clients_manager.remove_client(str(user_id))
+            if not clients_manager.add_update_client(
+                client_id_for_json, peer_id, force_write=True
+            ):
                 raise Exception("Ошибка при обновлении clients.json")
+
+            sync_bound_custom_peers_for_user(
+                user_id=user_id,
+                expire_date=final_expire_date,
+                allow_access=True,
+                exclude_peer_id=peer_id,
+            )
         except Exception as e:
             # Компенсация: удаляем уже созданный peer, затем откатываем staged-запись в БД
             if peer_id:
@@ -1232,6 +1271,12 @@ async def process_successful_payment(message: types.Message):
                 f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
                 f"Текущая конфигурация остается актуальной."
             )
+            sync_bound_custom_peers_for_user(
+                user_id=user_id,
+                expire_date=new_expire_date,
+                allow_access=True,
+                exclude_peer_id=existing_peer["peer_id"],
+            )
         elif peer_exists is False:
             logger.warning(
                 f"Пир пользователя {user_id} не найден в WGDashboard, создаем новый"
@@ -1253,6 +1298,14 @@ async def process_successful_payment(message: types.Message):
                 f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
                 f"Доступ восстановлен, используй /connect для получения актуального конфига."
             )
+            refreshed_peer = db.get_peer_by_telegram_id(user_id)
+            if refreshed_peer and refreshed_peer.get("expire_date"):
+                sync_bound_custom_peers_for_user(
+                    user_id=user_id,
+                    expire_date=refreshed_peer["expire_date"],
+                    allow_access=True,
+                    exclude_peer_id=refreshed_peer.get("peer_id"),
+                )
         else:
             await message.reply(
                 "❌ Не удалось проверить статус VPN на сервере. Попробуйте еще раз через минуту или обратитесь в поддержку."
@@ -1288,6 +1341,14 @@ async def process_successful_payment(message: types.Message):
                     reply_markup=keyboard,
                 )
                 return
+            refreshed_peer = db.get_peer_by_telegram_id(user_id)
+            if refreshed_peer and refreshed_peer.get("expire_date"):
+                sync_bound_custom_peers_for_user(
+                    user_id=user_id,
+                    expire_date=refreshed_peer["expire_date"],
+                    allow_access=True,
+                    exclude_peer_id=refreshed_peer.get("peer_id"),
+                )
         except Exception as e:
             logger.error(f"Ошибка при создании пира после оплаты: {e}")
             keyboard = InlineKeyboardMarkup(

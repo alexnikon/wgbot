@@ -15,6 +15,7 @@ WG_CONFIG_NAME = os.getenv("WG_CONFIG_NAME", "awg0")
 # Database Configuration
 DATABASE_FILE = "data/wgbot.db"
 CLIENTS_JSON_PATH = os.getenv("CLIENTS_JSON_PATH", "clients.json")
+CUSTOM_CLIENTS_PATH = os.getenv("CUSTOM_CLIENTS_PATH", "custom_clients.txt")
 
 # Peer Configuration
 PEER_EXPIRY_DAYS = 30
