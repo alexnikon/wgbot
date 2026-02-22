@@ -625,11 +625,13 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
     # Получаем информацию о пире из базы данных
     try:
         expire_date_str = existing_peer.get("expire_date", "Неизвестно")
-        created_at_str = existing_peer.get("created_at", "Неизвестно")
         
         # Форматируем даты для отображения
         expire_date_formatted = format_date_for_user(expire_date_str) if expire_date_str != "Неизвестно" else "Неизвестно"
-        created_at_formatted = format_date_for_user(created_at_str) if created_at_str != "Неизвестно" else "Неизвестно"
+        custom_peer_ids = custom_clients_manager.get_peers_for_user(user_id)
+        devices_line = (
+            f"\nПодключено {len(custom_peer_ids)} устройств" if custom_peer_ids else ""
+        )
 
         # Проверяем, истек ли доступ
         from datetime import datetime
@@ -648,8 +650,7 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
             status_text = f"""
 📊 Статус доступа:
 
-📅 Доступ приобретен: {created_at_formatted}
-⏰ Доступ закончился: {expire_date_formatted}
+⏰ Доступ закончился: {expire_date_formatted}{devices_line}
 
 ⚠️ Твой VPN доступ истек!
 
@@ -670,8 +671,7 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
                 status_text = f"""
 📊 Статус доступа:
 
-📅 Доступ приобретен: {created_at_formatted}
-⏰ Доступ закончится: {expire_date_formatted}
+⏰ Доступ закончится: {expire_date_formatted}{devices_line}
                 """
 
                 if days_left > 0:
@@ -691,8 +691,7 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
                 status_text = f"""
 📊 Статус доступа:
 
-📅 Доступ приобретен: {created_at_formatted}
-⏰ Доступ закончится: {expire_date_formatted}
+⏰ Доступ закончится: {expire_date_formatted}{devices_line}
 
 Выбери действие с помощью кнопок ниже:
                 """
