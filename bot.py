@@ -630,7 +630,7 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
         expire_date_formatted = format_date_for_user(expire_date_str) if expire_date_str != "Неизвестно" else "Неизвестно"
         custom_peer_ids = custom_clients_manager.get_peers_for_user(user_id)
         devices_line = (
-            f"\nПодключено {len(custom_peer_ids)} устройств" if custom_peer_ids else ""
+            f"\nПодключено устройств: {len(custom_peer_ids)}" if custom_peer_ids else ""
         )
 
         # Проверяем, истек ли доступ
