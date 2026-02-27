@@ -51,6 +51,17 @@ clients_manager = ClientsJsonManager(CLIENTS_JSON_PATH)
 custom_clients_manager = CustomClientsManager(CUSTOM_CLIENTS_PATH)
 
 
+def sync_clients_json_for_user(
+    user_id: int, username: str | None, peer_id: str
+) -> bool:
+    client_id_for_json = username if username else str(user_id)
+    if username:
+        clients_manager.remove_client(str(user_id))
+    return clients_manager.add_update_client(
+        client_id_for_json, peer_id, force_write=True
+    )
+
+
 def sync_bound_custom_peers_for_user(
     user_id: int,
     expire_date: str,
@@ -150,9 +161,7 @@ async def create_or_restore_peer_for_user(
             client_id_for_json = username if username else str(user_id)
             if username:
                 clients_manager.remove_client(str(user_id))
-            if not clients_manager.add_update_client(
-                client_id_for_json, peer_id, force_write=True
-            ):
+            if not sync_clients_json_for_user(user_id, username, peer_id):
                 raise Exception("Ошибка при обновлении clients.json")
 
             sync_bound_custom_peers_for_user(
@@ -455,6 +464,12 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                 try:
                     peer_config = wg_api.download_peer_config(existing_peer["peer_id"])
                     config_downloaded = True
+                    if not sync_clients_json_for_user(
+                        user_id, username, existing_peer["peer_id"]
+                    ):
+                        logger.warning(
+                            f"Не удалось обновить clients.json для пользователя {user_id}"
+                        )
                 except Exception as e:
                     logger.warning(
                         f"Не удалось скачать конфиг существующего пира: {e}, попробуем создать новый"
@@ -478,6 +493,14 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                 
                 # Используем полученный конфиг
                 peer_config = new_config
+                refreshed_peer = db.get_peer_by_telegram_id(user_id)
+                if refreshed_peer and refreshed_peer.get("peer_id"):
+                    if not sync_clients_json_for_user(
+                        user_id, username, refreshed_peer["peer_id"]
+                    ):
+                        logger.warning(
+                            f"Не удалось обновить clients.json для пользователя {user_id}"
+                        )
 
             # Отправляем конфиг
             config_filename = "nikonVPN.conf"
@@ -513,6 +536,14 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                     user_id, username, existing_peer.get("tariff_key")
                 )
                 if ok and new_config:
+                    refreshed_peer = db.get_peer_by_telegram_id(user_id)
+                    if refreshed_peer and refreshed_peer.get("peer_id"):
+                        if not sync_clients_json_for_user(
+                            user_id, username, refreshed_peer["peer_id"]
+                        ):
+                            logger.warning(
+                                f"Не удалось обновить clients.json для пользователя {user_id}"
+                            )
                     # Если удалось создать, отправляем конфиг
                     config_filename = "nikonVPN.conf"
                     config_bytes = (
@@ -827,6 +858,12 @@ async def cmd_connect(message: types.Message):
                         existing_peer["peer_id"]
                     )
                     filename = "nikonVPN.conf"
+                    if not sync_clients_json_for_user(
+                        user_id, username, existing_peer["peer_id"]
+                    ):
+                        logger.warning(
+                            f"Не удалось обновить clients.json для пользователя {user_id}"
+                        )
 
                     await bot.send_document(
                         chat_id=message.chat.id,
@@ -850,6 +887,14 @@ async def cmd_connect(message: types.Message):
                 )
                 if not ok:
                     await message.reply(f"❌ {err}")
+                refreshed_peer = db.get_peer_by_telegram_id(user_id)
+                if refreshed_peer and refreshed_peer.get("peer_id"):
+                    if not sync_clients_json_for_user(
+                        user_id, username, refreshed_peer["peer_id"]
+                    ):
+                        logger.warning(
+                            f"Не удалось обновить clients.json для пользователя {user_id}"
+                        )
                 return
         except Exception as e:
             logger.error(f"Ошибка при получении конфига в /connect: {e}", exc_info=True)
