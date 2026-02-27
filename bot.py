@@ -30,7 +30,7 @@ from utils import (
 )
 from wg_api import WGDashboardAPI
 
-# Настройка логирования
+# Logging configuration
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -38,12 +38,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Инициализация бота и диспетчера
+# Bot and dispatcher initialization
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# Инициализация компонентов
+# Component initialization
 wg_api = WGDashboardAPI()
 db = Database()
 payment_manager = PaymentManager(bot)
@@ -79,24 +79,24 @@ def sync_bound_custom_peers_for_user(
     )
     if result["total"] > 0:
         logger.info(
-            f"Синхронизация custom peers user_id={user_id}: total={result['total']}, updated={result['updated']}, failed={result['failed']}"
+            f"Custom peers sync user_id={user_id}: total={result['total']}, updated={result['updated']}, failed={result['failed']}"
         )
 
 
-# Хелпер: создать или восстановить пира и вернуть конфиг
+# Helper: create or restore a peer and return config
 async def create_or_restore_peer_for_user(
     user_id: int, username: str | None, tariff_key: str | None = None
 ) -> tuple[bool, str, bytes | None]:
-    """Создаёт нового пира либо восстанавливает, если он отсутствует на сервере. Возвращает (success, error_message, config_content)."""
+    """Create a peer or restore it if missing on the server. Returns (success, error_message, config_content)."""
     try:
         existing_peer = db.get_peer_by_telegram_id(user_id)
 
-        # Определяем срок действия
+        # Determine expiration
         if existing_peer and existing_peer.get("expire_date"):
-            # Восстановление по существующей дате
+            # Restore using the existing date
             target_expire_date = existing_peer["expire_date"]
         else:
-            # Новый пользователь или нет даты — возьмём из тарифа
+            # New user or no date: take it from the tariff
             access_days = 30
             if tariff_key:
                 tariff_data = payment_manager.tariffs.get(tariff_key, {})
@@ -107,12 +107,12 @@ async def create_or_restore_peer_for_user(
                 datetime.now() + timedelta(days=access_days)
             ).strftime("%Y-%m-%d %H:%M:%S")
 
-        # Имя пира
-        # Всегда стараемся использовать формат username_id, если есть username
-        # Это исправляет ситуацию, когда старый пир был user_id, а теперь у пользователя есть username
+        # Peer name
+        # Prefer username_id format when username is present
+        # This fixes cases where the old peer used user_id and the user now has a username
         peer_name = generate_peer_name(username, user_id)
 
-        # Шаг 1. Сначала staging-запись в БД
+        # Step 1. Stage the DB record first
         stage_info = db.stage_peer_record(
             peer_name=peer_name,
             telegram_user_id=user_id,
@@ -126,14 +126,14 @@ async def create_or_restore_peer_for_user(
 
         peer_id = None
         try:
-            # Шаг 2. Создаём peer в WGDashboard
+            # Step 2. Create peer in WGDashboard
             peer_result = wg_api.add_peer(peer_name)
             if not peer_result or "id" not in peer_result:
                 raise Exception("Ошибка при создании пира на сервере")
             peer_id = peer_result["id"]
 
-            # Шаг 3. Создаём job в WGDashboard
-            logger.info(f"Создаем новый job для пира {peer_id}")
+            # Step 3. Create job in WGDashboard
+            logger.info(f"Creating new job for peer {peer_id}")
             job_result, new_job_id, final_expire_date = wg_api.create_restrict_job(
                 peer_id, target_expire_date
             )
@@ -142,7 +142,7 @@ async def create_or_restore_peer_for_user(
             ):
                 raise Exception("Ошибка при создании job на сервере")
 
-            # Финализируем запись в БД реальными peer_id/job_id
+            # Finalize DB record with real peer_id/job_id
             finalized = db.finalize_staged_peer(
                 telegram_user_id=user_id,
                 stage_info=stage_info,
@@ -157,7 +157,7 @@ async def create_or_restore_peer_for_user(
             if not finalized:
                 raise Exception("Ошибка при финализации клиента в БД")
 
-            # Шаг 4. Обновляем clients.json
+            # Step 4. Update clients.json
             client_id_for_json = username if username else str(user_id)
             if username:
                 clients_manager.remove_client(str(user_id))
@@ -171,32 +171,34 @@ async def create_or_restore_peer_for_user(
                 exclude_peer_id=peer_id,
             )
         except Exception as e:
-            # Компенсация: удаляем уже созданный peer, затем откатываем staged-запись в БД
+            # Compensation: delete created peer, then roll back staged DB record
             if peer_id:
                 try:
                     wg_api.delete_peer(peer_id)
                 except Exception as delete_error:
-                    logger.error(f"Не удалось удалить peer {peer_id} после ошибки: {delete_error}")
+                    logger.error(f"Failed to delete peer {peer_id} after error: {delete_error}")
 
             rollback_ok = db.rollback_staged_peer(user_id, stage_info)
             if not rollback_ok:
-                logger.error(f"Не удалось откатить staged-запись пользователя {user_id}")
-            logger.error(f"Ошибка в процессе создания/пересоздания пира: {e}")
+                logger.error(f"Failed to roll back staged record for user {user_id}")
+            logger.error(f"Error during peer create/restore flow: {e}")
             return False, "Ошибка при создании/восстановлении доступа", None
 
-        # Скачиваем конфиг (для проверки что он есть) с повторными попытками
+        # Download config (to confirm it exists) with retries
         config_content = None
-        # Увеличиваем время ожидания: 10 попыток по 2 секунды = 20 секунд макс
+        # Increase wait: 10 tries * 2 seconds = 20 seconds max
         for attempt in range(10):
             try:
                 config_content = wg_api.download_peer_config(peer_id)
                 if config_content:
                     break
             except Exception as e:
-                logger.info(f"Попытка {attempt + 1}: конфиг для {peer_id} еще не готов (ошибка: {e})")
+                logger.info(
+                    f"Attempt {attempt + 1}: config for {peer_id} is not ready yet (error: {e})"
+                )
             
-            if attempt < 9: # Не ждать после последней попытки
-                logger.info(f"Ждем 2 сек перед следующей попыткой...")
+            if attempt < 9:  # Do not wait after the last attempt
+                logger.info("Waiting 2 seconds before the next attempt...")
                 await asyncio.sleep(2)
             
         if not config_content:
@@ -204,45 +206,45 @@ async def create_or_restore_peer_for_user(
 
         return True, "", config_content
     except Exception as e:
-        logger.error(f"Ошибка в create_or_restore_peer_for_user: {e}")
+        logger.error(f"Error in create_or_restore_peer_for_user: {e}")
         return False, "Ошибка при создании/восстановлении доступа", None
 
 
-# Вспомогательная функция для безопасного ответа на callback query
+# Helper to safely answer callback queries
 async def safe_answer_callback(callback_query: types.CallbackQuery, text: str = None):
-    """Безопасно отвечает на callback query, игнорируя ошибки истекших запросов"""
+    """Safely answer callback queries, ignoring expired query errors."""
     try:
         await callback_query.answer(text=text)
     except TelegramAPIError as e:
-        # Игнорируем ошибки истекших callback queries (возникают при перезапуске бота)
+        # Ignore expired callback query errors (happen after bot restarts)
         if "query is too old" in str(e) or "query ID is invalid" in str(e):
             logger.debug(f"Callback query expired: {e}")
         else:
-            # Другие ошибки логируем
+            # Log other errors
             logger.error(f"Error answering callback query: {e}")
 
 
-# Состояния для FSM
+# FSM states
 class PeerStates(StatesGroup):
     waiting_for_peer_name = State()
 
 
-# Вспомогательная функция для проверки активного доступа
+# Helper to check active access
 def is_access_active(existing_peer: dict) -> bool:
-    """Проверяет, есть ли у пользователя активный (оплаченный и не истекший) доступ"""
+    """Check if the user has active (paid and not expired) access."""
     if not existing_peer:
-        logger.debug("is_access_active: нет existing_peer")
+        logger.debug("is_access_active: no existing_peer")
         return False
 
     payment_status = existing_peer.get("payment_status")
     if payment_status != "paid":
-        logger.debug(f"is_access_active: payment_status={payment_status}, не 'paid'")
+        logger.debug(f"is_access_active: payment_status={payment_status}, not 'paid'")
         return False
 
-    # Проверяем срок действия
+    # Check expiration
     expire_date_str = existing_peer.get("expire_date")
     if not expire_date_str:
-        logger.debug("is_access_active: нет expire_date")
+        logger.debug("is_access_active: no expire_date")
         return False
 
     try:
@@ -257,20 +259,20 @@ def is_access_active(existing_peer: dict) -> bool:
         return is_active
     except (ValueError, TypeError) as e:
         logger.error(
-            f"is_access_active: ошибка при парсинге даты {expire_date_str}: {e}"
+            f"is_access_active: failed to parse date {expire_date_str}: {e}"
         )
         return False
 
 
-# Функция для создания главного меню с inline кнопками
+# Build main menu keyboard
 def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    """Создает главное меню с inline кнопками"""
-    # Проверяем, есть ли у пользователя активный (оплаченный и не истекший) доступ
-    # ВАЖНО: всегда получаем свежие данные из БД при создании клавиатуры
+    """Create the main menu inline keyboard."""
+    # Check whether the user has active (paid and not expired) access
+    # IMPORTANT: always fetch fresh data from the DB when building the keyboard
     existing_peer = db.get_peer_by_telegram_id(user_id)
     has_active_access = is_access_active(existing_peer)
 
-    # Логируем для отладки
+    # Debug logging
     if existing_peer:
         logger.debug(
             f"create_main_menu_keyboard user_id={user_id}, payment_status={existing_peer.get('payment_status')}, expire_date={existing_peer.get('expire_date')}, has_active_access={has_active_access}"
@@ -304,9 +306,9 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return keyboard
 
 
-# Функция для создания клавиатуры инструкции
+# Build instruction keyboard
 def create_guide_keyboard() -> InlineKeyboardMarkup:
-    """Создает клавиатуру для инструкции"""
+    """Create the instruction keyboard."""
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🔙 Вернуться в меню", callback_data="main")]
@@ -315,10 +317,10 @@ def create_guide_keyboard() -> InlineKeyboardMarkup:
     return keyboard
 
 
-# Обработчики команд
+# Command handlers
 @dp.message(F.text == "/start")
 async def cmd_start(message: types.Message):
-    """Обработчик команды /start"""
+    """Handle the /start command."""
     user_id = message.from_user.id
     welcome_text = """
 Привет! Здесь ты можешь подключиться к быстрому и безопасному VPN, который не подвержен блокировкам.
@@ -331,16 +333,16 @@ async def cmd_start(message: types.Message):
     await message.answer(welcome_text, reply_markup=create_main_menu_keyboard(user_id))
 
 
-# Обработчики inline кнопок
+# Inline button handlers
 @dp.callback_query(F.data == "pay")
 async def handle_pay_callback(callback_query: types.CallbackQuery):
-    """Обработчик кнопки 'Купить доступ'"""
+    """Handle the 'Buy access' button."""
     user_id = callback_query.from_user.id
     username = callback_query.from_user.username
 
     await safe_answer_callback(callback_query)
 
-    # Отправляем выбор способа оплаты (это создает новое сообщение с инвойсом)
+    # Send payment method selection (creates a new invoice message)
     await payment_manager.send_payment_selection(
         callback_query.message.chat.id, user_id
     )
@@ -348,19 +350,19 @@ async def handle_pay_callback(callback_query: types.CallbackQuery):
 
 @dp.callback_query(F.data == "already_paid")
 async def handle_already_paid_callback(callback_query: types.CallbackQuery):
-    """Обработчик кнопки 'Доступ приобретен'"""
+    """Handle the 'Access purchased' button."""
     user_id = callback_query.from_user.id
-    # ВАЖНО: получаем свежие данные из БД
+    # IMPORTANT: fetch fresh data from the DB
     existing_peer = db.get_peer_by_telegram_id(user_id)
 
-    # Проверяем, активен ли доступ (проверяем заново при каждом нажатии)
+    # Check if access is active (re-check on every tap)
     if not is_access_active(existing_peer):
-        # Доступ истек, но был оплачен - обновляем клавиатуру на "Купить доступ"
+        # Access expired but was paid: update keyboard to "Buy access"
         expire_date_str = existing_peer.get("expire_date", "Неизвестно") if existing_peer else "Неизвестно"
         expire_date_formatted = format_date_for_user(expire_date_str) if expire_date_str != "Неизвестно" else "Неизвестно"
         await safe_answer_callback(callback_query, "⚠️ Твой VPN доступ истек!")
 
-        # Получаем актуальные тарифы
+        # Fetch current tariffs
         payment_info = payment_manager.get_payment_info()
         tariffs = payment_info["tariffs"]
         tariff_text = ""
@@ -382,7 +384,7 @@ async def handle_already_paid_callback(callback_query: types.CallbackQuery):
 💎 Доступные тарифы:
 {tariff_text}Выбери действие с помощью кнопок ниже:
         """
-        # Обновляем сообщение с новой клавиатурой, где кнопка будет "Купить доступ"
+        # Update message with new keyboard (button switches to "Buy access")
         await callback_query.message.edit_text(
             expired_text, reply_markup=create_main_menu_keyboard(user_id)
         )
@@ -390,7 +392,7 @@ async def handle_already_paid_callback(callback_query: types.CallbackQuery):
 
     await safe_answer_callback(callback_query, "✅ У тебя уже есть доступ!")
 
-    # Обновляем сообщение с информацией о доступе
+    # Update message with access info
     payment_info = payment_manager.get_payment_info()
 
     already_paid_text = """
@@ -399,7 +401,7 @@ async def handle_already_paid_callback(callback_query: types.CallbackQuery):
 Используй кнопки ниже для управления доступом:
     """
 
-    # Обновляем сообщение с актуальной клавиатурой
+    # Update message with the current keyboard
     await callback_query.message.edit_text(
         already_paid_text, reply_markup=create_main_menu_keyboard(user_id)
     )
@@ -407,20 +409,20 @@ async def handle_already_paid_callback(callback_query: types.CallbackQuery):
 
 @dp.callback_query(F.data == "get_config")
 async def handle_get_config_callback(callback_query: types.CallbackQuery):
-    """Обработчик кнопки 'Получить конфиг'"""
+    """Handle the 'Get config' button."""
     await safe_answer_callback(callback_query)
 
     user_id = callback_query.from_user.id
     username = callback_query.from_user.username
 
-    # Проверяем, есть ли уже активный пир у пользователя
+    # Check if the user already has an active peer
     existing_peer = db.get_peer_by_telegram_id(user_id)
     if existing_peer:
-        # Проверяем, активен ли доступ (оплачен и не истек)
+        # Check if access is active (paid and not expired)
         if not is_access_active(existing_peer):
-            # Доступ истек или не оплачен
+            # Access expired or not paid
             if existing_peer.get("payment_status") == "paid":
-                # Доступ был оплачен, но истек
+                # Access was paid, but expired
                 expire_date_str = existing_peer.get("expire_date", "Неизвестно")
                 expire_date_formatted = format_date_for_user(expire_date_str) if expire_date_str != "Неизвестно" else "Неизвестно"
                 error_text = f"""
@@ -433,7 +435,7 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
 Выбери действие с помощью кнопок ниже:
                 """
             else:
-                # Доступ не оплачен
+                # Access not paid
                 error_text = """
 ❌ У тебя нет активного доступа.
 
@@ -446,18 +448,18 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
             )
             return
 
-        # Пользователь имеет активный доступ, пытаемся отдать конфиг или восстановить при отсутствии
+        # User has active access: try to send config or restore if missing
         try:
-            # Сначала пытаемся проверить существование пира
+            # First try to check if the peer exists
             peer_exists = False
             try:
                 peer_exists = wg_api.check_peer_exists(existing_peer["peer_id"])
             except Exception as e:
                 logger.warning(
-                    f"Не удалось проверить существование пира {existing_peer['peer_id']}: {e}, попробуем скачать"
+                    f"Failed to check peer {existing_peer['peer_id']} existence: {e}, trying download"
                 )
 
-            # Пытаемся скачать конфиг
+            # Try to download config
             config_downloaded = False
             peer_config = None
             if peer_exists:
@@ -468,18 +470,18 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                         user_id, username, existing_peer["peer_id"]
                     ):
                         logger.warning(
-                            f"Не удалось обновить clients.json для пользователя {user_id}"
+                            f"Failed to update clients.json for user {user_id}"
                         )
                 except Exception as e:
                     logger.warning(
-                        f"Не удалось скачать конфиг существующего пира: {e}, попробуем создать новый"
+                        f"Failed to download config for existing peer: {e}, trying to create a new one"
                     )
                     config_downloaded = False
 
-            # Если не удалось скачать конфиг (пир не существует или ошибка), создаем новый
+            # If config download failed (peer missing or error), create a new peer
             if not config_downloaded or not peer_config:
                 logger.info(
-                    f"Создаю новый пир для пользователя {user_id}, так как существующий недоступен"
+                    f"Creating a new peer for user {user_id} because the existing one is unavailable"
                 )
                 ok, err, new_config = await create_or_restore_peer_for_user(
                     user_id, username, existing_peer.get("tariff_key")
@@ -491,7 +493,7 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                     )
                     return
                 
-                # Используем полученный конфиг
+                # Use the received config
                 peer_config = new_config
                 refreshed_peer = db.get_peer_by_telegram_id(user_id)
                 if refreshed_peer and refreshed_peer.get("peer_id"):
@@ -499,10 +501,10 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                         user_id, username, refreshed_peer["peer_id"]
                     ):
                         logger.warning(
-                            f"Не удалось обновить clients.json для пользователя {user_id}"
+                            f"Failed to update clients.json for user {user_id}"
                         )
 
-            # Отправляем конфиг
+            # Send config
             config_filename = "nikonVPN.conf"
             config_bytes = (
                 peer_config
@@ -525,12 +527,12 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
             )
         except Exception as e:
             logger.error(
-                f"Ошибка при получении/восстановлении конфигурации: {e}", exc_info=True
+                f"Error while fetching/restoring configuration: {e}", exc_info=True
             )
-            # При любой ошибке пытаемся создать новый пир (только если доступ оплачен)
+            # On any error, try to create a new peer (only if access is paid)
             try:
                 logger.info(
-                    f"Попытка создать новый пир после ошибки для пользователя {user_id}"
+                    f"Attempting to create a new peer after error for user {user_id}"
                 )
                 ok, err, new_config = await create_or_restore_peer_for_user(
                     user_id, username, existing_peer.get("tariff_key")
@@ -542,9 +544,9 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                             user_id, username, refreshed_peer["peer_id"]
                         ):
                             logger.warning(
-                                f"Не удалось обновить clients.json для пользователя {user_id}"
+                                f"Failed to update clients.json for user {user_id}"
                             )
-                    # Если удалось создать, отправляем конфиг
+                    # If created successfully, send the config
                     config_filename = "nikonVPN.conf"
                     config_bytes = (
                         new_config
@@ -568,13 +570,13 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                     reply_markup=create_main_menu_keyboard(user_id),
                 )
             except Exception as e2:
-                logger.error(f"Критическая ошибка при создании нового пира: {e2}")
+                logger.error(f"Critical error while creating new peer: {e2}")
                 await callback_query.message.edit_text(
                     "❌ Ошибка при получении конфигурации. Попробуй позже или обратись в поддержку.",
                     reply_markup=create_main_menu_keyboard(user_id),
                 )
     else:
-        # Пользователь не имеет пира
+        # User has no peer
         error_text = """
 ❌ У тебя нет VPN доступа.
 
@@ -589,13 +591,13 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
 
 @dp.callback_query(F.data == "extend")
 async def handle_extend_callback(callback_query: types.CallbackQuery):
-    """Обработчик кнопки 'Продлить доступ'"""
+    """Handle the 'Extend access' button."""
     await safe_answer_callback(callback_query)
 
     user_id = callback_query.from_user.id
     username = callback_query.from_user.username
 
-    # Проверяем, есть ли у пользователя активный пир
+    # Check if the user has an active peer
     existing_peer = db.get_peer_by_telegram_id(user_id)
     if not existing_peer:
         error_text = """
@@ -610,7 +612,7 @@ async def handle_extend_callback(callback_query: types.CallbackQuery):
         )
         return
 
-    # Проверяем статус оплаты
+    # Check payment status
     if existing_peer.get("payment_status") != "paid":
         error_text = """
 ❌ У тебя нет оплаченного доступа.
@@ -624,7 +626,7 @@ async def handle_extend_callback(callback_query: types.CallbackQuery):
         )
         return
 
-    # Отправляем выбор способа оплаты для продления (это создает новое сообщение с инвойсом)
+    # Send payment method selection for extension (creates a new invoice message)
     await payment_manager.send_payment_selection(
         callback_query.message.chat.id, user_id
     )
@@ -632,13 +634,13 @@ async def handle_extend_callback(callback_query: types.CallbackQuery):
 
 @dp.callback_query(F.data == "status")
 async def handle_status_callback(callback_query: types.CallbackQuery):
-    """Обработчик кнопки 'Статус доступа'"""
+    """Handle the 'Access status' button."""
     await safe_answer_callback(callback_query)
 
     user_id = callback_query.from_user.id
     username = callback_query.from_user.username
 
-    # Проверяем, есть ли у пользователя активный пир
+    # Check if the user has an active peer
     existing_peer = db.get_peer_by_telegram_id(user_id)
     if not existing_peer:
         error_text = """
@@ -653,18 +655,18 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
         )
         return
 
-    # Получаем информацию о пире из базы данных
+    # Get peer info from the database
     try:
         expire_date_str = existing_peer.get("expire_date", "Неизвестно")
         
-        # Форматируем даты для отображения
+        # Format dates for display
         expire_date_formatted = format_date_for_user(expire_date_str) if expire_date_str != "Неизвестно" else "Неизвестно"
         custom_peer_ids = custom_clients_manager.get_peers_for_user(user_id)
         devices_line = (
             f"\nПодключено устройств: {len(custom_peer_ids)}" if custom_peer_ids else ""
         )
 
-        # Проверяем, истек ли доступ
+        # Check if access has expired
         from datetime import datetime
 
         is_expired = False
@@ -676,7 +678,7 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
             except (ValueError, TypeError):
                 pass
 
-        # Форматируем информацию о пире
+        # Format peer info
         if is_expired:
             status_text = f"""
 📊 Статус доступа:
@@ -690,7 +692,7 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
 Выбери действие с помощью кнопок ниже:
             """
         else:
-            # Доступ активен, рассчитываем оставшееся время
+            # Access active: calculate remaining time
             try:
                 expire_date = parse_date_flexible(expire_date_str)
                 now = datetime.now()
@@ -732,7 +734,7 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
         )
 
     except Exception as e:
-        logger.error(f"Ошибка при получении информации о пире: {e}")
+        logger.error(f"Failed to fetch peer info: {e}")
         error_text = """
 ❌ Ошибка при получении информации о пире.
 
@@ -745,7 +747,7 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
 
 @dp.callback_query(F.data == "guide")
 async def handle_guide_callback(callback_query: types.CallbackQuery):
-    """Обработчик кнопки 'Инструкция'"""
+    """Handle the 'Guide' button."""
     await safe_answer_callback(callback_query)
 
     guide_text = """
@@ -777,7 +779,7 @@ async def handle_guide_callback(callback_query: types.CallbackQuery):
 
 @dp.callback_query(F.data == "main")
 async def handle_main_callback(callback_query: types.CallbackQuery):
-    """Обработчик кнопки 'Вернуться в меню'"""
+    """Handle the 'Back to menu' button."""
     await safe_answer_callback(callback_query)
 
     user_id = callback_query.from_user.id
@@ -802,19 +804,19 @@ async def handle_main_callback(callback_query: types.CallbackQuery):
 
 @dp.message(F.text == "/connect")
 async def cmd_connect(message: types.Message):
-    """Обработчик команды /connect"""
+    """Handle the /connect command."""
     user_id = message.from_user.id
     username = message.from_user.username
 
-    # Проверяем, есть ли уже активный пир у пользователя
+    # Check if the user already has an active peer
     existing_peer = db.get_peer_by_telegram_id(user_id)
     if existing_peer:
-        # Проверяем, активен ли доступ (оплачен и не истек)
+        # Check if access is active (paid and not expired)
         if not is_access_active(existing_peer):
-            # Доступ истек или не оплачен
+            # Access expired or not paid
             payment_info = payment_manager.get_payment_info()
             if existing_peer.get("payment_status") == "paid":
-                # Доступ был оплачен, но истек
+                # Access was paid but expired
                 expire_date_str = existing_peer.get("expire_date", "Неизвестно")
                 expire_date_formatted = format_date_for_user(expire_date_str) if expire_date_str != "Неизвестно" else "Неизвестно"
                 await message.reply(
@@ -826,7 +828,7 @@ async def cmd_connect(message: types.Message):
                     f"💳 Банковская карта: {payment_info['rub_price']} руб."
                 )
             else:
-                # Доступ не оплачен
+                # Access not paid
                 await message.reply(
                     f"❌ Доступ не оплачен!\n\n"
                     f"💎 Стоимость за {payment_info['period']}:\n"
@@ -835,19 +837,19 @@ async def cmd_connect(message: types.Message):
                     f"Для получения конфигурации необходимо оплатить доступ."
                 )
 
-            # Отправляем выбор способа оплаты
+            # Send payment method selection
             await payment_manager.send_payment_selection(message.chat.id, user_id)
             return
 
-        # Пользователь имеет активный доступ
-        # Проверяем, существует ли пир на сервере и можем ли скачать конфиг
+        # User has active access
+        # Check whether the peer exists on the server and whether we can download the config
         try:
             peer_exists = False
             try:
                 peer_exists = wg_api.check_peer_exists(existing_peer["peer_id"])
             except Exception as e:
                 logger.warning(
-                    f"Не удалось проверить существование пира: {e}, попробуем скачать"
+                    f"Failed to check peer existence: {e}, trying to download"
                 )
 
             config_downloaded = False
@@ -862,7 +864,7 @@ async def cmd_connect(message: types.Message):
                         user_id, username, existing_peer["peer_id"]
                     ):
                         logger.warning(
-                            f"Не удалось обновить clients.json для пользователя {user_id}"
+                            f"Failed to update clients.json for user {user_id}"
                         )
 
                     await bot.send_document(
@@ -875,11 +877,11 @@ async def cmd_connect(message: types.Message):
                     return
                 except Exception as e:
                     logger.warning(
-                        f"Не удалось скачать конфиг существующего пира: {e}, попробуем создать новый"
+                        f"Failed to download config for existing peer: {e}, trying to create a new one"
                     )
                     config_downloaded = False
 
-            # Если не удалось скачать конфиг, создаем новый пир
+            # If config download failed, create a new peer
             if not config_downloaded:
                 await message.reply("Создаю новый конфиг...")
                 ok, err, _ = await create_or_restore_peer_for_user(
@@ -893,12 +895,12 @@ async def cmd_connect(message: types.Message):
                         user_id, username, refreshed_peer["peer_id"]
                     ):
                         logger.warning(
-                            f"Не удалось обновить clients.json для пользователя {user_id}"
+                            f"Failed to update clients.json for user {user_id}"
                         )
                 return
         except Exception as e:
-            logger.error(f"Ошибка при получении конфига в /connect: {e}", exc_info=True)
-            # Пытаемся создать новый пир при любой ошибке
+            logger.error(f"Error while getting config in /connect: {e}", exc_info=True)
+            # Try to create a new peer on any error
             try:
                 await message.reply("Попытка создать новый конфиг...")
                 ok, err, _ = await create_or_restore_peer_for_user(
@@ -907,12 +909,12 @@ async def cmd_connect(message: types.Message):
                 if not ok:
                     await message.reply(f"❌ {err}")
             except Exception as e2:
-                logger.error(f"Критическая ошибка при создании нового пира: {e2}")
+                logger.error(f"Critical error while creating new peer: {e2}")
                 await message.reply(
                     "❌ Ошибка при получении конфигурации. Попробуй позже или обратись в поддержку."
                 )
 
-    # Новый пользователь - нужно оплатить доступ
+    # New user: payment required
     payment_info = payment_manager.get_payment_info()
     await message.reply(
         f"💎 Для получения VPN конфигурации необходимо оплатить доступ!\n\n"
@@ -922,17 +924,17 @@ async def cmd_connect(message: types.Message):
         f"После оплаты предоставим тебе конфигурацию и доступ на {payment_info['period']}."
     )
 
-    # Отправляем выбор способа оплаты
+    # Send payment method selection
     await payment_manager.send_payment_selection(message.chat.id, user_id)
 
 
 @dp.message(F.text == "/extend")
 async def cmd_extend(message: types.Message):
-    """Обработчик команды /extend - продление доступа"""
+    """Handle the /extend command (access extension)."""
     user_id = message.from_user.id
     username = message.from_user.username
 
-    # Проверяем, есть ли активный пир у пользователя
+    # Check if the user has an active peer
     existing_peer = db.get_peer_by_telegram_id(user_id)
     if not existing_peer:
         await message.reply(
@@ -940,7 +942,7 @@ async def cmd_extend(message: types.Message):
         )
         return
 
-    # Проверяем, оплачен ли текущий доступ
+    # Check if current access is paid
     if existing_peer.get("payment_status") != "paid":
         await message.reply("❌ Доступ не оплачен.\nИспользуй /connect для оплаты.")
         return
@@ -954,16 +956,16 @@ async def cmd_extend(message: types.Message):
         f"После оплаты доступ будет продлен на {payment_info['period']}."
     )
 
-    # Отправляем выбор способа оплаты для продления
+    # Send payment method selection for extension
     await payment_manager.send_payment_selection(message.chat.id, user_id)
 
 
 @dp.message(F.text == "/status")
 async def cmd_status(message: types.Message):
-    """Обработчик команды /status - проверка оставшегося времени доступа"""
+    """Handle the /status command (remaining access time)."""
     user_id = message.from_user.id
 
-    # Проверяем, есть ли активный пир у пользователя
+    # Check if the user has an active peer
     existing_peer = db.get_peer_by_telegram_id(user_id)
     if not existing_peer:
         await message.reply(
@@ -971,12 +973,12 @@ async def cmd_status(message: types.Message):
         )
         return
 
-    # Проверяем, оплачен ли доступ
+    # Check if access is paid
     if existing_peer.get("payment_status") != "paid":
         await message.reply("❌ Доступ не оплачен.\nИспользуй /connect для оплаты.")
         return
 
-    # Получаем дату истечения
+    # Get expiration date
     expire_date_str = existing_peer.get("expire_date")
     if not expire_date_str:
         await message.reply("❌ Не удалось получить информацию о сроке доступа.")
@@ -994,13 +996,13 @@ async def cmd_status(message: types.Message):
             )
             return
 
-        # Рассчитываем оставшееся время
+        # Calculate remaining time
         time_left = expire_date - now
         days_left = time_left.days
         hours_left = time_left.seconds // 3600
         minutes_left = (time_left.seconds % 3600) // 60
 
-        # Формируем сообщение
+        # Build message
         status_text = f"📊 Статус твоего VPN доступа:\n\n"
         status_text += (
             f"📅 Дата истечения: {expire_date.strftime('%d.%m.%Y')}\n\n"
@@ -1023,40 +1025,40 @@ async def cmd_status(message: types.Message):
         await message.reply(status_text)
 
     except ValueError as e:
-        logger.error(f"Ошибка при парсинге даты истечения: {e}")
+        logger.error(f"Failed to parse expiration date: {e}")
         await message.reply("❌ Ошибка при получении информации о доступе.")
 
 
 @dp.message(F.text == "/buy")
 async def cmd_buy(message: types.Message):
-    """Обработчик команды /buy - выбор способа оплаты"""
+    """Handle the /buy command (payment method selection)."""
     user_id = message.from_user.id
     username = message.from_user.username
 
-    # Отправляем выбор способа оплаты
+    # Send payment method selection
     await payment_manager.send_payment_selection(message.chat.id, user_id)
 
 
-# Обработчики callback-кнопок для выбора способа оплаты
+# Callback button handlers for payment method selection
 @dp.callback_query(F.data.startswith("pay_stars_"))
 async def handle_pay_stars_callback(callback_query: types.CallbackQuery):
-    """Обработчик выбора оплаты через Telegram Stars"""
-    # Извлекаем tariff_key и user_id из callback_data (формат: pay_stars_14_days_123456789)
+    """Handle Telegram Stars payment selection."""
+    # Extract tariff_key and user_id from callback_data (format: pay_stars_14_days_123456789)
     callback_parts = callback_query.data.split("_")
     tariff_key = (
-        f"{callback_parts[2]}_{callback_parts[3]}"  # 14_days, 30_days или 90_days
+        f"{callback_parts[2]}_{callback_parts[3]}"  # 14_days, 30_days or 90_days
     )
-    user_id = int(callback_parts[-1])  # Последняя часть - user_id
+    user_id = int(callback_parts[-1])  # Last part is user_id
     username = callback_query.from_user.username
 
-    # Проверяем, что callback от правильного пользователя
+    # Ensure callback belongs to the correct user
     if callback_query.from_user.id != user_id:
         await safe_answer_callback(callback_query, "❌ Ошибка: неверный пользователь")
         return
 
     await safe_answer_callback(callback_query)
 
-    # Отправляем инвойс для оплаты через Stars
+    # Send invoice for Stars payment
     success = await payment_manager.send_stars_payment_request(
         callback_query.message.chat.id, user_id, tariff_key, username
     )
@@ -1075,23 +1077,23 @@ async def handle_pay_stars_callback(callback_query: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("pay_yookassa_"))
 async def handle_pay_yookassa_callback(callback_query: types.CallbackQuery):
-    """Обработчик выбора оплаты через ЮKassa"""
-    # Извлекаем tariff_key и user_id из callback_data (формат: pay_yookassa_14_days_123456789)
+    """Handle YooKassa payment selection."""
+    # Extract tariff_key and user_id from callback_data (format: pay_yookassa_14_days_123456789)
     callback_parts = callback_query.data.split("_")
     tariff_key = (
-        f"{callback_parts[2]}_{callback_parts[3]}"  # 14_days, 30_days или 90_days
+        f"{callback_parts[2]}_{callback_parts[3]}"  # 14_days, 30_days or 90_days
     )
-    user_id = int(callback_parts[-1])  # Последняя часть - user_id
+    user_id = int(callback_parts[-1])  # Last part is user_id
     username = callback_query.from_user.username
 
-    # Проверяем, что callback от правильного пользователя
+    # Ensure callback belongs to the correct user
     if callback_query.from_user.id != user_id:
         await safe_answer_callback(callback_query, "❌ Ошибка: неверный пользователь")
         return
 
     await safe_answer_callback(callback_query)
 
-    # Проверяем, настроен ли ЮKassa
+    # Check if YooKassa is configured
     if (
         not payment_manager.yookassa_client.shop_id
         or not payment_manager.yookassa_client.secret_key
@@ -1103,7 +1105,7 @@ async def handle_pay_yookassa_callback(callback_query: types.CallbackQuery):
         )
         return
 
-    # Отправляем инвойс для оплаты через ЮKassa
+    # Send invoice for YooKassa payment
     success = await payment_manager.send_yookassa_payment_request(
         callback_query.message.chat.id, user_id, tariff_key, username
     )
@@ -1124,10 +1126,10 @@ async def handle_pay_yookassa_callback(callback_query: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("pay_yookassa_disabled_"))
 async def handle_pay_yookassa_disabled_callback(callback_query: types.CallbackQuery):
-    """Обработчик нажатия на неактивную кнопку ЮKassa"""
+    """Handle clicks on the disabled YooKassa button."""
     user_id = int(callback_query.data.replace("pay_yookassa_disabled_", ""))
 
-    # Проверяем, что callback от правильного пользователя
+    # Ensure callback belongs to the correct user
     if callback_query.from_user.id != user_id:
         await safe_answer_callback(callback_query, "❌ Ошибка: неверный пользователь")
         return
@@ -1142,7 +1144,7 @@ async def handle_pay_yookassa_disabled_callback(callback_query: types.CallbackQu
     )
 
 
-# Повторное создание конфига после успешной оплаты, если первоначально упало
+# Retry config creation after successful payment if the initial attempt failed
 @dp.callback_query(F.data.startswith("retry_peer_"))
 async def handle_retry_peer_callback(callback_query: types.CallbackQuery):
     try:
@@ -1182,31 +1184,31 @@ async def handle_retry_peer_callback(callback_query: types.CallbackQuery):
                 reply_markup=keyboard,
             )
     except Exception as e:
-        logger.error(f"Ошибка в обработчике retry_peer: {e}")
+        logger.error(f"Error in retry_peer handler: {e}")
         await callback_query.message.edit_text(
             "❌ Ошибка при повторном создании. Попробуй ещё раз позже.",
             reply_markup=create_main_menu_keyboard(callback_query.from_user.id),
         )
 
 
-# Обработчики платежей
+# Payment handlers
 @dp.pre_checkout_query()
 async def process_pre_checkout_query(pre_checkout_query):
-    """Обработчик предварительной проверки платежа"""
+    """Handle pre-checkout validation."""
     await payment_manager.process_payment(pre_checkout_query)
 
 
 @dp.message(F.successful_payment)
 async def process_successful_payment(message: types.Message):
-    """Обработчик успешного платежа"""
+    """Handle successful payment."""
     user_id = message.from_user.id
     username = message.from_user.username
     successful_payment = message.successful_payment
 
-    # Получаем payload из успешного платежа
+    # Get payload from successful payment
     payload = successful_payment.invoice_payload
 
-    # Подтверждаем платеж
+    # Confirm payment
     (
         payment_confirmed,
         payment_type,
@@ -1216,12 +1218,12 @@ async def process_successful_payment(message: types.Message):
         await message.reply("❌ Ошибка при обработке платежа.")
         return
 
-    # Обрабатываем только Stars платежи (ЮKassa обрабатывается через webhook)
+    # Handle Stars payments only (YooKassa uses webhook)
     if not payload.startswith("vpn_access_stars_"):
         await message.reply("❌ Неизвестный тип платежа.")
         return
 
-    # Извлекаем тариф из payload
+    # Extract tariff from payload
     payload_parts = payload.split("_")
     if len(payload_parts) >= 4:
         tariff_key = f"{payload_parts[3]}_{payload_parts[4]}"  # 14_days, 30_days
@@ -1231,7 +1233,7 @@ async def process_successful_payment(message: types.Message):
 
     payment_method = "stars"
 
-    # Логируем платеж и обновляем статус оплаты
+    # Log payment and update payment status
     try:
         payment_id = (
             getattr(successful_payment, "telegram_payment_charge_id", None)
@@ -1248,20 +1250,20 @@ async def process_successful_payment(message: types.Message):
         )
         db.update_payment_status_by_id(payment_id, "succeeded")
     except Exception as e:
-        logger.warning(f"Не удалось зафиксировать платеж Stars в БД: {e}")
+        logger.warning(f"Failed to record Stars payment in DB: {e}")
 
-    # Обновляем статус оплаты для пользователя
+    # Update payment status for the user
     db.update_payment_status(user_id, "paid", amount_paid, payment_method, tariff_key)
 
-    # Определяем период доступа на основе тарифа
+    # Determine access period based on tariff
     tariff_data = payment_manager.tariffs.get(tariff_key, {})
     access_days = tariff_data.get("days", 30)
 
-    # Проверяем, есть ли уже пир у пользователя
+    # Check if the user already has a peer
     existing_peer = db.get_peer_by_telegram_id(user_id)
 
     if existing_peer:
-        # Продлеваем доступ существующего пира
+        # Extend access for the existing peer
         success, new_expire_date = db.extend_access(user_id, access_days)
 
         if not success:
@@ -1270,25 +1272,25 @@ async def process_successful_payment(message: types.Message):
             )
             return
 
-        # Проверяем существование пира в WGDashboard
+        # Check peer existence in WGDashboard
         peer_exists = None
         try:
             peer_exists = wg_api.check_peer_exists(existing_peer["peer_id"])
         except Exception as e:
-            logger.error(f"Ошибка при проверке существования пира в WGDashboard: {e}")
+            logger.error(f"Error checking peer existence in WGDashboard: {e}")
 
         allow_result = None
         try:
             allow_result = wg_api.allow_access_peer(existing_peer["peer_id"])
             if allow_result and allow_result.get("status"):
-                logger.info(f"Restricted снят для пользователя {user_id}")
+                logger.info(f"Restricted removed for user {user_id}")
                 peer_exists = True
             else:
                 logger.warning(
-                    f"Не удалось снять restricted для пользователя {user_id}: {allow_result}"
+                    f"Failed to remove restricted for user {user_id}: {allow_result}"
                 )
         except Exception as e:
-            logger.error(f"Ошибка при снятии restricted в WGDashboard: {e}")
+            logger.error(f"Error removing restricted in WGDashboard: {e}")
 
         if peer_exists is True:
             try:
@@ -1298,17 +1300,17 @@ async def process_successful_payment(message: types.Message):
 
                 if job_update_result and job_update_result.get("status"):
                     logger.info(
-                        f"Job обновлен для пользователя {user_id}, новая дата: {new_expire_date}"
+                        f"Job updated for user {user_id}, new date: {new_expire_date}"
                     )
                 else:
                     logger.error(
-                        f"Ошибка при обновлении job для пользователя {user_id}: {job_update_result}"
+                        f"Error updating job for user {user_id}: {job_update_result}"
                     )
 
             except Exception as e:
-                logger.error(f"Ошибка при обновлении job в WGDashboard: {e}")
+                logger.error(f"Error updating job in WGDashboard: {e}")
 
-            # При продлении не отправляем конфигурацию повторно
+            # Do not resend config on extension
             await message.reply(
                 f"✅ Платеж успешно обработан!\n"
                 f"🎉 Продлили тебе доступ на {access_days} дней!\n"
@@ -1323,7 +1325,7 @@ async def process_successful_payment(message: types.Message):
             )
         elif peer_exists is False:
             logger.warning(
-                f"Пир пользователя {user_id} не найден в WGDashboard, создаем новый"
+                f"Peer for user {user_id} not found in WGDashboard, creating new one"
             )
             await message.reply("🔄 Восстанавливаю VPN доступ...")
             ok, err, _ = await create_or_restore_peer_for_user(user_id, username, tariff_key)
@@ -1332,7 +1334,7 @@ async def process_successful_payment(message: types.Message):
                     "❌ Ошибка при восстановлении VPN доступа. Обратитесь в поддержку."
                 )
                 logger.error(
-                    f"Не удалось пересоздать пир для пользователя {user_id}: {err}"
+                    f"Failed to recreate peer for user {user_id}: {err}"
                 )
                 return
 
@@ -1355,20 +1357,20 @@ async def process_successful_payment(message: types.Message):
                 "❌ Не удалось проверить статус VPN на сервере. Попробуйте еще раз через минуту или обратитесь в поддержку."
             )
             logger.error(
-                f"Статус пира пользователя {user_id} не определен, пересоздание отменено чтобы избежать дубля"
+                f"Peer status for user {user_id} is unknown, recreation canceled to avoid duplicate"
             )
             return
 
-        # Не отправляем дополнительное сообщение после продления доступа
+        # Do not send extra message after extension
     else:
-        # Создаем новый пир для пользователя
+        # Create a new peer for the user
         try:
             await message.reply("🔄 Создаю VPN доступ...")
             ok, err, _ = await create_or_restore_peer_for_user(
                 user_id, username, tariff_key
             )
             if not ok:
-                # Предлагаем повторить и поддержку
+                # Offer retry and support
                 keyboard = InlineKeyboardMarkup(
                     inline_keyboard=[
                         [
@@ -1394,7 +1396,7 @@ async def process_successful_payment(message: types.Message):
                     exclude_peer_id=refreshed_peer.get("peer_id"),
                 )
         except Exception as e:
-            logger.error(f"Ошибка при создании пира после оплаты: {e}")
+            logger.error(f"Error creating peer after payment: {e}")
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [
@@ -1412,29 +1414,29 @@ async def process_successful_payment(message: types.Message):
             )
 
 
-# Обработчик неизвестных команд
+# Unknown command handler
 @dp.message()
 async def handle_unknown(message: types.Message):
-    """Обработчик неизвестных сообщений"""
+    """Handle unknown messages."""
     user_id = message.from_user.id
 
-    # Проверяем, есть ли у пользователя оплаченный доступ
+    # Check if the user has paid access
     existing_peer = db.get_peer_by_telegram_id(user_id)
     has_paid_access = existing_peer and existing_peer.get("payment_status") == "paid"
 
-    # Показываем главное меню для неизвестных команд
+    # Show the main menu for unknown commands
     await message.answer(
         "❓ Неизвестная команда.\n\nИспользуй кнопки ниже или команды:\n/start - главное меню\n/buy - купить доступ\n/connect - получить конфиг",
         reply_markup=create_main_menu_keyboard(user_id),
     )
 
 
-# Функция для периодической проверки истекших пиров и уведомлений
+# Periodic check for expired peers and notifications
 async def check_expired_peers():
-    """Проверяет истекшие пиры и уведомляет пользователей"""
+    """Check expired peers and notify users."""
     while True:
         try:
-            # Проверяем истекшие пиры
+            # Check expired peers
             expired_peers = db.get_expired_peers()
 
             for peer in expired_peers:
@@ -1447,10 +1449,10 @@ async def check_expired_peers():
                     db.mark_expired_notification_sent(peer["telegram_user_id"])
                 except TelegramAPIError:
                     logger.warning(
-                        f"Не удалось отправить уведомление об истечении пользователю {peer['telegram_user_id']}"
+                        f"Failed to send expiration notice to user {peer['telegram_user_id']}"
                     )
 
-            # Проверяем пользователей для уведомления за 1 день
+            # Check users for 1-day reminder
             users_for_notification = db.get_users_for_notification(1)
 
             for user in users_for_notification:
@@ -1458,7 +1460,7 @@ async def check_expired_peers():
                     payment_info = payment_manager.get_payment_info()
                     tariffs = payment_info["tariffs"]
 
-                    # Формируем текст с доступными тарифами
+                    # Build text with available tariffs
                     tariff_text = ""
                     for tariff_key, tariff_data in tariffs.items():
                         tariff_text += f"⭐ {tariff_data['name']} - {tariff_data['stars_price']} Stars\n"
@@ -1471,34 +1473,34 @@ async def check_expired_peers():
                              f"Используй кнопки ниже для продления доступа.",
                     )
 
-                    # Отмечаем, что уведомление отправлено
+                    # Mark notification as sent
                     db.mark_notification_sent(user["telegram_user_id"])
 
                 except TelegramAPIError:
                     logger.warning(
-                        f"Не удалось отправить уведомление пользователю {user['telegram_user_id']}"
+                        f"Failed to send notification to user {user['telegram_user_id']}"
                     )
 
-            # Проверяем каждые 30 минут
+            # Check every 30 minutes
             await asyncio.sleep(30 * 60)
 
         except Exception as e:
-            logger.error(f"Ошибка при проверке истекших пиров: {e}")
-            await asyncio.sleep(60)  # Ждем минуту при ошибке
+            logger.error(f"Error while checking expired peers: {e}")
+            await asyncio.sleep(60)  # Wait a minute on error
 
 
 async def main():
-    """Основная функция запуска бота"""
+    """Main bot entry point."""
     try:
-        # Запускаем проверку истекших пиров и уведомлений в фоне
+        # Start background checks for expired peers and notifications
         asyncio.create_task(check_expired_peers())
 
-        # Запускаем бота
-        logger.info("Запуск WireGuard бота...")
+        # Start the bot
+        logger.info("Starting WireGuard bot...")
         await dp.start_polling(bot, skip_updates=True)
 
     except Exception as e:
-        logger.error(f"Критическая ошибка: {e}")
+        logger.error(f"Critical error: {e}")
 
 
 if __name__ == "__main__":

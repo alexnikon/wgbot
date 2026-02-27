@@ -18,7 +18,7 @@ class WGDashboardAPI:
         }
     
     def _make_request(self, method: str, endpoint: str, data: Optional[Dict] = None) -> Dict[str, Any]:
-        """Выполняет HTTP запрос к WGDashboard API"""
+        """Execute an HTTP request to the WGDashboard API."""
         url = f"{self.base_url}{endpoint}"
         
         try:
@@ -27,37 +27,37 @@ class WGDashboardAPI:
             elif method.upper() == "POST":
                 response = requests.post(url, json=data, headers=self.headers)
             else:
-                raise ValueError(f"Неподдерживаемый HTTP метод: {method}")
+                raise ValueError(f"Unsupported HTTP method: {method}")
             
             response.raise_for_status()
             return response.json()
         
         except requests.exceptions.RequestException as e:
-            logger.error(f"Ошибка при запросе к {url}: {e}")
-            raise Exception(f"Ошибка API: {e}")
+            logger.error(f"Request error for {url}: {e}")
+            raise Exception(f"API error: {e}")
     
     def handshake(self) -> Dict[str, Any]:
-        """Проверка соединения с WGDashboard"""
+        """Check connectivity with WGDashboard."""
         return self._make_request("GET", "/api/handshake")
     
     def add_peer(self, name: str) -> Dict[str, Any]:
         """
-        Создает нового пира в WireGuard конфигурации
+        Create a new peer in the WireGuard configuration.
         
         Args:
-            name: Имя пира
+            name: Peer name
             
         Returns:
-            Информация о созданном пире
+            Created peer info
         """
         data = {"name": name}
         result = self._make_request("POST", f"/api/addPeers/{self.config_name}", data)
         
-        # Извлекаем данные пира из массива
+        # Extract peer data from the list
         if result and 'data' in result and len(result['data']) > 0:
             peer_data = result['data'][0]
             return {
-                'id': peer_data.get('id'),  # Это public_key
+                'id': peer_data.get('id'),  # This is public_key
                 'name': peer_data.get('name'),
                 'private_key': peer_data.get('private_key'),
                 'public_key': peer_data.get('id'),  # id = public_key
@@ -69,58 +69,58 @@ class WGDashboardAPI:
     
     def delete_peer(self, peer_id: str) -> Dict[str, Any]:
         """
-        Удаляет пира из WireGuard конфигурации
+        Delete a peer from the WireGuard configuration.
         
         Args:
-            peer_id: ID пира для удаления
+            peer_id: Peer ID to delete
             
         Returns:
-            Результат операции
+            Operation result
         """
         data = {"peers": [peer_id]}
         return self._make_request("POST", f"/api/deletePeers/{self.config_name}", data)
 
     def allow_access_peer(self, peer_id: str) -> Dict[str, Any]:
         """
-        Снимает restricted для пира (разрешает доступ).
+        Remove restriction for a peer (allow access).
 
         Args:
-            peer_id: ID пира (public_key)
+            peer_id: Peer ID (public_key)
 
         Returns:
-            Результат операции
+            Operation result
         """
         data = {"peers": [peer_id]}
         return self._make_request("POST", f"/api/allowAccessPeers/{self.config_name}", data)
     
     def create_restrict_job(self, peer_id: str, expire_date_str: str = None) -> Tuple[Dict[str, Any], str, str]:
         """
-        Создает job для ограничения пира
+        Create a restriction job for a peer.
         
         Args:
-            peer_id: ID пира
-            expire_date_str: Дата истечения (если None, то через 30 дней)
+            peer_id: Peer ID
+            expire_date_str: Expiration date (if None, use +30 days)
             
         Returns:
-            Tuple: (результат API, job_id, дата истечения)
+            Tuple: (API result, job_id, expiration date)
         """
         job_id = str(uuid.uuid4())
         
         if expire_date_str is None:
-            # Если дата не указана, создаем через 30 дней
+            # If no date provided, use +30 days
             expire_date = (datetime.datetime.now() + datetime.timedelta(days=PEER_EXPIRY_DAYS))
             expire_date_str = expire_date.strftime("%Y-%m-%d %H:%M:%S")
         else:
-            # Если дата указана, проверяем, что она в будущем
+            # If date provided, ensure it's in the future
             try:
                 expire_date = datetime.datetime.strptime(expire_date_str, "%Y-%m-%d %H:%M:%S")
                 now = datetime.datetime.now()
                 if expire_date <= now:
-                    # Если дата в прошлом, создаем новую дату через 30 дней
+                    # If date is in the past, move to +30 days
                     expire_date = now + datetime.timedelta(days=PEER_EXPIRY_DAYS)
                     expire_date_str = expire_date.strftime("%Y-%m-%d %H:%M:%S")
             except ValueError:
-                # Если дата в неправильном формате, создаем новую
+                # If date format is invalid, use +30 days
                 expire_date = datetime.datetime.now() + datetime.timedelta(days=PEER_EXPIRY_DAYS)
                 expire_date_str = expire_date.strftime("%Y-%m-%d %H:%M:%S")
         
@@ -145,27 +145,27 @@ class WGDashboardAPI:
     
     def delete_job(self, job_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Удаляет job пира
+        Delete a peer job.
         
         Args:
-            job_data: Данные job для удаления
+            job_data: Job data for deletion
             
         Returns:
-            Результат операции
+            Operation result
         """
         return self._make_request("POST", "/api/deletePeerScheduleJob", {"Job": job_data})
     
     def update_job_expire_date(self, job_id: str, peer_id: str, new_expire_date_str: str) -> Dict[str, Any]:
         """
-        Обновляет дату истечения существующего job
+        Update the expiration date of an existing job.
         
         Args:
-            job_id: ID существующего job
-            peer_id: ID пира
-            new_expire_date_str: Новая дата истечения в формате "YYYY-MM-DD HH:MM:SS"
+            job_id: Existing job ID
+            peer_id: Peer ID
+            new_expire_date_str: New expiration date in "YYYY-MM-DD HH:MM:SS"
             
         Returns:
-            Результат операции
+            Operation result
         """
         creation_date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
@@ -188,27 +188,26 @@ class WGDashboardAPI:
     
     def get_peer_info(self, peer_id: str) -> Dict[str, Any]:
         """
-        Получает информацию о пире
+        Get peer info.
         
         Args:
-            peer_id: ID пира
+            peer_id: Peer ID
             
         Returns:
-            Информация о пире
+            Peer info
         """
-        # Этот метод может потребовать дополнительной реализации
-        # в зависимости от доступных API endpoints
+        # This may require additional implementation depending on available endpoints
         pass
     
     def check_peer_exists(self, peer_id: str) -> bool:
         """
-        Проверяет, существует ли пир на сервере
+        Check whether a peer exists on the server.
         
         Args:
-            peer_id: ID пира (public_key)
+            peer_id: Peer ID (public_key)
             
         Returns:
-            True если пир существует, False если нет
+            True if the peer exists, False otherwise
         """
         try:
             if not peer_id:
@@ -221,41 +220,41 @@ class WGDashboardAPI:
             response = requests.get(url, headers=self.headers)
             
             if response.status_code == 200:
-                # Проверяем содержимое ответа
+                # Inspect response content
                 result = response.json()
                 if result and result.get('status') == True and result.get('data') is not None:
                     return True
                 else:
-                    logger.info(f"Пир {peer_id[:20]}... не существует: {result}")
+                    logger.info(f"Peer {peer_id[:20]}... does not exist: {result}")
                     return False
             else:
-                logger.info(f"Пир {peer_id[:20]}... не существует, статус: {response.status_code}")
+                logger.info(f"Peer {peer_id[:20]}... does not exist, status: {response.status_code}")
                 return False
                 
         except Exception as e:
-            logger.error(f"Ошибка при проверке существования пира {peer_id}: {e}")
+            logger.error(f"Failed to check peer existence {peer_id}: {e}")
             return False
     
     def get_configuration_info(self) -> Dict[str, Any]:
-        """Получает информацию о WireGuard конфигурации"""
+        """Get WireGuard configuration info."""
         return self._make_request("GET", f"/api/getWireguardConfigurationInfo?configurationName={self.config_name}")
     
     def get_available_ips(self) -> Dict[str, Any]:
-        """Получает доступные IP адреса в конфигурации"""
+        """Get available IPs in the configuration."""
         return self._make_request("GET", f"/api/getAvailableIPs/{self.config_name}")
     
     def download_peer_config(self, peer_id: str) -> bytes:
         """
-        Скачивает конфигурацию пира
+        Download a peer configuration.
         
         Args:
-            peer_id: ID пира (public_key)
+            peer_id: Peer ID (public_key)
             
         Returns:
-            Конфигурация в виде байтов
+            Configuration as bytes
         """
         if not peer_id:
-            raise Exception("Peer ID не может быть пустым")
+            raise Exception("Peer ID cannot be empty")
             
         import urllib.parse
         encoded_peer_id = urllib.parse.quote(peer_id, safe='')
@@ -265,20 +264,20 @@ class WGDashboardAPI:
             response = requests.get(url, headers=self.headers)
             response.raise_for_status()
             
-            # API возвращает JSON с конфигурацией
+            # API returns JSON containing config
             result = response.json()
-            logger.info(f"Ответ API для пира {peer_id[:20]}...: {result}")
+            logger.info(f"API response for peer {peer_id[:20]}...: {result}")
             
             if result and result.get('data') and 'file' in result['data']:
                 config_content = result['data']['file']
                 return config_content.encode('utf-8')
             else:
-                logger.error(f"Неверный формат ответа API или пир еще не готов: {result}")
+                logger.error(f"Invalid API response format or peer not ready: {result}")
                 raise Exception(f"API Error: {result.get('message', 'Unknown error')}")
                 
         except requests.exceptions.RequestException as e:
-            logger.error(f"Ошибка при скачивании конфигурации пира {peer_id}: {e}")
-            raise Exception(f"Ошибка при скачивании конфигурации: {e}")
+            logger.error(f"Failed to download peer config {peer_id}: {e}")
+            raise Exception(f"Failed to download config: {e}")
         except Exception as e:
-            logger.error(f"Неожиданная ошибка при скачивании конфигурации: {e}")
-            raise Exception(f"Ошибка при скачивании конфигурации: {e}")
+            logger.error(f"Unexpected error while downloading config: {e}")
+            raise Exception(f"Failed to download config: {e}")

@@ -10,12 +10,12 @@ logger = logging.getLogger(__name__)
 
 class CustomClientsManager:
     """
-    Менеджер ручных привязок Telegram ID -> peer public keys из WGDashboard.
+    Manager for manual bindings: Telegram ID -> peer public keys from WGDashboard.
 
-    Форматы строк в custom_clients.txt:
+    Line formats in custom_clients.txt:
     - 123456789=peer_key_1,peer_key_2
     - 123456789:peer_key_1 peer_key_2
-    Комментарии и пустые строки игнорируются.
+    Comments and empty lines are ignored.
     """
 
     def __init__(self, file_path: str):
@@ -74,7 +74,7 @@ class CustomClientsManager:
                         seen.add(peer)
                         result.append(peer)
         except Exception as e:
-            logger.error(f"Ошибка чтения custom_clients файла {self.file_path}: {e}")
+            logger.error(f"Failed to read custom_clients file {self.file_path}: {e}")
             return []
 
         return result
@@ -111,7 +111,7 @@ def sync_custom_peers_access(
                 allow_result = wg_api.allow_access_peer(peer_id)
                 if allow_result and isinstance(allow_result, dict) and allow_result.get("status") is False:
                     logger.warning(
-                        f"allowAccessPeers вернул ошибку для user_id={user_id}, peer={peer_id}: {allow_result}"
+                        f"allowAccessPeers returned an error for user_id={user_id}, peer={peer_id}: {allow_result}"
                     )
 
             job_id = build_custom_job_id(user_id, peer_id)
@@ -123,7 +123,7 @@ def sync_custom_peers_access(
         except Exception as e:
             failed += 1
             logger.error(
-                f"Не удалось синхронизировать custom peer user_id={user_id}, peer={peer_id}: {e}"
+                f"Failed to sync custom peer user_id={user_id}, peer={peer_id}: {e}"
             )
 
     return {"total": total, "updated": updated, "failed": failed}

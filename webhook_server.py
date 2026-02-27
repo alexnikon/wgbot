@@ -12,7 +12,7 @@ from config import CLIENTS_JSON_PATH, CUSTOM_CLIENTS_PATH, TELEGRAM_BOT_TOKEN
 from custom_clients import CustomClientsManager, sync_custom_peers_access
 import httpx
 
-# Настройка логирования
+# Logging configuration
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -23,7 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Инициализация компонентов
+# Component initialization
 yookassa_client = YooKassaClient()
 db = Database()
 wg_api = WGDashboardAPI()
@@ -48,20 +48,20 @@ def sync_bound_custom_peers_for_user(
     )
     if result["total"] > 0:
         logger.info(
-            f"Синхронизация custom peers user_id={user_id}: total={result['total']}, updated={result['updated']}, failed={result['failed']}"
+            f"Custom peers sync user_id={user_id}: total={result['total']}, updated={result['updated']}, failed={result['failed']}"
         )
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Управление жизненным циклом приложения"""
-    logger.info("Webhook сервер запускается...")
+    """Application lifecycle management."""
+    logger.info("Webhook server starting...")
     yield
-    logger.info("Webhook сервер останавливается...")
+    logger.info("Webhook server stopping...")
 
 app = FastAPI(title="WGBot Webhook Server", lifespan=lifespan)
 
 async def send_telegram_message(chat_id: int, text: str):
-    """Отправляет сообщение в Telegram"""
+    """Send a message to Telegram."""
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -75,24 +75,26 @@ async def send_telegram_message(chat_id: int, text: str):
             )
             
             if response.status_code == 200:
-                logger.info(f"Сообщение отправлено пользователю {chat_id}")
+                logger.info(f"Message sent to user {chat_id}")
             else:
                 response_data = response.json()
                 error_code = response_data.get('error_code', 'unknown')
                 error_description = response_data.get('description', 'unknown error')
                 
                 if error_code == 400 and 'chat not found' in error_description:
-                    logger.warning(f"Пользователь {chat_id} заблокировал бота или удалил чат")
+                    logger.warning(f"User {chat_id} blocked the bot or deleted the chat")
                 else:
-                    logger.error(f"Ошибка отправки сообщения пользователю {chat_id}: {error_code} - {error_description}")
+                    logger.error(
+                        f"Failed to send message to user {chat_id}: {error_code} - {error_description}"
+                    )
                     
     except Exception as e:
-        logger.error(f"Ошибка при отправке сообщения в Telegram: {e}")
+        logger.error(f"Error sending message to Telegram: {e}")
 
 async def process_successful_payment(payment_data: dict):
-    """Обрабатывает успешный платеж"""
+    """Process successful payment."""
     try:
-        # Получаем основную информацию о платеже
+        # Get core payment info
         payment_id = payment_data.get('id', '')
         amount_info = payment_data.get('amount', {})
         amount_value = amount_info.get('value', '0')
@@ -100,14 +102,14 @@ async def process_successful_payment(payment_data: dict):
         description = payment_data.get('description', '')
         created_at = payment_data.get('created_at', '')
         
-        logger.info(f"Начало обработки платежа {payment_id}: {amount_value} {currency}")
+        logger.info(f"Start processing payment {payment_id}: {amount_value} {currency}")
         
-        # Получаем информацию о способе оплаты
+        # Get payment method info
         payment_method = payment_data.get('payment_method', {})
         method_type = payment_method.get('type', 'unknown')
         method_title = payment_method.get('title', '')
         
-        # Для банковских карт получаем дополнительную информацию
+        # For bank cards, fetch extra details
         card_info = ""
         if method_type == 'bank_card':
             card = payment_method.get('card', {})
@@ -119,7 +121,7 @@ async def process_successful_payment(payment_data: dict):
                 issuer_name = card.get('issuer_name', '')
                 card_info = f" ({card_type} *{last4}, {issuer_name})"
         
-        # Получаем информацию о 3D Secure
+        # Get 3D Secure info
         auth_details = payment_data.get('authorization_details', {})
         three_d_secure = auth_details.get('three_d_secure', {})
         three_d_applied = three_d_secure.get('applied', False)
@@ -127,12 +129,14 @@ async def process_successful_payment(payment_data: dict):
         auth_code = auth_details.get('auth_code', '')
         
         if three_d_applied:
-            logger.info(f"Платеж {payment_id} прошел 3D Secure аутентификацию")
+            logger.info(f"Payment {payment_id} passed 3D Secure authentication")
         
-        logger.info(f"Обработка успешного платежа {payment_id}: {amount_value} {currency}, способ: {method_type}{card_info}")
+        logger.info(
+            f"Processing successful payment {payment_id}: {amount_value} {currency}, method: {method_type}{card_info}"
+        )
         
         metadata = yookassa_client.get_payment_metadata(payment_data)
-        logger.info(f"Метаданные платежа {payment_id}: {metadata}")
+        logger.info(f"Payment metadata {payment_id}: {metadata}")
         
         user_id = int(metadata.get('user_id', 0))
         tariff_key = metadata.get('tariff_key', '30_days')
@@ -142,25 +146,25 @@ async def process_successful_payment(payment_data: dict):
         amount = yookassa_client.get_payment_amount(payment_data)
         
         if not user_id:
-            logger.error(f"Не найден user_id в метаданных платежа {payment_id}. Метаданные: {metadata}")
+            logger.error(f"user_id not found in payment {payment_id} metadata. Metadata: {metadata}")
             return
         
-        logger.info(f"Обработка платежа {payment_id} для пользователя {user_id}, тариф: {tariff_key}")
+        logger.info(f"Processing payment {payment_id} for user {user_id}, tariff: {tariff_key}")
         
-        # Получаем информацию о тарифе (динамически)
+        # Fetch tariff info (dynamic)
         from config import get_tariffs
         tariffs = get_tariffs()
         tariff_data = tariffs.get(tariff_key, tariffs.get('30_days', {'days': 30}))
         access_days = tariff_data.get('days', 30)
         
-        # Обновляем статус платежа в БД
+        # Update payment status in DB
         try:
             db.update_payment_status_by_id(payment_id, 'succeeded')
-            logger.info(f"Статус платежа {payment_id} обновлен на 'succeeded'")
+            logger.info(f"Payment {payment_id} status updated to 'succeeded'")
         except Exception as e:
-            logger.warning(f"Не удалось обновить статус платежа в БД: {e}")
+            logger.warning(f"Failed to update payment status in DB: {e}")
         
-        # Проверяем, есть ли уже пир у пользователя
+        # Check if the user already has a peer
         existing_peer = db.get_peer_by_telegram_id(user_id)
         target_expire_date = None
         effective_username = metadata_username or (
@@ -168,31 +172,31 @@ async def process_successful_payment(payment_data: dict):
         )
         
         if existing_peer:
-            logger.info(f"Пользователь {user_id} уже имеет пир, продлеваем доступ")
-            # Продлеваем доступ существующего пира
+            logger.info(f"User {user_id} already has a peer, extending access")
+            # Extend access for the existing peer
             success, new_expire_date = db.extend_access(user_id, access_days)
             
             if success:
-                logger.info(f"Доступ продлен для пользователя {user_id}, новая дата: {new_expire_date}")
-                # Проверяем, существует ли пир в WGDashboard
+                logger.info(f"Access extended for user {user_id}, new date: {new_expire_date}")
+                # Check if the peer exists in WGDashboard
                 peer_exists = None
                 try:
                     peer_exists = wg_api.check_peer_exists(existing_peer['peer_id'])
                 except Exception as e:
-                    logger.error(f"Ошибка при проверке существования пира в WGDashboard: {e}")
+                    logger.error(f"Error checking peer existence in WGDashboard: {e}")
 
                 allow_result = None
                 try:
                     allow_result = wg_api.allow_access_peer(existing_peer['peer_id'])
                     if allow_result and allow_result.get('status'):
-                        logger.info(f"Restricted снят для пользователя {user_id}")
+                        logger.info(f"Restricted removed for user {user_id}")
                         peer_exists = True
                     else:
                         logger.warning(
-                            f"Не удалось снять restricted для пользователя {user_id}: {allow_result}"
+                            f"Failed to remove restricted for user {user_id}: {allow_result}"
                         )
                 except Exception as e:
-                    logger.error(f"Ошибка при снятии restricted в WGDashboard: {e}")
+                    logger.error(f"Error removing restricted in WGDashboard: {e}")
 
                 if peer_exists is True:
                     try:
@@ -203,14 +207,14 @@ async def process_successful_payment(payment_data: dict):
                         )
                         
                         if job_update_result and job_update_result.get('status'):
-                            logger.info(f"Job обновлен для пользователя {user_id}, новая дата: {new_expire_date}")
+                            logger.info(f"Job updated for user {user_id}, new date: {new_expire_date}")
                         else:
-                            logger.error(f"Ошибка при обновлении job для пользователя {user_id}: {job_update_result}")
+                            logger.error(f"Error updating job for user {user_id}: {job_update_result}")
                             
                     except Exception as e:
-                        logger.error(f"Ошибка при обновлении job в WGDashboard: {e}")
+                        logger.error(f"Error updating job in WGDashboard: {e}")
                     
-                    # Обновляем статус оплаты в таблице peers (amount в копейках, конвертируем в рубли)
+                    # Update payment status in peers table (amount in kopeks, convert to rubles)
                     db.update_payment_status(user_id, 'paid', amount // 100, 'yookassa', tariff_key)
                     
                     await send_telegram_message(
@@ -228,14 +232,14 @@ async def process_successful_payment(payment_data: dict):
                     )
                 elif peer_exists is False:
                     logger.warning(
-                        f"Пир пользователя {user_id} не найден в WGDashboard, создаем новый"
+                        f"Peer for user {user_id} not found in WGDashboard, creating a new one"
                     )
-                    # Если пира в WGDashboard нет — выполняем сценарий создания ниже
+                    # If the peer is missing in WGDashboard, fall back to the creation flow
                     target_expire_date = new_expire_date
                     existing_peer = None
                 else:
                     logger.error(
-                        f"Статус пира пользователя {user_id} не определен, пересоздание отменено чтобы избежать дубля"
+                        f"Peer status for user {user_id} is unknown, recreation canceled to avoid duplicate"
                     )
                     await send_telegram_message(
                         user_id,
@@ -243,17 +247,17 @@ async def process_successful_payment(payment_data: dict):
                     )
                     return
             else:
-                logger.error(f"Ошибка при продлении доступа для пользователя {user_id}")
+                logger.error(f"Error extending access for user {user_id}")
                 await send_telegram_message(
                     user_id,
                     "❌ Ошибка при продлении доступа. Обратитесь в поддержку."
                 )
                 return
         if not existing_peer:
-            # Создаем новый пир для пользователя
-            logger.info(f"Создаем новый пир для пользователя {user_id}")
+            # Create a new peer for the user
+            logger.info(f"Creating a new peer for user {user_id}")
             peer_name = generate_peer_name(effective_username or None, user_id)
-            logger.info(f"Генерируем имя пира: {peer_name}")
+            logger.info(f"Generated peer name: {peer_name}")
 
             from datetime import datetime, timedelta
 
@@ -261,7 +265,7 @@ async def process_successful_payment(payment_data: dict):
                 datetime.now() + timedelta(days=access_days)
             ).strftime("%Y-%m-%d %H:%M:%S")
 
-            # Шаг 1. Сначала staging-запись в БД
+            # Step 1. Stage the DB record first
             stage_info = db.stage_peer_record(
                 peer_name=peer_name,
                 telegram_user_id=user_id,
@@ -273,7 +277,7 @@ async def process_successful_payment(payment_data: dict):
                 rub_paid=amount // 100,
             )
             if not stage_info:
-                logger.error(f"Ошибка при сохранении staging-записи в БД для пользователя {user_id}")
+                logger.error(f"Failed to save staged DB record for user {user_id}")
                 await send_telegram_message(
                     user_id,
                     "❌ Ошибка при сохранении данных. Обратитесь в поддержку.",
@@ -282,17 +286,17 @@ async def process_successful_payment(payment_data: dict):
 
             peer_id = None
             try:
-                # Шаг 2. Создаем peer в WGDashboard
+                # Step 2. Create peer in WGDashboard
                 peer_result = wg_api.add_peer(peer_name)
                 if not peer_result or "id" not in peer_result:
-                    raise Exception(f"Ошибка при создании пира: {peer_result}")
+                    raise Exception(f"Failed to create peer: {peer_result}")
 
                 peer_id = peer_result["id"]
-                logger.info(f"Пир создан успешно: {peer_id}")
+                logger.info(f"Peer created successfully: {peer_id}")
 
-                # Шаг 3. Создаем job в WGDashboard
+                # Step 3. Create job in WGDashboard
                 logger.info(
-                    f"Создаем job для пира {peer_id}, дата истечения: {expire_date}"
+                    f"Creating job for peer {peer_id}, expiration date: {expire_date}"
                 )
                 job_result, job_id, final_expire_date = wg_api.create_restrict_job(
                     peer_id, expire_date
@@ -300,11 +304,11 @@ async def process_successful_payment(payment_data: dict):
                 if not job_result or (
                     isinstance(job_result, dict) and job_result.get("status") is False
                 ):
-                    raise Exception(f"Ошибка при создании job: {job_result}")
+                    raise Exception(f"Failed to create job: {job_result}")
 
-                logger.info(f"Job создан: {job_id}")
+                logger.info(f"Job created: {job_id}")
 
-                # Финализация записи в БД реальными peer_id/job_id
+                # Finalize DB record with real peer_id/job_id
                 success = db.finalize_staged_peer(
                     telegram_user_id=user_id,
                     stage_info=stage_info,
@@ -319,18 +323,18 @@ async def process_successful_payment(payment_data: dict):
                     rub_paid=amount // 100,
                 )
                 if not success:
-                    raise Exception("Ошибка при финализации данных клиента в БД")
+                    raise Exception("Failed to finalize client data in DB")
 
-                # Шаг 4. Обновляем clients.json
+                # Step 4. Update clients.json
                 client_id_for_json = effective_username if effective_username else str(user_id)
                 if effective_username:
                     clients_manager.remove_client(str(user_id))
                 if not clients_manager.add_update_client(
                     client_id_for_json, peer_id, force_write=True
                 ):
-                    raise Exception("Ошибка при обновлении clients.json")
+                    raise Exception("Failed to update clients.json")
 
-                logger.info(f"Пир сохранен в БД и clients.json для пользователя {user_id}")
+                logger.info(f"Peer saved in DB and clients.json for user {user_id}")
                 sync_bound_custom_peers_for_user(
                     user_id=user_id,
                     expire_date=final_expire_date,
@@ -338,17 +342,17 @@ async def process_successful_payment(payment_data: dict):
                     exclude_peer_id=peer_id,
                 )
 
-                # Обновляем статус оплаты в таблице peers
+                # Update payment status in peers table
                 db.update_payment_status(user_id, "paid", amount // 100, "yookassa", tariff_key)
 
-                # Скачиваем и отправляем конфигурацию
+                # Download and send configuration
                 try:
-                    logger.info(f"Скачиваем конфигурацию для пира {peer_id}")
+                    logger.info(f"Downloading config for peer {peer_id}")
                     config_content = wg_api.download_peer_config(peer_id)
                     filename = "nikonVPN.conf"
 
-                    logger.info(f"Отправляем конфигурацию пользователю {user_id}")
-                    # Отправляем конфигурацию через Telegram API
+                    logger.info(f"Sending config to user {user_id}")
+                    # Send config via Telegram API
                     async with httpx.AsyncClient() as client:
                         files = {
                             "document": (filename, config_content, "application/octet-stream")
@@ -371,10 +375,10 @@ async def process_successful_payment(payment_data: dict):
                         )
 
                         if response.status_code == 200:
-                            logger.info(f"Конфигурация успешно отправлена пользователю {user_id}")
+                            logger.info(f"Config successfully sent to user {user_id}")
                         else:
                             logger.error(
-                                f"Ошибка отправки конфигурации: {response.status_code} - {response.text}"
+                                f"Config send error: {response.status_code} - {response.text}"
                             )
                             await send_telegram_message(
                                 user_id,
@@ -384,7 +388,7 @@ async def process_successful_payment(payment_data: dict):
 
                 except Exception as e:
                     logger.error(
-                        f"Ошибка при скачивании/отправке конфигурации для пользователя {user_id}: {e}",
+                        f"Error downloading/sending config for user {user_id}: {e}",
                         exc_info=True,
                     )
                     await send_telegram_message(
@@ -399,15 +403,15 @@ async def process_successful_payment(payment_data: dict):
                         wg_api.delete_peer(peer_id)
                     except Exception as delete_error:
                         logger.error(
-                            f"Не удалось удалить peer {peer_id} после ошибки: {delete_error}"
+                            f"Failed to delete peer {peer_id} after error: {delete_error}"
                         )
 
                 rollback_ok = db.rollback_staged_peer(user_id, stage_info)
                 if not rollback_ok:
-                    logger.error(f"Не удалось откатить staged-запись пользователя {user_id}")
+                    logger.error(f"Failed to roll back staged record for user {user_id}")
 
                 logger.error(
-                    f"Ошибка при создании пира после оплаты для пользователя {user_id}: {e}",
+                    f"Error creating peer after payment for user {user_id}: {e}",
                     exc_info=True,
                 )
                 await send_telegram_message(
@@ -416,10 +420,10 @@ async def process_successful_payment(payment_data: dict):
                 )
         
     except Exception as e:
-        logger.error(f"Критическая ошибка при обработке успешного платежа: {e}", exc_info=True)
+        logger.error(f"Critical error while processing successful payment: {e}", exc_info=True)
 
 async def process_canceled_payment(payment_data: dict):
-    """Обрабатывает отмененный платеж"""
+    """Process canceled payment."""
     try:
         metadata = yookassa_client.get_payment_metadata(payment_data)
         user_id = int(metadata.get('user_id', 0))
@@ -431,10 +435,10 @@ async def process_canceled_payment(payment_data: dict):
                 "💡 Попробуйте оплатить снова или обратитесь в поддержку."
             )
     except Exception as e:
-        logger.error(f"Ошибка при обработке отмененного платежа: {e}")
+        logger.error(f"Error processing canceled payment: {e}")
 
 async def process_waiting_for_capture_payment(payment_data: dict):
-    """Обрабатывает платеж, ожидающий подтверждения"""
+    """Process payment waiting for capture."""
     try:
         metadata = yookassa_client.get_payment_metadata(payment_data)
         user_id = int(metadata.get('user_id', 0))
@@ -447,45 +451,47 @@ async def process_waiting_for_capture_payment(payment_data: dict):
                 "📧 Вы получите уведомление о результате."
             )
     except Exception as e:
-        logger.error(f"Ошибка при обработке платежа waiting_for_capture: {e}")
+        logger.error(f"Error processing waiting_for_capture payment: {e}")
 
 async def process_refund_succeeded(refund_data: dict):
-    """Обрабатывает успешный возврат"""
+    """Process successful refund."""
     try:
-        # Для возвратов нужно найти оригинальный платеж
+        # Refunds require the original payment
         payment_id = refund_data.get('payment_id')
         if not payment_id:
-            logger.error("Не найден payment_id в данных возврата")
+            logger.error("payment_id not found in refund data")
             return
         
-        # Получаем информацию о платеже из базы данных
+        # Fetch payment info from the database
         payment_info = db.get_payment_by_id(payment_id)
         if not payment_info:
-            logger.error(f"Не найден платеж {payment_id} в базе данных")
+            logger.error(f"Payment {payment_id} not found in database")
             return
         
         user_id = payment_info['user_id']
         tariff_key = payment_info.get('tariff_key', '30_days')
         amount = refund_data.get('amount', {}).get('value', '0')
         
-        # Определяем количество дней для уменьшения
+        # Determine number of days to reduce
         from config import get_tariffs
         tariffs = get_tariffs()
         tariff_data = tariffs.get(tariff_key, tariffs.get('30_days', {'days': 30}))
         days_to_reduce = tariff_data.get('days', 30)
         
-        logger.info(f"Обработка возврата для пользователя {user_id}: уменьшаем доступ на {days_to_reduce} дней (тариф {tariff_key})")
+        logger.info(
+            f"Processing refund for user {user_id}: reducing access by {days_to_reduce} days (tariff {tariff_key})"
+        )
         
-        # Уменьшаем срок доступа в базе данных
+        # Reduce access period in the database
         success, new_expire_date = db.decrease_access(user_id, days_to_reduce)
         
         if success:
-            logger.info(f"Доступ уменьшен для пользователя {user_id}, новая дата: {new_expire_date}")
+            logger.info(f"Access reduced for user {user_id}, new date: {new_expire_date}")
             
-            # Получаем информацию о пире для обновления job
+            # Fetch peer info to update job
             peer_info = db.get_peer_by_telegram_id(user_id)
             if peer_info:
-                # Обновляем job в WGDashboard
+                # Update job in WGDashboard
                 try:
                     job_update_result = wg_api.update_job_expire_date(
                         peer_info['job_id'], 
@@ -494,12 +500,16 @@ async def process_refund_succeeded(refund_data: dict):
                     )
                     
                     if job_update_result and job_update_result.get('status'):
-                        logger.info(f"Job обновлен для пользователя {user_id} после возврата, новая дата: {new_expire_date}")
+                        logger.info(
+                            f"Job updated for user {user_id} after refund, new date: {new_expire_date}"
+                        )
                     else:
-                        logger.error(f"Ошибка при обновлении job для пользователя {user_id} после возврата: {job_update_result}")
+                        logger.error(
+                            f"Error updating job for user {user_id} after refund: {job_update_result}"
+                        )
                         
                 except Exception as e:
-                    logger.error(f"Ошибка при обновлении job в WGDashboard после возврата: {e}")
+                    logger.error(f"Error updating job in WGDashboard after refund: {e}")
 
                 sync_bound_custom_peers_for_user(
                     user_id=user_id,
@@ -508,9 +518,9 @@ async def process_refund_succeeded(refund_data: dict):
                     exclude_peer_id=peer_info["peer_id"],
                 )
             else:
-                logger.warning(f"Не найден пир для пользователя {user_id} при обработке возврата")
+                logger.warning(f"Peer not found for user {user_id} during refund processing")
         else:
-            logger.error(f"Не удалось уменьшить доступ для пользователя {user_id} при обработке возврата")
+            logger.error(f"Failed to reduce access for user {user_id} during refund processing")
         
         await send_telegram_message(
             user_id,
@@ -521,28 +531,28 @@ async def process_refund_succeeded(refund_data: dict):
             f"📧 Деньги будут возвращены на карту в течение 1-3 рабочих дней."
         )
         
-        # Обновляем статус платежа в базе данных
+        # Update payment status in the database
         db.update_payment_status_by_id(payment_id, 'refunded')
         
     except Exception as e:
-        logger.error(f"Ошибка при обработке возврата: {e}", exc_info=True)
+        logger.error(f"Error processing refund: {e}", exc_info=True)
 
 @app.get("/health")
 async def health_check():
-    """Проверка здоровья сервиса"""
+    """Service health check."""
     return {"status": "healthy"}
 
 @app.get("/webhook/yookassa/health")
 async def webhook_health_check():
-    """Проверка здоровья webhook endpoint"""
+    """Webhook endpoint health check."""
     return {"status": "webhook_healthy", "endpoint": "/webhook/yookassa"}
 
 @app.get("/webhook/yookassa/test")
 async def webhook_test():
-    """Тестовый endpoint для проверки webhook"""
+    """Test endpoint for webhook verification."""
     return {
         "status": "ok",
-        "message": "Webhook endpoint доступен",
+        "message": "Webhook endpoint is available",
         "endpoint": "/webhook/yookassa",
         "method": "POST",
         "expected_events": ["payment.succeeded", "payment.canceled", "payment.waiting_for_capture", "refund.succeeded"]
@@ -550,58 +560,60 @@ async def webhook_test():
 
 @app.post("/webhook/yookassa")
 async def yookassa_webhook(request: Request):
-    """Обработчик webhook от ЮKassa"""
+    """Handle YooKassa webhook."""
     try:
-        # Логируем все заголовки для отладки
-        logger.info(f"Получен webhook запрос от {request.client.host if request.client else 'unknown'}")
-        logger.debug(f"Заголовки: {dict(request.headers)}")
+        # Log all headers for debugging
+        logger.info(
+            f"Received webhook request from {request.client.host if request.client else 'unknown'}"
+        )
+        logger.debug(f"Headers: {dict(request.headers)}")
         
-        # Получаем тело запроса
+        # Read request body
         body = await request.body()
         body_str = body.decode('utf-8')
-        logger.info(f"Тело webhook (первые 500 символов): {body_str[:500]}")
+        logger.info(f"Webhook body (first 500 chars): {body_str[:500]}")
         
-        # Получаем подпись из заголовков (ЮKassa может использовать разные заголовки)
+        # Get signature from headers (YooKassa may use different headers)
         signature = (request.headers.get('X-YooMoney-Signature', '') or 
                     request.headers.get('Authorization', '').replace('Bearer ', '') or
                     request.headers.get('X-Signature', ''))
         
-        # Проверяем подпись (если есть и настроена)
-        # ВАЖНО: При использовании HTTP Basic Auth ЮKassa может не отправлять подпись
-        # В этом случае мы полагаемся на HTTPS и проверку данных платежа через API
+        # Verify signature (if present and configured)
+        # IMPORTANT: with HTTP Basic Auth YooKassa may not send a signature
+        # In that case we rely on HTTPS and API-based payment verification
         if signature:
             if not yookassa_client.verify_webhook_signature(body_str, signature):
-                logger.warning("Неверная подпись webhook от ЮKassa")
-                # НЕ отклоняем запрос, так как подпись может отсутствовать при HTTP Basic Auth
-                # Вместо этого логируем предупреждение и продолжаем обработку
-                logger.warning("Продолжаем обработку webhook без проверки подписи")
+                logger.warning("Invalid webhook signature from YooKassa")
+                # DO NOT reject: signature may be absent with HTTP Basic Auth
+                # Log a warning and continue processing
+                logger.warning("Continuing webhook processing without signature verification")
             else:
-                logger.info("Подпись webhook проверена успешно")
+                logger.info("Webhook signature verified successfully")
         else:
-            logger.info("Подпись webhook отсутствует (возможно, используется HTTP Basic Auth)")
+            logger.info("Webhook signature missing (possibly using HTTP Basic Auth)")
         
-        # Парсим данные
+        # Parse data
         webhook_data = yookassa_client.parse_webhook(body_str)
         if not webhook_data:
-            logger.error(f"Ошибка парсинга webhook. Тело: {body_str[:200]}")
-            # Возвращаем 200, чтобы ЮKassa не повторял запрос
+            logger.error(f"Webhook parse error. Body: {body_str[:200]}")
+            # Return 200 so YooKassa does not retry
             return JSONResponse(content={"status": "error", "message": "Invalid JSON"}, status_code=200)
         
-        logger.info(f"Webhook распарсен успешно: ключи={list(webhook_data.keys())}")
+        logger.info(f"Webhook parsed successfully: keys={list(webhook_data.keys())}")
         
-        # Проверяем тип уведомления (обязательный параметр)
+        # Check notification type (required)
         notification_type = webhook_data.get('type', '')
         
-        # Получаем данные события
+        # Get event data
         event_type = webhook_data.get('event', '')
         event_data = webhook_data.get('object', {})
         
-        # Если структура отличается, пытаемся извлечь данные по-другому
+        # If structure differs, try alternative extraction
         if not event_type:
-            # Возможно, событие указано в другом месте
+            # Event may be in a different field
             event_type = webhook_data.get('event_type', '')
         
-        # Если нет event, но есть статус платежа, определяем event по статусу
+        # If no event but payment status exists, infer event type
         if not event_type:
             payment_status = webhook_data.get('status', '')
             if payment_status:
@@ -611,23 +623,25 @@ async def yookassa_webhook(request: Request):
                     event_type = 'payment.canceled'
                 elif payment_status == 'waiting_for_capture':
                     event_type = 'payment.waiting_for_capture'
-                logger.info(f"Определен event_type по статусу платежа: {event_type}")
+                logger.info(f"Inferred event_type from payment status: {event_type}")
         
         if not event_data:
-            # Возможно, данные платежа в корне объекта или в поле payment
+            # Payment data may be at the root or in the payment field
             event_data = webhook_data.get('payment', webhook_data)
         
-        # Если все еще нет event_data, но webhook_data содержит данные платежа
+        # If still no event_data but webhook_data contains payment data
         if not event_data or not isinstance(event_data, dict):
             if 'id' in webhook_data and 'status' in webhook_data:
                 event_data = webhook_data
-                logger.info("Используем webhook_data как event_data (прямой объект платежа)")
+                logger.info("Using webhook_data as event_data (direct payment object)")
             else:
-                logger.error(f"Отсутствует или неверный параметр 'object' в webhook. Тип: {type(event_data)}, ключи webhook_data: {list(webhook_data.keys())}")
-                # Возвращаем 200, чтобы ЮKassa не повторял запрос
+                logger.error(
+                    f"Missing or invalid 'object' in webhook. Type: {type(event_data)}, webhook_data keys: {list(webhook_data.keys())}"
+                )
+                # Return 200 so YooKassa does not retry
                 return JSONResponse(content={"status": "error", "message": "Missing or invalid object parameter"}, status_code=200)
         
-        # Если все еще нет event_type, но есть статус в event_data
+        # If still no event_type but status exists in event_data
         if not event_type and isinstance(event_data, dict):
             payment_status = event_data.get('status', '')
             if payment_status == 'succeeded':
@@ -636,58 +650,60 @@ async def yookassa_webhook(request: Request):
                 event_type = 'payment.canceled'
             elif payment_status == 'waiting_for_capture':
                 event_type = 'payment.waiting_for_capture'
-            logger.info(f"Определен event_type по статусу в event_data: {event_type}")
+            logger.info(f"Inferred event_type from status in event_data: {event_type}")
         
-        # Проверяем обязательные параметры
+        # Validate required parameters
         if not event_type:
-            logger.error(f"Не удалось определить event_type. Доступные ключи webhook_data: {list(webhook_data.keys())}, event_data: {list(event_data.keys()) if isinstance(event_data, dict) else 'не словарь'}")
-            # Возвращаем 200, чтобы ЮKassa не повторял запрос, но логируем ошибку
+            logger.error(
+                f"Failed to determine event_type. webhook_data keys: {list(webhook_data.keys())}, event_data: {list(event_data.keys()) if isinstance(event_data, dict) else 'not a dict'}"
+            )
+            # Return 200 so YooKassa does not retry, but log the error
             return JSONResponse(content={"status": "error", "message": "Cannot determine event type"}, status_code=200)
         
-        # Логируем детали webhook'а
+        # Log webhook details
         object_id = event_data.get('id', 'unknown')
         object_status = event_data.get('status', 'unknown')
-        logger.info(f"Получен webhook: событие={event_type}, ID={object_id}, статус={object_status}")
+        logger.info(f"Webhook received: event={event_type}, ID={object_id}, status={object_status}")
         
-        # Для платежей также проверяем статус через API (дополнительная проверка)
+        # For payments, also verify status via API (extra check)
         if event_type.startswith('payment.'):
             payment_id = event_data.get('id')
             if payment_id:
-                logger.info(f"Проверяем статус платежа {payment_id} через API")
+                logger.info(f"Checking payment status via API for {payment_id}")
                 payment_info = await yookassa_client.get_payment(payment_id)
                 if payment_info:
                     api_status = payment_info.get('status', 'unknown')
-                    logger.info(f"Статус платежа {payment_id} через API: {api_status}")
-                    # Обновляем данные из API для гарантии актуальности
+                    logger.info(f"Payment {payment_id} status via API: {api_status}")
+                    # Refresh data from API for accuracy
                     if api_status == 'succeeded' and event_type == 'payment.succeeded':
                         event_data = payment_info
         
-        # Обрабатываем в зависимости от типа события
+        # Process by event type
         if event_type == 'payment.succeeded':
-            logger.info(f"Обработка успешного платежа {object_id}")
+            logger.info(f"Processing successful payment {object_id}")
             await process_successful_payment(event_data)
         elif event_type == 'payment.canceled':
-            logger.info(f"Обработка отмененного платежа {object_id}")
+            logger.info(f"Processing canceled payment {object_id}")
             await process_canceled_payment(event_data)
         elif event_type == 'payment.waiting_for_capture':
-            logger.info(f"Обработка платежа, ожидающего подтверждения {object_id}")
+            logger.info(f"Processing payment waiting for capture {object_id}")
             await process_waiting_for_capture_payment(event_data)
         elif event_type == 'refund.succeeded':
-            logger.info(f"Обработка успешного возврата для платежа {object_id}")
+            logger.info(f"Processing successful refund for payment {object_id}")
             await process_refund_succeeded(event_data)
         else:
-            logger.warning(f"Неизвестное событие: {event_type}")
+            logger.warning(f"Unknown event: {event_type}")
         
-        logger.info(f"Webhook успешно обработан: {event_type}, {object_id}")
+        logger.info(f"Webhook processed successfully: {event_type}, {object_id}")
         return JSONResponse(content={"status": "ok"})
         
     except HTTPException as e:
-        logger.error(f"HTTP ошибка при обработке webhook: {e.status_code} - {e.detail}")
+        logger.error(f"HTTP error while processing webhook: {e.status_code} - {e.detail}")
         raise
     except Exception as e:
-        logger.error(f"Ошибка обработки webhook: {e}", exc_info=True)
-        # Возвращаем 200, чтобы ЮKassa не повторял запрос бесконечно
-        # Но логируем ошибку для исправления
+        logger.error(f"Webhook processing error: {e}", exc_info=True)
+        # Return 200 so YooKassa does not retry forever
+        # But log the error for investigation
         return JSONResponse(content={"status": "error", "message": str(e)}, status_code=200)
 
 if __name__ == "__main__":

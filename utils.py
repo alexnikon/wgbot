@@ -7,140 +7,140 @@ logger = logging.getLogger(__name__)
 
 def generate_peer_name(telegram_username: Optional[str] = None, user_id: Optional[int] = None) -> str:
     """
-    Генерирует уникальное имя для пира в формате username_telegramID
-    
+    Generate a unique peer name in the username_telegramID format.
+
     Args:
-        telegram_username: Username пользователя Telegram
-        user_id: ID пользователя Telegram
-        
+        telegram_username: Telegram username
+        user_id: Telegram user ID
+
     Returns:
-        Сгенерированное имя пира в формате username_telegramID
+        Peer name in username_telegramID format
     """
-    # Используем формат username_telegramID для лучшей идентификации
+    # Use username_telegramID for better identification
     if telegram_username:
         peer_name = f"{telegram_username}_{user_id}"
     else:
-        # Если username отсутствует, используем только user_id
+        # If username is missing, use only user_id
         peer_name = f"user_{user_id}"
     
-    # Ограничиваем длину имени
+    # Enforce max length
     if len(peer_name) > 50:
         peer_name = peer_name[:50]
     
     return peer_name
 
 def generate_uuid() -> str:
-    """Генерирует UUID для job"""
+    """Generate a UUID for a job."""
     return str(uuid.uuid4())
 
 def format_datetime(dt: datetime.datetime) -> str:
     """
-    Форматирует datetime в строку для WGDashboard API
+    Format datetime for the WGDashboard API.
     
     Args:
-        dt: Объект datetime
+        dt: datetime object
         
     Returns:
-        Отформатированная строка даты
+        Formatted date string
     """
     return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 def parse_datetime(date_str: str) -> datetime.datetime:
     """
-    Парсит строку даты из WGDashboard API
+    Parse a date string from the WGDashboard API.
     
     Args:
-        date_str: Строка даты
+        date_str: Date string
         
     Returns:
-        Объект datetime
+        datetime object
     """
     return datetime.datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
 
 def parse_date_flexible(date_str: str) -> datetime.datetime:
     """
-    Парсит строку даты, поддерживая несколько форматов
+    Parse a date string, supporting multiple formats.
     
     Args:
-        date_str: Строка даты в формате "YYYY-MM-DD HH:MM:SS" или "YYYY-MM-DD"
+        date_str: Date string in "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DD"
         
     Returns:
-        Объект datetime
+        datetime object
         
     Raises:
-        ValueError: Если формат даты не распознан
+        ValueError: If date format is not recognized
     """
     if not date_str:
-        raise ValueError("Пустая строка даты")
+        raise ValueError("Empty date string")
     
-    # Пробуем формат с временем
+    # Try format with time
     try:
         return datetime.datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
     except ValueError:
         pass
     
-    # Пробуем формат без времени
+    # Try format without time
     try:
         return datetime.datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError:
-        raise ValueError(f"Неверный формат даты: {date_str}")
+        raise ValueError(f"Invalid date format: {date_str}")
 
 def format_date_for_user(date_str: str) -> str:
     """
-    Форматирует дату для отображения пользователю в формате ДД-ММ-ГГГГ
+    Format a date for user display in DD-MM-YYYY.
     
     Args:
-        date_str: Строка даты в формате "YYYY-MM-DD HH:MM:SS" или "YYYY-MM-DD"
+        date_str: Date string in "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DD"
         
     Returns:
-        Отформатированная строка в формате "ДД-ММ-ГГГГ"
+        Formatted string in "DD-MM-YYYY"
     """
     try:
         dt = parse_date_flexible(date_str)
         return dt.strftime("%d-%m-%Y")
     except (ValueError, TypeError) as e:
-        logger.error(f"Ошибка форматирования даты {date_str}: {e}")
-        return date_str  # Возвращаем исходную строку в случае ошибки
+        logger.error(f"Failed to format date {date_str}: {e}")
+        return date_str  # Return original on error
 
 def calculate_expiry_date(days: int = 30) -> str:
     """
-    Вычисляет дату истечения через указанное количество дней
+    Calculate expiration date after the specified number of days.
     
     Args:
-        days: Количество дней до истечения
+        days: Days until expiration
         
     Returns:
-        Строка с датой истечения
+        Expiration date string
     """
     expiry_date = datetime.datetime.now() + datetime.timedelta(days=days)
     return format_datetime(expiry_date)
 
 def is_expired(expire_date_str: str) -> bool:
     """
-    Проверяет, истек ли срок действия
+    Check if the access has expired.
     
     Args:
-        expire_date_str: Строка с датой истечения
+        expire_date_str: Expiration date string
         
     Returns:
-        True если срок истек
+        True if expired
     """
     try:
         expire_date = parse_datetime(expire_date_str)
         return datetime.datetime.now() > expire_date
     except ValueError:
-        logger.error(f"Неверный формат даты: {expire_date_str}")
+        logger.error(f"Invalid date format: {expire_date_str}")
         return False
 
 def format_peer_info(peer_data: dict) -> str:
     """
-    Форматирует информацию о пире для отображения пользователю
+    Format peer info for user display.
     
     Args:
-        peer_data: Данные о пире
+        peer_data: Peer data
         
     Returns:
-        Отформатированная строка
+        Formatted string
     """
     if not peer_data:
         return "Пир не найден"
@@ -148,7 +148,7 @@ def format_peer_info(peer_data: dict) -> str:
     created_at = peer_data.get('created_at', 'Неизвестно')
     expire_date = peer_data.get('expire_date', 'Неизвестно')
     
-    # Парсим даты для красивого отображения
+    # Parse dates for display
     try:
         if created_at != 'Неизвестно':
             created_dt = parse_datetime(created_at)
@@ -177,13 +177,13 @@ def format_peer_info(peer_data: dict) -> str:
 
 def format_peer_list(peers: list) -> str:
     """
-    Форматирует список пиров для отображения
+    Format peer list for display.
     
     Args:
-        peers: Список пиров
+        peers: List of peers
         
     Returns:
-        Отформатированная строка
+        Formatted string
     """
     if not peers:
         return "📭 У вас пока нет активных пиров"
@@ -207,37 +207,37 @@ def format_peer_list(peers: list) -> str:
 
 def validate_peer_name(name: str) -> bool:
     """
-    Проверяет валидность имени пира
+    Validate a peer name.
     
     Args:
-        name: Имя для проверки
+        name: Name to validate
         
     Returns:
-        True если имя валидно
+        True if valid
     """
     if not name or len(name) < 3:
         return False
     
-    # Проверяем на допустимые символы
+    # Check allowed characters
     allowed_chars = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-')
     return all(c in allowed_chars for c in name)
 
 def sanitize_filename(filename: str) -> str:
     """
-    Очищает имя файла от недопустимых символов
+    Sanitize a filename by removing invalid characters.
     
     Args:
-        filename: Исходное имя файла
+        filename: Original filename
         
     Returns:
-        Очищенное имя файла
+        Sanitized filename
     """
     import re
-    # Удаляем недопустимые символы
+    # Remove invalid characters
     filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-    # Удаляем пробелы в начале и конце
+    # Trim leading and trailing spaces
     filename = filename.strip()
-    # Ограничиваем длину
+    # Limit length
     return filename
 
 
@@ -305,7 +305,7 @@ class ClientsJsonManager:
         clients = self._read_clients()
         original_length = len(clients)
         
-        # Фильтруем список, оставляя только тех, у кого не совпадает client_id
+        # Filter out matching client_id
         new_clients = [c for c in clients if c.get("clientId") != client_id]
         
         if len(new_clients) < original_length:
@@ -319,10 +319,10 @@ class PromoManager:
 
     def get_user_promo_factor(self, user_id: int) -> float:
         """
-        Возвращает множитель цены для пользователя.
-        Если значение в файле <= 100, оно считается скидкой (например, 20 -> 0.8).
-        Если значение > 100, оно считается новой ценой в процентах (например, 150 -> 1.5).
-        Считывает файл promo.txt при каждом вызове для поддержки горячего обновления.
+        Return user-specific price multiplier.
+        If value <= 100, it's a discount percent (e.g., 20 -> 0.8).
+        If value > 100, it's a markup percent (e.g., 150 -> 1.5).
+        Reads promo.txt on each call to support hot reload.
         """
         if not os.path.exists(self.promo_file_path):
             return 1.0
@@ -341,16 +341,16 @@ class PromoManager:
                         
                         if uid == user_id:
                             if val <= 100:
-                                # Скидка (20 -> 0.8)
+                                # Discount (20 -> 0.8)
                                 return 1.0 - (val / 100.0)
                             else:
-                                # Наценка (150 -> 1.5)
+                                # Markup (150 -> 1.5)
                                 return val / 100.0
                     except ValueError:
                         continue
         except Exception as e:
-            # logger.error(f"Ошибка при чтении файла промокодов: {e}") 
-            # Не ломаем работу если файл кривой, просто без скидки
+            # logger.error(f"Failed to read promo file: {e}")
+            # Fail open: ignore promo errors and return default multiplier
             pass
             
         return 1.0

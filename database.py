@@ -16,11 +16,11 @@ class Database:
         self.init_database()
 
     def init_database(self):
-        """Инициализирует базу данных и создает необходимые таблицы"""
+        """Initialize the database and create required tables."""
         with sqlite3.connect(self.db_file) as conn:
             cursor = conn.cursor()
 
-            # Таблица для хранения информации о пирах
+            # Table for peer records
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS peers (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,7 +40,7 @@ class Database:
                 )
             """)
 
-            # Таблица для хранения логов операций
+            # Table for operation logs
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS operation_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,7 +51,7 @@ class Database:
                 )
             """)
 
-            # Таблица для хранения платежей
+            # Table for payments
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS payments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,16 +68,16 @@ class Database:
                 )
             """)
 
-            # Миграция: добавляем новые колонки если их нет
+            # Migration: add new columns if missing
             self._migrate_database(cursor)
 
             conn.commit()
-            logger.info("База данных инициализирована")
+            logger.info("Database initialized")
 
     def _migrate_database(self, cursor):
-        """Выполняет миграцию базы данных для добавления новых колонок"""
+        """Run database migrations to add new columns."""
         try:
-            # Проверяем существование колонки payment_status
+            # Check if payment_status column exists
             cursor.execute("PRAGMA table_info(peers)")
             columns = [column[1] for column in cursor.fetchall()]
 
@@ -85,49 +85,49 @@ class Database:
                 cursor.execute(
                     "ALTER TABLE peers ADD COLUMN payment_status TEXT DEFAULT 'unpaid'"
                 )
-                logger.info("Добавлена колонка payment_status")
+                logger.info("Added column: payment_status")
 
             if "stars_paid" not in columns:
                 cursor.execute(
                     "ALTER TABLE peers ADD COLUMN stars_paid INTEGER DEFAULT 0"
                 )
-                logger.info("Добавлена колонка stars_paid")
+                logger.info("Added column: stars_paid")
 
             if "last_payment_date" not in columns:
                 cursor.execute(
                     "ALTER TABLE peers ADD COLUMN last_payment_date TIMESTAMP"
                 )
-                logger.info("Добавлена колонка last_payment_date")
+                logger.info("Added column: last_payment_date")
 
             if "notification_sent" not in columns:
                 cursor.execute(
                     "ALTER TABLE peers ADD COLUMN notification_sent BOOLEAN DEFAULT 0"
                 )
-                logger.info("Добавлена колонка notification_sent")
+                logger.info("Added column: notification_sent")
 
             if "expired_notification_sent" not in columns:
                 cursor.execute(
                     "ALTER TABLE peers ADD COLUMN expired_notification_sent BOOLEAN DEFAULT 0"
                 )
-                logger.info("Добавлена колонка expired_notification_sent")
+                logger.info("Added column: expired_notification_sent")
 
-            # Добавляем колонки для новой системы тарифов
+            # Add columns for the new tariff system
             if "tariff_key" not in columns:
                 cursor.execute("ALTER TABLE peers ADD COLUMN tariff_key TEXT")
-                logger.info("Добавлена колонка tariff_key")
+                logger.info("Added column: tariff_key")
 
             if "payment_method" not in columns:
                 cursor.execute("ALTER TABLE peers ADD COLUMN payment_method TEXT")
-                logger.info("Добавлена колонка payment_method")
+                logger.info("Added column: payment_method")
 
             if "rub_paid" not in columns:
                 cursor.execute(
                     "ALTER TABLE peers ADD COLUMN rub_paid INTEGER DEFAULT 0"
                 )
-                logger.info("Добавлена колонка rub_paid")
+                logger.info("Added column: rub_paid")
 
         except Exception as e:
-            logger.error(f"Ошибка при миграции базы данных: {e}")
+            logger.error(f"Database migration error: {e}")
 
     def add_peer(
         self,
@@ -144,23 +144,23 @@ class Database:
         rub_paid: int = 0,
     ) -> bool:
         """
-        Добавляет нового пира в базу данных
+        Add a new peer record to the database.
 
         Args:
-            peer_name: Имя пира
-            peer_id: ID пира в WireGuard
-            job_id: ID job для ограничения
-            telegram_user_id: ID пользователя Telegram
-            telegram_username: Username пользователя Telegram
-            expire_date: Дата истечения
-            payment_status: Статус оплаты ('paid', 'unpaid')
-            stars_paid: Количество оплаченных звезд
-            tariff_key: Ключ тарифа (7_days, 30_days)
-            payment_method: Способ оплаты (stars, yookassa)
-            rub_paid: Количество оплаченных рублей
+            peer_name: Peer name
+            peer_id: Peer ID in WireGuard
+            job_id: Job ID for restriction
+            telegram_user_id: Telegram user ID
+            telegram_username: Telegram username
+            expire_date: Expiration date
+            payment_status: Payment status ('paid', 'unpaid')
+            stars_paid: Stars paid amount
+            tariff_key: Tariff key (7_days, 30_days)
+            payment_method: Payment method (stars, yookassa)
+            rub_paid: RUB paid amount
 
         Returns:
-            True если успешно добавлен
+            True if successfully inserted
         """
         try:
             with sqlite3.connect(self.db_file) as conn:
@@ -189,16 +189,16 @@ class Database:
                 )
                 conn.commit()
 
-                # Логируем операцию
+                # Log operation
                 self.log_operation(
                     peer_name,
                     "CREATE_PEER",
-                    f"Создан пир {peer_name}, тариф {tariff_key}",
+                    f"Created peer {peer_name}, tariff {tariff_key}",
                 )
                 return True
 
         except sqlite3.IntegrityError as e:
-            logger.error(f"Ошибка при добавлении пира {peer_name}: {e}")
+            logger.error(f"Failed to add peer {peer_name}: {e}")
             return False
 
     def stage_peer_record(
@@ -213,8 +213,8 @@ class Database:
         rub_paid: int = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Создает/обновляет запись пира в промежуточный pending-статус.
-        Это позволяет соблюдать порядок: БД -> WG peer -> WG job -> clients.json.
+        Create/update a peer record in a temporary pending state.
+        This enforces ordering: DB -> WG peer -> WG job -> clients.json.
         """
         pending_peer_id = f"pending_peer_{uuid.uuid4()}"
         pending_job_id = f"pending_job_{uuid.uuid4()}"
@@ -306,7 +306,7 @@ class Database:
                 }
 
         except sqlite3.IntegrityError as e:
-            logger.error(f"Ошибка при staging пира {peer_name}: {e}")
+            logger.error(f"Failed to stage peer {peer_name}: {e}")
             return None
 
     def finalize_staged_peer(
@@ -323,7 +323,7 @@ class Database:
         payment_method: str = None,
         rub_paid: int = None,
     ) -> bool:
-        """Финализирует pending-запись, проставляя реальные peer_id/job_id."""
+        """Finalize a pending record by writing real peer_id/job_id."""
         if not stage_info:
             return False
 
@@ -373,19 +373,19 @@ class Database:
 
                 operation = "CREATE_PEER" if mode == "create" else "UPDATE_PEER"
                 details = (
-                    f"Создан пир {peer_name}, тариф {tariff_key}"
+                    f"Created peer {peer_name}, tariff {tariff_key}"
                     if mode == "create"
-                    else f"Обновлен пир {peer_name} с новым ID"
+                    else f"Updated peer {peer_name} with new ID"
                 )
                 self.log_operation(peer_name, operation, details)
                 return True
 
         except Exception as e:
-            logger.error(f"Ошибка при финализации пира {peer_name}: {e}")
+            logger.error(f"Failed to finalize peer {peer_name}: {e}")
             return False
 
     def rollback_staged_peer(self, telegram_user_id: int, stage_info: Dict[str, Any]) -> bool:
-        """Откатывает pending-запись при ошибках создания/обновления."""
+        """Rollback a pending record on create/update errors."""
         if not stage_info:
             return False
 
@@ -447,11 +447,11 @@ class Database:
                 return cursor.rowcount > 0
 
         except Exception as e:
-            logger.error(f"Ошибка при откате staged-пира пользователя {telegram_user_id}: {e}")
+            logger.error(f"Failed to rollback staged peer for user {telegram_user_id}: {e}")
             return False
 
     def get_peer_by_name(self, peer_name: str) -> Optional[Dict[str, Any]]:
-        """Получает информацию о пире по имени"""
+        """Get peer info by name."""
         with sqlite3.connect(self.db_file) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
@@ -462,7 +462,7 @@ class Database:
     def get_peer_by_telegram_id(
         self, telegram_user_id: int
     ) -> Optional[Dict[str, Any]]:
-        """Получает информацию о пире по Telegram ID пользователя"""
+        """Get peer info by Telegram user ID."""
         with sqlite3.connect(self.db_file) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
@@ -474,7 +474,7 @@ class Database:
             return dict(row) if row else None
 
     def get_all_peers(self) -> List[Dict[str, Any]]:
-        """Получает список всех активных пиров"""
+        """Get all active peers."""
         with sqlite3.connect(self.db_file) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
@@ -485,13 +485,13 @@ class Database:
 
     def delete_peer(self, peer_name: str) -> bool:
         """
-        Удаляет пира из базы данных (помечает как неактивного)
+        Mark a peer as inactive in the database.
 
         Args:
-            peer_name: Имя пира для удаления
+            peer_name: Peer name to deactivate
 
         Returns:
-            True если успешно удален
+            True if successfully deactivated
         """
         try:
             with sqlite3.connect(self.db_file) as conn:
@@ -501,23 +501,23 @@ class Database:
                 )
                 conn.commit()
 
-                # Логируем операцию
-                self.log_operation(peer_name, "DELETE_PEER", f"Удален пир {peer_name}")
+                # Log operation
+                self.log_operation(peer_name, "DELETE_PEER", f"Deleted peer {peer_name}")
                 return cursor.rowcount > 0
 
         except Exception as e:
-            logger.error(f"Ошибка при удалении пира {peer_name}: {e}")
+            logger.error(f"Failed to delete peer {peer_name}: {e}")
             return False
 
     def get_job_data(self, peer_name: str) -> Optional[Dict[str, Any]]:
-        """Получает данные job для удаления"""
+        """Get job data for deletion."""
         peer = self.get_peer_by_name(peer_name)
         if not peer:
             return None
 
         return {
             "JobID": peer["job_id"],
-            "Configuration": "awg0",  # Можно вынести в конфиг
+            "Configuration": "awg0",  # Could be moved to config
             "Peer": peer["peer_id"],
             "Field": "date",
             "Operator": "lgt",
@@ -528,7 +528,7 @@ class Database:
         }
 
     def log_operation(self, peer_name: str, operation: str, details: str):
-        """Логирует операцию в базу данных"""
+        """Log an operation to the database."""
         try:
             with sqlite3.connect(self.db_file) as conn:
                 cursor = conn.cursor()
@@ -541,12 +541,12 @@ class Database:
                 )
                 conn.commit()
         except Exception as e:
-            logger.error(f"Ошибка при логировании операции: {e}")
+            logger.error(f"Failed to log operation: {e}")
 
     def get_operation_logs(
         self, peer_name: str = None, limit: int = 50
     ) -> List[Dict[str, Any]]:
-        """Получает логи операций"""
+        """Get operation logs."""
         with sqlite3.connect(self.db_file) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
@@ -574,7 +574,7 @@ class Database:
             return [dict(row) for row in cursor.fetchall()]
 
     def get_expired_peers(self) -> List[Dict[str, Any]]:
-        """Получает список пиров с истекшим сроком действия, ещё не уведомлённых"""
+        """Get expired peers that have not been notified yet."""
         with sqlite3.connect(self.db_file) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
@@ -593,16 +593,16 @@ class Database:
         new_expire_date: str = None,
     ) -> bool:
         """
-        Обновляет информацию о пире (ID, job_id и дату истечения)
+        Update peer info (ID, job_id, and expiration date).
 
         Args:
-            peer_name: Имя пира
-            new_peer_id: Новый ID пира
-            new_job_id: Новый ID job
-            new_expire_date: Новая дата истечения (опционально)
+            peer_name: Peer name
+            new_peer_id: New peer ID
+            new_job_id: New job ID
+            new_expire_date: New expiration date (optional)
 
         Returns:
-            True если успешно обновлен
+            True if successfully updated
         """
         try:
             with sqlite3.connect(self.db_file) as conn:
@@ -629,14 +629,14 @@ class Database:
 
                 conn.commit()
 
-                # Логируем операцию
+                # Log operation
                 self.log_operation(
-                    peer_name, "UPDATE_PEER", f"Обновлен пир {peer_name} с новым ID"
+                    peer_name, "UPDATE_PEER", f"Updated peer {peer_name} with new ID"
                 )
                 return cursor.rowcount > 0
 
         except Exception as e:
-            logger.error(f"Ошибка при обновлении пира {peer_name}: {e}")
+            logger.error(f"Failed to update peer {peer_name}: {e}")
             return False
 
     def update_payment_status(
@@ -648,23 +648,23 @@ class Database:
         tariff_key: str = None,
     ) -> bool:
         """
-        Обновляет статус оплаты для пользователя
+        Update payment status for a user.
 
         Args:
-            telegram_user_id: ID пользователя Telegram
-            payment_status: Статус оплаты ('paid', 'unpaid')
-            amount_paid: Количество оплаченных средств (звезды или рубли)
-            payment_method: Способ оплаты ('stars', 'yookassa')
-            tariff_key: Ключ тарифа (7_days, 30_days)
+            telegram_user_id: Telegram user ID
+            payment_status: Payment status ('paid', 'unpaid')
+            amount_paid: Amount paid (stars or rubles)
+            payment_method: Payment method ('stars', 'yookassa')
+            tariff_key: Tariff key (7_days, 30_days)
 
         Returns:
-            True если успешно обновлен
+            True if successfully updated
         """
         try:
             with sqlite3.connect(self.db_file) as conn:
                 cursor = conn.cursor()
 
-                # Обновляем соответствующие поля в зависимости от способа оплаты
+                # Update fields depending on payment method
                 if payment_method == "stars":
                     cursor.execute(
                         """
@@ -698,7 +698,7 @@ class Database:
                         ),
                     )
                 else:
-                    # Обратная совместимость
+                    # Backward compatibility
                     cursor.execute(
                         """
                         UPDATE peers
@@ -710,27 +710,27 @@ class Database:
 
                 conn.commit()
 
-                # Логируем операцию
+                # Log operation
                 self.log_operation(
                     f"user_{telegram_user_id}",
                     "PAYMENT_UPDATE",
-                    f"Обновлен статус оплаты: {payment_status}, {payment_method}: {amount_paid}, тариф: {tariff_key}",
+                    f"Payment status updated: {payment_status}, {payment_method}: {amount_paid}, tariff: {tariff_key}",
                 )
                 return cursor.rowcount > 0
 
         except Exception as e:
             logger.error(
-                f"Ошибка при обновлении статуса оплаты для пользователя {telegram_user_id}: {e}"
+                f"Failed to update payment status for user {telegram_user_id}: {e}"
             )
             return False
 
     def extend_access(self, telegram_user_id: int, days: int = 30) -> tuple[bool, str]:
         """
-        Продлевает доступ пользователя на указанное количество дней
+        Extend user access by the specified number of days.
 
         Args:
-            telegram_user_id: ID пользователя Telegram
-            days: Количество дней для продления
+            telegram_user_id: Telegram user ID
+            days: Number of days to extend
 
         Returns:
             Tuple (success: bool, new_expire_date: str)
@@ -739,7 +739,7 @@ class Database:
             with sqlite3.connect(self.db_file) as conn:
                 cursor = conn.cursor()
 
-                # Получаем текущую дату истечения
+                # Fetch current expiration date
                 cursor.execute(
                     """
                     SELECT expire_date FROM peers
@@ -754,9 +754,7 @@ class Database:
 
                 current_expire_date_str = result[0]
 
-                # Проверяем, истекла ли подписка
-                # Если подписка истекла - считаем от текущего момента
-                # Если подписка активна - добавляем дни к текущей дате истечения
+                # If expired, start from now; otherwise extend current expiration
                 cursor.execute(
                     """
                     SELECT
@@ -769,7 +767,7 @@ class Database:
                 )
                 new_expire_date = cursor.fetchone()[0]
 
-                # Обновляем дату истечения
+                # Update expiration date
                 cursor.execute(
                     """
                     UPDATE peers
@@ -780,27 +778,27 @@ class Database:
                 )
                 conn.commit()
 
-                # Логируем операцию
+                # Log operation
                 self.log_operation(
                     f"user_{telegram_user_id}",
                     "EXTEND_ACCESS",
-                    f"Продлен доступ на {days} дней. Новая дата: {new_expire_date}",
+                    f"Extended access by {days} days. New date: {new_expire_date}",
                 )
                 return cursor.rowcount > 0, new_expire_date
 
         except Exception as e:
             logger.error(
-                f"Ошибка при продлении доступа для пользователя {telegram_user_id}: {e}"
+                f"Failed to extend access for user {telegram_user_id}: {e}"
             )
             return False, ""
 
     def decrease_access(self, telegram_user_id: int, days: int) -> tuple[bool, str]:
         """
-        Уменьшает срок доступа пользователя на указанное количество дней
+        Decrease user access by the specified number of days.
         
         Args:
-            telegram_user_id: ID пользователя Telegram
-            days: Количество дней для уменьшения
+            telegram_user_id: Telegram user ID
+            days: Number of days to decrease
             
         Returns:
             Tuple (success: bool, new_expire_date: str)
@@ -809,7 +807,7 @@ class Database:
             with sqlite3.connect(self.db_file) as conn:
                 cursor = conn.cursor()
                 
-                # Получаем текущую дату истечения
+                # Fetch current expiration date
                 cursor.execute(
                     """
                     SELECT expire_date FROM peers 
@@ -824,7 +822,7 @@ class Database:
                 
                 current_expire_date_str = result[0]
                 
-                # Вычитаем дни
+                # Subtract days
                 cursor.execute(
                     """
                     SELECT datetime(?, '-{} days')
@@ -833,7 +831,7 @@ class Database:
                 )
                 new_expire_date = cursor.fetchone()[0]
                 
-                # Обновляем дату истечения
+                # Update expiration date
                 cursor.execute(
                     """
                     UPDATE peers 
@@ -844,29 +842,29 @@ class Database:
                 )
                 conn.commit()
                 
-                # Логируем операцию
+                # Log operation
                 self.log_operation(
                     f"user_{telegram_user_id}", 
                     "DECREASE_ACCESS", 
-                    f"Уменьшен доступ на {days} дней. Новая дата: {new_expire_date}"
+                    f"Decreased access by {days} days. New date: {new_expire_date}"
                 )
                 return cursor.rowcount > 0, new_expire_date
                 
         except Exception as e:
             logger.error(
-                f"Ошибка при уменьшении доступа для пользователя {telegram_user_id}: {e}"
+                f"Failed to decrease access for user {telegram_user_id}: {e}"
             )
             return False, ""
 
     def get_users_for_notification(self, days_before: int = 3) -> List[Dict[str, Any]]:
         """
-        Получает пользователей, которым нужно отправить уведомление о скором истечении доступа
+        Get users who should receive upcoming expiration notifications.
 
         Args:
-            days_before: За сколько дней до истечения отправлять уведомление
+            days_before: How many days before expiration to notify
 
         Returns:
-            Список пользователей для уведомления
+            List of users to notify
         """
         with sqlite3.connect(self.db_file) as conn:
             conn.row_factory = sqlite3.Row
@@ -886,13 +884,13 @@ class Database:
 
     def mark_notification_sent(self, telegram_user_id: int) -> bool:
         """
-        Отмечает, что уведомление отправлено пользователю
+        Mark that a notification was sent to the user.
 
         Args:
-            telegram_user_id: ID пользователя Telegram
+            telegram_user_id: Telegram user ID
 
         Returns:
-            True если успешно отмечено
+            True if successfully marked
         """
         try:
             with sqlite3.connect(self.db_file) as conn:
@@ -910,13 +908,13 @@ class Database:
 
         except Exception as e:
             logger.error(
-                f"Ошибка при отметке уведомления для пользователя {telegram_user_id}: {e}"
+                f"Failed to mark notification for user {telegram_user_id}: {e}"
             )
             return False
 
     def mark_expired_notification_sent(self, telegram_user_id: int) -> bool:
         """
-        Отмечает, что уведомление об истечении доступа отправлено пользователю (одноразово)
+        Mark that the expiration notification was sent (one-time).
         """
         try:
             with sqlite3.connect(self.db_file) as conn:
@@ -933,7 +931,7 @@ class Database:
                 return cursor.rowcount > 0
         except Exception as e:
             logger.error(
-                f"Ошибка при отметке истёкшего уведомления для пользователя {telegram_user_id}: {e}"
+                f"Failed to mark expired notification for user {telegram_user_id}: {e}"
             )
             return False
 
@@ -947,18 +945,18 @@ class Database:
         metadata: dict = None,
     ) -> bool:
         """
-        Добавляет новый платеж в базу данных
+        Add a new payment record.
 
         Args:
-            payment_id: ID платежа от ЮKassa
-            user_id: ID пользователя Telegram
-            amount: Сумма в копейках
-            payment_method: Способ оплаты
-            tariff_key: Ключ тарифа
-            metadata: Дополнительные данные
+            payment_id: YooKassa payment ID
+            user_id: Telegram user ID
+            amount: Amount in kopeks
+            payment_method: Payment method
+            tariff_key: Tariff key
+            metadata: Extra metadata
 
         Returns:
-            True если успешно добавлен
+            True if successfully added
         """
         try:
             with sqlite3.connect(self.db_file) as conn:
@@ -980,34 +978,34 @@ class Database:
                 )
                 conn.commit()
 
-                # Логируем операцию
+                # Log operation
                 self.log_operation(
                     f"user_{user_id}",
                     "CREATE_PAYMENT",
-                    f"Создан платеж {payment_id}, сумма: {amount}",
+                    f"Created payment {payment_id}, amount: {amount}",
                 )
                 return True
 
         except sqlite3.IntegrityError as e:
-            logger.error(f"Ошибка при добавлении платежа {payment_id}: {e}")
+            logger.error(f"Failed to add payment {payment_id}: {e}")
             return False
 
     def update_payment_status_by_id(self, payment_id: str, status: str) -> bool:
         """
-        Обновляет статус платежа по ID
+        Update payment status by ID.
 
         Args:
-            payment_id: ID платежа
-            status: Новый статус (pending, succeeded, canceled, refunded)
+            payment_id: Payment ID
+            status: New status (pending, succeeded, canceled, refunded)
 
         Returns:
-            True если успешно обновлен
+            True if successfully updated
         """
         try:
-            # Валидируем статус
+            # Validate status
             valid_statuses = ["pending", "succeeded", "canceled", "refunded"]
             if status not in valid_statuses:
-                logger.error(f"Неверный статус платежа: {status}")
+                logger.error(f"Invalid payment status: {status}")
                 return False
 
             with sqlite3.connect(self.db_file) as conn:
@@ -1022,27 +1020,27 @@ class Database:
                 )
                 conn.commit()
 
-                # Логируем операцию
+                # Log operation
                 self.log_operation(
                     f"payment_{payment_id}",
                     "UPDATE_PAYMENT_STATUS",
-                    f"Обновлен статус платежа на: {status}",
+                    f"Payment status updated to: {status}",
                 )
                 return cursor.rowcount > 0
 
         except Exception as e:
-            logger.error(f"Ошибка при обновлении статуса платежа {payment_id}: {e}")
+            logger.error(f"Failed to update payment status {payment_id}: {e}")
             return False
 
     def get_payment_by_id(self, payment_id: str) -> Optional[Dict[str, Any]]:
         """
-        Получает информацию о платеже по ID
+        Get payment info by ID.
 
         Args:
-            payment_id: ID платежа
+            payment_id: Payment ID
 
         Returns:
-            Данные платежа или None
+            Payment data or None
         """
         with sqlite3.connect(self.db_file) as conn:
             conn.row_factory = sqlite3.Row
@@ -1053,13 +1051,13 @@ class Database:
 
     def get_payments_by_user(self, user_id: int) -> List[Dict[str, Any]]:
         """
-        Получает все платежи пользователя
+        Get all payments for a user.
 
         Args:
-            user_id: ID пользователя
+            user_id: User ID
 
         Returns:
-            Список платежей
+            List of payments
         """
         with sqlite3.connect(self.db_file) as conn:
             conn.row_factory = sqlite3.Row
@@ -1076,10 +1074,10 @@ class Database:
 
     def get_pending_payments(self) -> List[Dict[str, Any]]:
         """
-        Получает все ожидающие платежи
+        Get all pending payments.
 
         Returns:
-            Список ожидающих платежей
+            List of pending payments
         """
         with sqlite3.connect(self.db_file) as conn:
             conn.row_factory = sqlite3.Row

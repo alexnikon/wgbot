@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Точка входа для запуска nikonVPN Telegram Bot в продакшене
+Production entrypoint for nikonVPN Telegram Bot.
 """
 
 import asyncio
@@ -9,17 +9,17 @@ import sys
 import os
 from pathlib import Path
 
-# Добавляем корневую директорию в путь
+# Add project root to sys.path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from bot import main
 
 def setup_logging():
-    """Настройка логирования для продакшена"""
-    # Создаем директорию для логов если её нет
+    """Configure logging for production."""
+    # Create logs directory if it does not exist
     os.makedirs('logs', exist_ok=True)
     
-    # Настройка логирования
+    # Configure logging
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -29,12 +29,12 @@ def setup_logging():
         ]
     )
     
-    # Настройка логирования для aiogram
+    # Reduce noise from aiogram/aiohttp
     logging.getLogger('aiogram').setLevel(logging.WARNING)
     logging.getLogger('aiohttp').setLevel(logging.WARNING)
 
 def check_environment():
-    """Проверка переменных окружения"""
+    """Validate required environment variables."""
     required_vars = [
         'TELEGRAM_BOT_TOKEN',
         'WG_DASHBOARD_URL',
@@ -47,48 +47,48 @@ def check_environment():
             missing_vars.append(var)
     
     if missing_vars:
-        print(f"❌ Отсутствуют обязательные переменные окружения: {', '.join(missing_vars)}")
-        print("📝 Создайте файл .env на основе config/env_example.txt")
+        print(f"❌ Missing required environment variables: {', '.join(missing_vars)}")
+        print("📝 Create a .env file based on config/env_example.txt")
         sys.exit(1)
     
-    print("✅ Все обязательные переменные окружения настроены")
+    print("✅ Required environment variables are set")
 
 def create_directories():
-    """Создание необходимых директорий"""
+    """Create required directories."""
     directories = ['data', 'logs']
     
     for directory in directories:
         os.makedirs(directory, exist_ok=True)
-        print(f"📁 Директория {directory} готова")
+        print(f"📁 Directory {directory} is ready")
 
 def main_production():
-    """Основная функция для продакшена"""
-    print("🚀 Запуск nikonVPN Telegram Bot...")
+    """Main production runner."""
+    print("🚀 Starting nikonVPN Telegram Bot...")
     
-    # Проверяем переменные окружения
+    # Validate environment variables
     check_environment()
     
-    # Создаем необходимые директории
+    # Create required directories
     create_directories()
     
-    # Настраиваем логирование
+    # Configure logging
     setup_logging()
     
-    print("✅ Инициализация завершена")
-    print("🤖 Запуск бота...")
+    print("✅ Initialization complete")
+    print("🤖 Starting bot...")
     
     try:
-        # Запускаем бота
+        # Run bot
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n⏹️ Получен сигнал остановки")
-        print("🛑 Остановка бота...")
+        print("\n⏹️ Stop signal received")
+        print("🛑 Stopping bot...")
     except Exception as e:
-        print(f"❌ Критическая ошибка: {e}")
-        logging.error(f"Критическая ошибка: {e}", exc_info=True)
+        print(f"❌ Critical error: {e}")
+        logging.error(f"Critical error: {e}", exc_info=True)
         sys.exit(1)
     finally:
-        print("👋 Бот остановлен")
+        print("👋 Bot stopped")
 
 if __name__ == '__main__':
     main_production()

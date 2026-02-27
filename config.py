@@ -38,8 +38,8 @@ PROMO_FILE_PATH = os.getenv("PROMO_FILE_PATH", "promo.txt")
 
 # Tariff Configuration (env-driven with sensible defaults)
 def get_tariffs():
-    """Получает тарифы из переменных окружения (динамически перезагружаемые)"""
-    # Перезагружаем переменные окружения для получения актуальных значений
+    """Load tariffs from environment variables (dynamically reloaded)."""
+    # Reload environment variables to get the latest values
     from dotenv import load_dotenv
 
     load_dotenv(override=True)
@@ -81,5 +81,5 @@ def get_tariffs():
     }
 
 
-# Инициализируем тарифы при импорте
+# Initialize tariffs on import
 TARIFFS = get_tariffs()

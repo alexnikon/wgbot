@@ -11,7 +11,7 @@ from utils import PromoManager
 logger = logging.getLogger(__name__)
 
 class PaymentManager:
-    """Менеджер для работы с оплатой через Telegram Stars и ЮKassa"""
+    """Payment manager for Telegram Stars and YooKassa."""
     
     def __init__(self, bot: Bot):
         self.bot = bot
@@ -23,12 +23,12 @@ class PaymentManager:
     
     @property
     def tariffs(self):
-        """Получает актуальные тарифы из конфигурации (динамически перезагружаемые)"""
+        """Get current tariffs from config (hot-reloaded)."""
         return get_tariffs()
         
     def get_user_tariffs(self, user_id: int) -> Dict[str, Any]:
         """
-        Возвращает тарифы с учетом персональной скидки/наценки пользователя
+        Return tariffs with user-specific discount/markup applied.
         """
         base_tariffs = self.tariffs.copy()
         factor = self.promo_manager.get_user_promo_factor(user_id)
@@ -36,17 +36,17 @@ class PaymentManager:
         if factor == 1.0:
             return base_tariffs
             
-        # Применяем множитель
+        # Apply multiplier
         discounted_tariffs = {}
         for key, data in base_tariffs.items():
-            # Копируем словарь, чтобы не менять глобальные тарифы
+            # Copy dict to avoid mutating global tariffs
             new_data = data.copy()
             
-            # Считаем новую цену
+            # Compute new price
             new_stars = int(data['stars_price'] * factor)
             new_rub = int(data['rub_price'] * factor)
             
-            # Гарантируем минимальную цену 1
+            # Ensure minimum price is 1
             new_data['stars_price'] = max(1, new_stars)
             new_data['rub_price'] = max(1, new_rub)
             
@@ -56,31 +56,31 @@ class PaymentManager:
     
     async def create_payment_selection_keyboard(self, user_id: int) -> InlineKeyboardMarkup:
         """
-        Создает клавиатуру для выбора тарифов
+        Create a keyboard with tariff options.
         
         Args:
-            user_id: ID пользователя Telegram
+            user_id: Telegram user ID
             
         Returns:
-            InlineKeyboardMarkup с вариантами тарифов
+            InlineKeyboardMarkup with tariff options
         """
-        # Проверяем доступность ЮKassa
+        # Check YooKassa availability
         yookassa_available = bool(self.yookassa_client.shop_id and self.yookassa_client.secret_key)
         
         buttons = []
         
-        # Получаем тарифы с учетом скидки
+        # Get user-specific tariffs
         user_tariffs = self.get_user_tariffs(user_id)
         
-        # Создаем кнопки для каждого тарифа
+        # Build buttons for each tariff
         for tariff_key, tariff_data in user_tariffs.items():
-            # Кнопка для оплаты через Stars
+            # Button for Stars payment
             buttons.append([InlineKeyboardButton(
                 text=f"{tariff_data['name']} - {tariff_data['stars_price']} ⭐",
                 callback_data=f"pay_stars_{tariff_key}_{user_id}"
             )])
             
-            # Кнопка для оплаты через ЮKassa
+            # Button for YooKassa payment
             if yookassa_available:
                 buttons.append([InlineKeyboardButton(
                     text=f"{tariff_data['name']} - {tariff_data['rub_price']} ₽",
@@ -97,26 +97,26 @@ class PaymentManager:
     
     async def create_stars_invoice(self, user_id: int, tariff_key: str, username: str = None) -> Optional[Dict[str, Any]]:
         """
-        Создает инвойс для оплаты через Telegram Stars
+        Create an invoice for Telegram Stars payment.
         
         Args:
-            user_id: ID пользователя Telegram
-            tariff_key: Ключ тарифа (7_days или 30_days)
-            username: Username пользователя (опционально)
+            user_id: Telegram user ID
+            tariff_key: Tariff key (7_days or 30_days)
+            username: Telegram username (optional)
             
         Returns:
-            Словарь с информацией об инвойсе или None при ошибке
+            Invoice data dict or None on error
         """
         try:
-            # Получаем тарифы для пользователя
+            # Get user tariffs
             user_tariffs = self.get_user_tariffs(user_id)
             if tariff_key not in user_tariffs:
-                logger.error(f"Неизвестный тариф: {tariff_key}")
+                logger.error(f"Unknown tariff: {tariff_key}")
                 return None
                 
             tariff_data = user_tariffs[tariff_key]
             
-            # Создаем кнопку для оплаты
+            # Build payment button
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(
                     text=f"⭐ Оплатить {tariff_data['stars_price']} звезд",
@@ -124,14 +124,14 @@ class PaymentManager:
                 )]
             ])
             
-            # Создаем инвойс
+            # Build invoice
             invoice_data = {
                 'title': f'VPN доступ на {tariff_data["name"]} (Stars)',
                 'description': f'{tariff_data["description"]}\n\n'
                               f'Пользователь: @{username}' if username else tariff_data['description'],
                 'payload': f'vpn_access_stars_{tariff_key}_{user_id}',
-                'provider_token': '',  # Для Telegram Stars не нужен
-                'currency': 'XTR',  # Код валюты для Telegram Stars
+                'provider_token': '',  # Not required for Telegram Stars
+                'currency': 'XTR',  # Currency code for Telegram Stars
                 'prices': [LabeledPrice(label=f'VPN доступ {tariff_data["name"]}', amount=tariff_data['stars_price'])],
                 'reply_markup': keyboard
             }
@@ -139,36 +139,36 @@ class PaymentManager:
             return invoice_data
             
         except Exception as e:
-            logger.error(f"Ошибка при создании инвойса Stars для пользователя {user_id}, тариф {tariff_key}: {e}")
+            logger.error(f"Failed to create Stars invoice for user {user_id}, tariff {tariff_key}: {e}")
             return None
     
     async def create_yookassa_payment(self, user_id: int, tariff_key: str, username: str = None) -> Optional[str]:
         """
-        Создает платеж в ЮKassa и возвращает ссылку для оплаты
+        Create a YooKassa payment and return the checkout URL.
         
         Args:
-            user_id: ID пользователя Telegram
-            tariff_key: Ключ тарифа (14_days или 30_days)
-            username: Username пользователя (опционально)
+            user_id: Telegram user ID
+            tariff_key: Tariff key (14_days or 30_days)
+            username: Telegram username (optional)
             
         Returns:
-            URL для оплаты или None при ошибке
+            Payment URL or None on error
         """
         try:
             if not self.yookassa_client.shop_id or not self.yookassa_client.secret_key:
-                logger.error("Не настроен YooKassa")
+                logger.error("YooKassa is not configured")
                 return None
                 
-            # Получаем тарифы для пользователя
+            # Get user tariffs
             user_tariffs = self.get_user_tariffs(user_id)
             if tariff_key not in user_tariffs:
-                logger.error(f"Неизвестный тариф: {tariff_key}")
+                logger.error(f"Unknown tariff: {tariff_key}")
                 return None
                 
             tariff_data = user_tariffs[tariff_key]
-            amount = tariff_data['rub_price'] * 100  # В копейках
+            amount = tariff_data['rub_price'] * 100  # In kopeks
             
-            # Создаем URL для возврата
+            # Return URL
             return_url = "https://t.me/nikonvpn_bot"
 
             effective_username = (username or "").strip()
@@ -181,7 +181,7 @@ class PaymentManager:
             if effective_username.startswith("@"):
                 effective_username = effective_username[1:]
             
-            # Метаданные для платежа
+            # Payment metadata
             metadata = {
                 'user_id': str(user_id),
                 'tariff_key': tariff_key,
@@ -189,9 +189,9 @@ class PaymentManager:
                 'description': f'VPN доступ на {tariff_data["name"]}'
             }
             
-            logger.info(f"Создание платежа ЮKassa для пользователя {user_id}, тариф {tariff_key}, сумма {amount} копеек, метаданные: {metadata}")
+            logger.info(f"Creating YooKassa payment for user {user_id}, tariff {tariff_key}, amount {amount} kopeks, metadata: {metadata}")
             
-            # Создаем платеж в ЮKassa
+            # Create YooKassa payment
             payment_data = await self.yookassa_client.create_payment(
                 amount=amount,
                 currency='RUB',
@@ -201,18 +201,18 @@ class PaymentManager:
             )
             
             if payment_data:
-                logger.info(f"Платеж создан: ID={payment_data.get('id')}, статус={payment_data.get('status')}, метаданные в ответе={payment_data.get('metadata', {})}")
+                logger.info(f"Payment created: ID={payment_data.get('id')}, status={payment_data.get('status')}, metadata in response={payment_data.get('metadata', {})}")
             
             if not payment_data:
-                logger.error("Не удалось создать платеж в ЮKassa")
+                logger.error("Failed to create YooKassa payment")
                 return None
             
             payment_id = payment_data.get('id')
             if not payment_id:
-                logger.error("Не получен ID платежа от ЮKassa")
+                logger.error("No payment ID returned by YooKassa")
                 return None
             
-            # Сохраняем платеж в базу данных
+            # Persist payment in database
             self.db.add_payment(
                 payment_id=payment_id,
                 user_id=user_id,
@@ -222,36 +222,36 @@ class PaymentManager:
                 metadata=metadata
             )
             
-            # Получаем URL для оплаты
+            # Extract payment URL
             confirmation = payment_data.get('confirmation', {})
             payment_url = confirmation.get('confirmation_url')
             
             if not payment_url:
-                logger.error("Не получен URL для оплаты от ЮKassa")
+                logger.error("No payment URL returned by YooKassa")
                 return None
             
-            logger.info(f"Создан платеж ЮKassa {payment_id} для пользователя {user_id}")
+            logger.info(f"Created YooKassa payment {payment_id} for user {user_id}")
             return payment_url
             
         except Exception as e:
-            logger.error(f"Ошибка при создании платежа ЮKassa для пользователя {user_id}, тариф {tariff_key}: {e}")
+            logger.error(f"Failed to create YooKassa payment for user {user_id}, tariff {tariff_key}: {e}")
             return None
     
     async def send_payment_selection(self, chat_id: int, user_id: int) -> bool:
         """
-        Отправляет сообщение с выбором способа оплаты
+        Send a message with payment method selection.
         
         Args:
-            chat_id: ID чата
-            user_id: ID пользователя Telegram
+            chat_id: Chat ID
+            user_id: Telegram user ID
             
         Returns:
-            True если сообщение отправлено успешно
+            True if sent successfully
         """
         try:
             keyboard = await self.create_payment_selection_keyboard(user_id)
             
-            # Проверяем доступность ЮKassa
+            # Check YooKassa availability
             yookassa_available = bool(self.yookassa_client.shop_id and self.yookassa_client.secret_key)
             
             payment_text = """
@@ -266,28 +266,28 @@ class PaymentManager:
                 reply_markup=keyboard
             )
             
-            logger.info(f"Выбор способа оплаты отправлен пользователю {user_id}")
+            logger.info(f"Payment selection sent to user {user_id}")
             return True
             
         except TelegramAPIError as e:
-            logger.error(f"Ошибка Telegram API при отправке выбора оплаты: {e}")
+            logger.error(f"Telegram API error while sending payment selection: {e}")
             return False
         except Exception as e:
-            logger.error(f"Ошибка при отправке выбора оплаты пользователю {user_id}: {e}")
+            logger.error(f"Failed to send payment selection to user {user_id}: {e}")
             return False
     
     async def send_stars_payment_request(self, chat_id: int, user_id: int, tariff_key: str, username: str = None) -> bool:
         """
-        Отправляет запрос на оплату через Telegram Stars
+        Send a Telegram Stars payment request.
         
         Args:
-            chat_id: ID чата
-            user_id: ID пользователя Telegram
-            tariff_key: Ключ тарифа (7_days или 30_days)
-            username: Username пользователя (опционально)
+            chat_id: Chat ID
+            user_id: Telegram user ID
+            tariff_key: Tariff key (7_days or 30_days)
+            username: Telegram username (optional)
             
         Returns:
-            True если запрос отправлен успешно
+            True if request sent successfully
         """
         try:
             invoice_data = await self.create_stars_invoice(user_id, tariff_key, username)
@@ -299,31 +299,31 @@ class PaymentManager:
                 **invoice_data
             )
             
-            logger.info(f"Запрос на оплату Stars отправлен пользователю {user_id}, тариф {tariff_key}")
+            logger.info(f"Stars payment request sent to user {user_id}, tariff {tariff_key}")
             return True
             
         except TelegramAPIError as e:
-            logger.error(f"Ошибка Telegram API при отправке запроса на оплату Stars: {e}")
+            logger.error(f"Telegram API error while sending Stars payment request: {e}")
             return False
         except Exception as e:
-            logger.error(f"Ошибка при отправке запроса на оплату Stars пользователю {user_id}, тариф {tariff_key}: {e}")
+            logger.error(f"Failed to send Stars payment request to user {user_id}, tariff {tariff_key}: {e}")
             return False
     
     async def send_yookassa_payment_request(self, chat_id: int, user_id: int, tariff_key: str, username: str = None) -> bool:
         """
-        Отправляет запрос на оплату через ЮKassa
+        Send a YooKassa payment request.
         
         Args:
-            chat_id: ID чата
-            user_id: ID пользователя Telegram
-            tariff_key: Ключ тарифа (14_days или 30_days)
-            username: Username пользователя (опционально)
+            chat_id: Chat ID
+            user_id: Telegram user ID
+            tariff_key: Tariff key (14_days or 30_days)
+            username: Telegram username (optional)
             
         Returns:
-            True если запрос отправлен успешно
+            True if request sent successfully
         """
         try:
-            # Создаем платеж и получаем URL
+            # Create payment and get URL
             payment_url = await self.create_yookassa_payment(user_id, tariff_key, username)
             if not payment_url:
                 return False
@@ -331,10 +331,10 @@ class PaymentManager:
             user_tariffs = self.get_user_tariffs(user_id)
             tariff_data = user_tariffs.get(tariff_key)
             if not tariff_data:
-                logger.error(f"Неизвестный тариф для пользователя {user_id}: {tariff_key}")
+                logger.error(f"Unknown tariff for user {user_id}: {tariff_key}")
                 return False
             
-            # Создаем клавиатуру с кнопкой для оплаты
+            # Build keyboard with payment button
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(
                     text=f"💳 Оплатить {tariff_data['rub_price']} руб.",
@@ -342,7 +342,7 @@ class PaymentManager:
                 )]
             ])
             
-            # Отправляем сообщение с кнопкой оплаты
+            # Send message with payment button
             await self.bot.send_message(
                 chat_id=chat_id,
                 text=f"💳 Оплата через банковскую карту\n\n"
@@ -352,37 +352,37 @@ class PaymentManager:
                 reply_markup=keyboard
             )
             
-            logger.info(f"Запрос на оплату ЮKassa отправлен пользователю {user_id}, тариф {tariff_key}")
+            logger.info(f"YooKassa payment request sent to user {user_id}, tariff {tariff_key}")
             return True
             
         except TelegramAPIError as e:
-            logger.error(f"Ошибка Telegram API при отправке запроса на оплату ЮKassa: {e}")
+            logger.error(f"Telegram API error while sending YooKassa payment request: {e}")
             return False
         except Exception as e:
-            logger.error(f"Ошибка при отправке запроса на оплату ЮKassa пользователю {user_id}, тариф {tariff_key}: {e}")
+            logger.error(f"Failed to send YooKassa payment request to user {user_id}, tariff {tariff_key}: {e}")
             return False
     
     async def process_payment(self, pre_checkout_query) -> bool:
         """
-        Обрабатывает предварительную проверку платежа
+        Process pre-checkout validation.
         
         Args:
-            pre_checkout_query: Объект предварительной проверки платежа
+            pre_checkout_query: Pre-checkout query object
             
         Returns:
-            True если платеж валиден
+            True if payment is valid
         """
         try:
             payload = pre_checkout_query.invoice_payload
             
-            # Проверяем, что это наш платеж
+            # Ensure it's our payment
             if not (payload.startswith('vpn_access_stars_') or payload.startswith('vpn_access_yookassa_')):
                 await pre_checkout_query.answer(ok=False, error_message="Неверный тип платежа")
                 return False
             
-            # Проверяем сумму в зависимости от типа платежа
+            # Validate amount based on payment type
             if payload.startswith('vpn_access_stars_'):
-                # Платеж через Stars - извлекаем тариф из payload
+                # Stars payment: extract tariff from payload
                 payload_parts = payload.split('_')
                 if len(payload_parts) >= 4:
                     tariff_key = f"{payload_parts[3]}_{payload_parts[4]}" # type: ignore
@@ -394,79 +394,78 @@ class PaymentManager:
                         await pre_checkout_query.answer(ok=False, error_message="Неверная сумма платежа")
                         return False
             elif payload.startswith('vpn_access_yookassa_'):
-                # Платеж через ЮKassa - извлекаем тариф из payload
+                # YooKassa payment: extract tariff from payload
                 payload_parts = payload.split('_')
                 if len(payload_parts) >= 4:
                     tariff_key = f"{payload_parts[3]}_{payload_parts[4]}" # type: ignore
                     user_id = int(payload_parts[-1]) # type: ignore
                     user_tariffs = self.get_user_tariffs(user_id)
                     tariff_data = user_tariffs.get(tariff_key, {})
-                    expected_amount = tariff_data.get('rub_price', 0) * 100  # В копейках
+                    expected_amount = tariff_data.get('rub_price', 0) * 100  # In kopeks
                     if pre_checkout_query.total_amount != expected_amount:
                         await pre_checkout_query.answer(ok=False, error_message="Неверная сумма платежа")
                         return False
             
-            # Подтверждаем платеж
+            # Confirm payment
             await pre_checkout_query.answer(ok=True)
-            logger.info(f"Платеж подтвержден для пользователя {pre_checkout_query.from_user.id}")
+            logger.info(f"Payment confirmed for user {pre_checkout_query.from_user.id}")
             return True
             
         except Exception as e:
-            logger.error(f"Ошибка при обработке платежа: {e}")
+            logger.error(f"Payment processing error: {e}")
             await pre_checkout_query.answer(ok=False, error_message="Ошибка обработки платежа")
             return False
     
     async def confirm_payment(self, successful_payment) -> tuple[bool, str, int]:
         """
-        Подтверждает успешный платеж
+        Confirm a successful payment.
         
         Args:
-            successful_payment: Объект успешного платежа
+            successful_payment: Successful payment object
             
         Returns:
             Tuple (success, payment_type, amount_paid)
         """
         try:
-            # Извлекаем user_id и тип платежа из payload
+            # Extract user_id and payment type from payload
             payload = successful_payment.invoice_payload
             
             if payload.startswith('vpn_access_stars_'):
-                # Извлекаем user_id из payload (формат: vpn_access_stars_7_days_123456789)
+                # Extract user_id from payload (format: vpn_access_stars_7_days_123456789)
                 payload_parts = payload.split('_')
-                user_id = int(payload_parts[-1])  # Последняя часть - user_id
+                user_id = int(payload_parts[-1])  # Last part is user_id
                 payment_type = 'stars'
                 amount_paid = successful_payment.total_amount
-                logger.info(f"Платеж Stars подтвержден: пользователь {user_id}, звезд: {amount_paid}")
+                logger.info(f"Stars payment confirmed: user {user_id}, stars: {amount_paid}")
                 
             elif payload.startswith('vpn_access_yookassa_'):
-                # Извлекаем user_id из payload (формат: vpn_access_yookassa_7_days_123456789)
+                # Extract user_id from payload (format: vpn_access_yookassa_7_days_123456789)
                 payload_parts = payload.split('_')
-                user_id = int(payload_parts[-1])  # Последняя часть - user_id
+                user_id = int(payload_parts[-1])  # Last part is user_id
                 payment_type = 'yookassa'
                 amount_paid = successful_payment.total_amount
-                logger.info(f"Платеж ЮKassa подтвержден: пользователь {user_id}, копеек: {amount_paid}")
+                logger.info(f"YooKassa payment confirmed: user {user_id}, kopeks: {amount_paid}")
                 
             else:
-                logger.error(f"Неверный payload платежа: {payload}")
+                logger.error(f"Invalid payment payload: {payload}")
                 return False, '', 0
             
-            # Здесь можно добавить дополнительную логику обработки платежа
-            # Например, уведомление администратора, логирование в файл и т.д.
+            # Additional post-payment logic can be added here (admin notify, extra logging, etc.)
             
             return True, payment_type, amount_paid
             
         except Exception as e:
-            logger.error(f"Ошибка при подтверждении платежа: {e}")
+            logger.error(f"Payment confirmation error: {e}")
             return False, '', 0
     
     def get_payment_info(self) -> Dict[str, Any]:
         """
-        Возвращает информацию о доступных тарифах
+        Return available tariff info.
         
         Returns:
-            Словарь с информацией о тарифах
+            Dict with tariff info
         """
-        # Получаем первый доступный тариф для отображения периода
+        # Use first tariff to display a default period
         first_tariff = next(iter(self.tariffs.values())) if self.tariffs else None
         
         return {

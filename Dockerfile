@@ -1,26 +1,26 @@
 FROM python:3.11-slim
 
-# Установка системных зависимостей
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Создание рабочей директории
+# Create working directory
 WORKDIR /app
 
-# Копирование requirements.txt и установка зависимостей
+# Copy requirements.txt and install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копирование исходного кода
+# Copy source code
 COPY . .
 
-# Создание директорий для логов и данных
+# Create directories for logs and data
 RUN mkdir -p logs data
 
-# Установка прав доступа
+# Set permissions
 RUN chmod +x *.py
 
-# Точка входа (по умолчанию запускает бота)
+# Entry point (runs the bot by default)
 CMD ["python", "bot.py"]
