@@ -5,6 +5,7 @@ __pycache__/
 config/
 clients.json
 promo.txt
+custom_clients.txt
 
 # C extensions
 *.so
