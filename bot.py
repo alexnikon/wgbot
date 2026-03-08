@@ -4,6 +4,7 @@ import logging
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -321,11 +322,18 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     button_text = "✅ Доступ приобретен" if has_active_access else "💎 Купить доступ"
     button_callback = "already_paid" if has_active_access else "pay"
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=button_text, callback_data=button_callback)],
-            [InlineKeyboardButton(text="⏰ Продлить доступ", callback_data="extend")],
-            [InlineKeyboardButton(text="📁 Получить конфиг", callback_data="get_config")],
+    inline_keyboard = [
+        [InlineKeyboardButton(text=button_text, callback_data=button_callback)],
+    ]
+    if has_active_access:
+        inline_keyboard.append(
+            [InlineKeyboardButton(text="⏰ Продлить доступ", callback_data="extend")]
+        )
+        inline_keyboard.append(
+            [InlineKeyboardButton(text="📁 Получить конфиг", callback_data="get_config")]
+        )
+    inline_keyboard.extend(
+        [
             [InlineKeyboardButton(text="📊 Статус доступа", callback_data="status")],
             [
                 InlineKeyboardButton(text="📖 Инструкция", callback_data="guide"),
@@ -333,6 +341,7 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
             ],
         ]
     )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
     return keyboard
 
 
@@ -348,7 +357,7 @@ def create_guide_keyboard() -> InlineKeyboardMarkup:
 
 
 # Command handlers
-@dp.message(F.text == "/start")
+@dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     """Handle the /start command."""
     user_id = message.from_user.id
@@ -842,7 +851,7 @@ async def handle_main_callback(callback_query: types.CallbackQuery):
     )
 
 
-@dp.message(F.text == "/connect")
+@dp.message(Command("connect"))
 async def cmd_connect(message: types.Message):
     """Handle the /connect command."""
     user_id = message.from_user.id
@@ -979,7 +988,7 @@ async def cmd_connect(message: types.Message):
     await payment_manager.send_payment_selection(message.chat.id, user_id)
 
 
-@dp.message(F.text == "/extend")
+@dp.message(Command("extend"))
 async def cmd_extend(message: types.Message):
     """Handle the /extend command (access extension)."""
     user_id = message.from_user.id
@@ -1011,7 +1020,7 @@ async def cmd_extend(message: types.Message):
     await payment_manager.send_payment_selection(message.chat.id, user_id)
 
 
-@dp.message(F.text == "/status")
+@dp.message(Command("status"))
 async def cmd_status(message: types.Message):
     """Handle the /status command (remaining access time)."""
     user_id = message.from_user.id
@@ -1080,7 +1089,7 @@ async def cmd_status(message: types.Message):
         await message.reply("❌ Ошибка при получении информации о доступе.")
 
 
-@dp.message(F.text == "/buy")
+@dp.message(Command("buy"))
 async def cmd_buy(message: types.Message):
     """Handle the /buy command (payment method selection)."""
     user_id = message.from_user.id
@@ -1499,17 +1508,10 @@ async def process_successful_payment(message: types.Message):
 
 
 # Unknown command handler
-@dp.message()
+@dp.message(~Command(commands=["start", "buy", "connect", "extend", "status"]))
 async def handle_unknown(message: types.Message):
     """Handle unknown messages."""
     user_id = message.from_user.id
-
-    message_text = (message.text or "").strip()
-    command_token = message_text.split()[0] if message_text else ""
-    command_token = command_token.split("@", 1)[0]
-    known_commands = {"/start", "/buy", "/connect", "/extend", "/status"}
-    if command_token in known_commands:
-        return
 
     # Check if the user has paid access
     existing_peer = db.get_peer_by_telegram_id(user_id)
