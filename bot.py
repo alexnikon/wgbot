@@ -328,6 +328,7 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
     inline_keyboard = [
         [InlineKeyboardButton(text=button_text, callback_data=button_callback)],
+        [InlineKeyboardButton(text="📊 Статус доступа", callback_data="status")],
     ]
     if has_paid_access:
         inline_keyboard.append(
@@ -338,7 +339,6 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
         )
     inline_keyboard.extend(
         [
-            [InlineKeyboardButton(text="📊 Статус доступа", callback_data="status")],
             [
                 InlineKeyboardButton(text="📖 Инструкция", callback_data="guide"),
                 InlineKeyboardButton(text="❓ Есть вопрос?", url=SUPPORT_URL),
