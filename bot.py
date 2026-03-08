@@ -3,7 +3,7 @@ import logging
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -247,6 +247,19 @@ async def safe_answer_callback(callback_query: types.CallbackQuery, text: str = 
             logger.error(f"Error answering callback query: {e}")
 
 
+async def safe_edit_callback_message(
+    message: types.Message, text: str, reply_markup: InlineKeyboardMarkup | None = None
+) -> bool:
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+        return True
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            logger.debug("Skip edit_text: message is not modified")
+            return False
+        raise
+
+
 # FSM states
 class PeerStates(StatesGroup):
     waiting_for_peer_name = State()
@@ -462,12 +475,14 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                 error_text = """
 ❌ У тебя нет активного доступа.
 
-💎 Для получения VPN конфигурации необходимо оплатить доступ.
+💎 Чтобы получить конфиг, нужно оплатить доступ.
 
 Выбери действие с помощью кнопок ниже:
                 """
-            await callback_query.message.edit_text(
-                error_text, reply_markup=create_main_menu_keyboard(user_id)
+            await safe_edit_callback_message(
+                callback_query.message,
+                error_text,
+                reply_markup=create_main_menu_keyboard(user_id),
             )
             return
 
@@ -510,7 +525,8 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                     user_id, username, existing_peer.get("tariff_key")
                 )
                 if not ok:
-                    await callback_query.message.edit_text(
+                    await safe_edit_callback_message(
+                        callback_query.message,
                         f"❌ {err}\n\nВыбери действие с помощью кнопок ниже:",
                         reply_markup=create_main_menu_keyboard(user_id),
                     )
@@ -545,8 +561,10 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
 
 Выбери действие с помощью кнопок ниже:
             """
-            await callback_query.message.edit_text(
-                success_text, reply_markup=create_main_menu_keyboard(user_id)
+            await safe_edit_callback_message(
+                callback_query.message,
+                success_text,
+                reply_markup=create_main_menu_keyboard(user_id),
             )
         except Exception as e:
             logger.error(
@@ -582,19 +600,22 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                         ),
                         caption="Вот твой файл конфигурации, добавь его в приложение AmneziaWG",
                     )
-                    await callback_query.message.edit_text(
+                    await safe_edit_callback_message(
+                        callback_query.message,
                         "✅ Конфигурация отправлена!\n\nВыбери действие с помощью кнопок ниже:",
                         reply_markup=create_main_menu_keyboard(user_id),
                     )
                     return
 
-                await callback_query.message.edit_text(
+                await safe_edit_callback_message(
+                    callback_query.message,
                     f"❌ Ошибка при получении конфигурации: {err if not ok else 'Не удалось скачать конфиг'}.\n\nВыбери действие с помощью кнопок ниже:",
                     reply_markup=create_main_menu_keyboard(user_id),
                 )
             except Exception as e2:
                 logger.error(f"Critical error while creating new peer: {e2}")
-                await callback_query.message.edit_text(
+                await safe_edit_callback_message(
+                    callback_query.message,
                     "❌ Ошибка при получении конфигурации. Попробуй позже или обратись в поддержку.",
                     reply_markup=create_main_menu_keyboard(user_id),
                 )
@@ -603,12 +624,14 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
         error_text = """
 ❌ У тебя нет VPN доступа.
 
-💎 Для получения VPN конфигурации необходимо сначала оплатить доступ.
+💎 Чтобы получить конфиг, нужно оплатить доступ.
 
 Выбери действие с помощью кнопок ниже:
         """
-        await callback_query.message.edit_text(
-            error_text, reply_markup=create_main_menu_keyboard(user_id)
+        await safe_edit_callback_message(
+            callback_query.message,
+            error_text,
+            reply_markup=create_main_menu_keyboard(user_id),
         )
 
 
