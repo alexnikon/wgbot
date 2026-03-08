@@ -324,12 +324,8 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=button_text, callback_data=button_callback)],
-            [
-                InlineKeyboardButton(
-                    text="📁 Получить конфиг", callback_data="get_config"
-                ),
-            ],
             [InlineKeyboardButton(text="⏰ Продлить доступ", callback_data="extend")],
+            [InlineKeyboardButton(text="📁 Получить конфиг", callback_data="get_config")],
             [InlineKeyboardButton(text="📊 Статус доступа", callback_data="status")],
             [
                 InlineKeyboardButton(text="📖 Инструкция", callback_data="guide"),
@@ -1507,6 +1503,13 @@ async def process_successful_payment(message: types.Message):
 async def handle_unknown(message: types.Message):
     """Handle unknown messages."""
     user_id = message.from_user.id
+
+    message_text = (message.text or "").strip()
+    command_token = message_text.split()[0] if message_text else ""
+    command_token = command_token.split("@", 1)[0]
+    known_commands = {"/start", "/buy", "/connect", "/extend", "/status"}
+    if command_token in known_commands:
+        return
 
     # Check if the user has paid access
     existing_peer = db.get_peer_by_telegram_id(user_id)
