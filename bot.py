@@ -83,6 +83,29 @@ def sync_bound_custom_peers_for_user(
         )
 
 
+async def send_config_file(
+    chat_id: int, config_content: bytes | str | None, caption: str = "📁 Твой файл конфигурации"
+) -> bool:
+    if not config_content:
+        return False
+
+    try:
+        config_bytes = (
+            config_content
+            if isinstance(config_content, (bytes, bytearray))
+            else config_content.encode("utf-8")
+        )
+        await bot.send_document(
+            chat_id=chat_id,
+            document=types.BufferedInputFile(file=config_bytes, filename="nikonVPN.conf"),
+            caption=caption,
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send config file to chat {chat_id}: {e}", exc_info=True)
+        return False
+
+
 # Helper: create or restore a peer and return config
 async def create_or_restore_peer_for_user(
     user_id: int, username: str | None, tariff_key: str | None = None
@@ -290,7 +313,7 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=button_text, callback_data=button_callback)],
             [
                 InlineKeyboardButton(
-                    text="📁 Получить\nконфиг", callback_data="get_config"
+                    text="Получить\nконфиг", callback_data="get_config"
                 ),
                 InlineKeyboardButton(
                     text="⏰ Продлить\nдоступ", callback_data="extend"
@@ -859,7 +882,6 @@ async def cmd_connect(message: types.Message):
                     config_content = wg_api.download_peer_config(
                         existing_peer["peer_id"]
                     )
-                    filename = "nikonVPN.conf"
                     if not sync_clients_json_for_user(
                         user_id, username, existing_peer["peer_id"]
                     ):
@@ -867,13 +889,7 @@ async def cmd_connect(message: types.Message):
                             f"Failed to update clients.json for user {user_id}"
                         )
 
-                    await bot.send_document(
-                        chat_id=message.chat.id,
-                        document=types.BufferedInputFile(
-                            file=config_content, filename=filename
-                        ),
-                        caption="📁 Твой файл конфигурации",
-                    )
+                    await send_config_file(message.chat.id, config_content)
                     return
                 except Exception as e:
                     logger.warning(
@@ -884,11 +900,12 @@ async def cmd_connect(message: types.Message):
             # If config download failed, create a new peer
             if not config_downloaded:
                 await message.reply("Создаю новый конфиг...")
-                ok, err, _ = await create_or_restore_peer_for_user(
+                ok, err, new_config = await create_or_restore_peer_for_user(
                     user_id, username, existing_peer.get("tariff_key")
                 )
                 if not ok:
                     await message.reply(f"❌ {err}")
+                    return
                 refreshed_peer = db.get_peer_by_telegram_id(user_id)
                 if refreshed_peer and refreshed_peer.get("peer_id"):
                     if not sync_clients_json_for_user(
@@ -897,17 +914,34 @@ async def cmd_connect(message: types.Message):
                         logger.warning(
                             f"Failed to update clients.json for user {user_id}"
                         )
+                if not await send_config_file(message.chat.id, new_config):
+                    await message.reply(
+                        "❌ Не удалось отправить конфигурацию. Используй /connect для повторной попытки."
+                    )
                 return
         except Exception as e:
             logger.error(f"Error while getting config in /connect: {e}", exc_info=True)
             # Try to create a new peer on any error
             try:
                 await message.reply("Попытка создать новый конфиг...")
-                ok, err, _ = await create_or_restore_peer_for_user(
+                ok, err, new_config = await create_or_restore_peer_for_user(
                     user_id, username, existing_peer.get("tariff_key")
                 )
                 if not ok:
                     await message.reply(f"❌ {err}")
+                    return
+                refreshed_peer = db.get_peer_by_telegram_id(user_id)
+                if refreshed_peer and refreshed_peer.get("peer_id"):
+                    if not sync_clients_json_for_user(
+                        user_id, username, refreshed_peer["peer_id"]
+                    ):
+                        logger.warning(
+                            f"Failed to update clients.json for user {user_id}"
+                        )
+                if not await send_config_file(message.chat.id, new_config):
+                    await message.reply(
+                        "❌ Не удалось отправить конфигурацию. Используй /connect для повторной попытки."
+                    )
             except Exception as e2:
                 logger.error(f"Critical error while creating new peer: {e2}")
                 await message.reply(
@@ -1161,12 +1195,19 @@ async def handle_retry_peer_callback(callback_query: types.CallbackQuery):
         username = callback_query.from_user.username
 
         await callback_query.message.edit_text("🔄 Повторяю создание VPN доступа...")
-        ok, err, _ = await create_or_restore_peer_for_user(user_id, username, tariff_key)
+        ok, err, new_config = await create_or_restore_peer_for_user(
+            user_id, username, tariff_key
+        )
         if ok:
             await callback_query.message.edit_text(
-                "✅ Доступ создан и конфигурация отправлена!",
+                "✅ Доступ создан. Отправляю конфигурацию...",
                 reply_markup=create_main_menu_keyboard(user_id),
             )
+            sent = await send_config_file(callback_query.message.chat.id, new_config)
+            if not sent:
+                await callback_query.message.reply(
+                    "❌ Не удалось отправить конфигурацию. Используй /connect для повторной попытки."
+                )
         else:
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -1328,7 +1369,9 @@ async def process_successful_payment(message: types.Message):
                 f"Peer for user {user_id} not found in WGDashboard, creating new one"
             )
             await message.reply("🔄 Восстанавливаю VPN доступ...")
-            ok, err, _ = await create_or_restore_peer_for_user(user_id, username, tariff_key)
+            ok, err, new_config = await create_or_restore_peer_for_user(
+                user_id, username, tariff_key
+            )
             if not ok:
                 await message.reply(
                     "❌ Ошибка при восстановлении VPN доступа. Обратитесь в поддержку."
@@ -1338,12 +1381,21 @@ async def process_successful_payment(message: types.Message):
                 )
                 return
 
-            await message.reply(
-                f"✅ Платеж успешно обработан!\n"
-                f"🎉 Продлили тебе доступ на {access_days} дней!\n"
-                f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
-                f"Доступ восстановлен, используй /connect для получения актуального конфига."
-            )
+            sent = await send_config_file(message.chat.id, new_config)
+            if sent:
+                await message.reply(
+                    f"✅ Платеж успешно обработан!\n"
+                    f"🎉 Продлили тебе доступ на {access_days} дней!\n"
+                    f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
+                    f"Конфигурация отправлена."
+                )
+            else:
+                await message.reply(
+                    f"✅ Платеж успешно обработан!\n"
+                    f"🎉 Продлили тебе доступ на {access_days} дней!\n"
+                    f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
+                    f"Доступ восстановлен, используй /connect для получения актуального конфига."
+                )
             refreshed_peer = db.get_peer_by_telegram_id(user_id)
             if refreshed_peer and refreshed_peer.get("expire_date"):
                 sync_bound_custom_peers_for_user(
@@ -1366,7 +1418,7 @@ async def process_successful_payment(message: types.Message):
         # Create a new peer for the user
         try:
             await message.reply("🔄 Создаю VPN доступ...")
-            ok, err, _ = await create_or_restore_peer_for_user(
+            ok, err, new_config = await create_or_restore_peer_for_user(
                 user_id, username, tariff_key
             )
             if not ok:
@@ -1387,6 +1439,21 @@ async def process_successful_payment(message: types.Message):
                     reply_markup=keyboard,
                 )
                 return
+            sent = await send_config_file(message.chat.id, new_config)
+            if sent:
+                await message.reply(
+                    f"✅ Платеж успешно обработан!\n"
+                    f"🎉 VPN доступ на {access_days} дней активирован!\n"
+                    f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
+                    f"Конфигурация отправлена."
+                )
+            else:
+                await message.reply(
+                    f"✅ Платеж успешно обработан!\n"
+                    f"🎉 VPN доступ на {access_days} дней активирован!\n"
+                    f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
+                    f"❌ Не удалось отправить конфигурацию. Используй /connect для получения конфига."
+                )
             refreshed_peer = db.get_peer_by_telegram_id(user_id)
             if refreshed_peer and refreshed_peer.get("expire_date"):
                 sync_bound_custom_peers_for_user(
