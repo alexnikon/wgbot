@@ -326,12 +326,10 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=button_text, callback_data=button_callback)],
             [
                 InlineKeyboardButton(
-                    text="Получить\nконфиг", callback_data="get_config"
-                ),
-                InlineKeyboardButton(
-                    text="⏰ Продлить\nдоступ", callback_data="extend"
+                    text="📁 Получить конфиг", callback_data="get_config"
                 ),
             ],
+            [InlineKeyboardButton(text="⏰ Продлить доступ", callback_data="extend")],
             [InlineKeyboardButton(text="📊 Статус доступа", callback_data="status")],
             [
                 InlineKeyboardButton(text="📖 Инструкция", callback_data="guide"),
