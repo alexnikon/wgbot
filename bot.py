@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.enums import ParseMode
@@ -50,6 +51,8 @@ db = Database()
 payment_manager = PaymentManager(bot)
 clients_manager = ClientsJsonManager(CLIENTS_JSON_PATH)
 custom_clients_manager = CustomClientsManager(CUSTOM_CLIENTS_PATH)
+_last_start_sent_at: dict[int, float] = {}
+START_DEBOUNCE_SECONDS = 5.0
 
 
 def sync_clients_json_for_user(
@@ -308,6 +311,7 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     # IMPORTANT: always fetch fresh data from the DB when building the keyboard
     existing_peer = db.get_peer_by_telegram_id(user_id)
     has_active_access = is_access_active(existing_peer)
+    has_paid_access = bool(existing_peer and existing_peer.get("payment_status") == "paid")
 
     # Debug logging
     if existing_peer:
@@ -325,7 +329,7 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     inline_keyboard = [
         [InlineKeyboardButton(text=button_text, callback_data=button_callback)],
     ]
-    if has_active_access:
+    if has_paid_access:
         inline_keyboard.append(
             [InlineKeyboardButton(text="⏰ Продлить доступ", callback_data="extend")]
         )
@@ -361,6 +365,15 @@ def create_guide_keyboard() -> InlineKeyboardMarkup:
 async def cmd_start(message: types.Message):
     """Handle the /start command."""
     user_id = message.from_user.id
+    now_monotonic = time.monotonic()
+    last_start = _last_start_sent_at.get(user_id, 0.0)
+    if now_monotonic - last_start < START_DEBOUNCE_SECONDS:
+        logger.info(
+            f"Skipping duplicate /start for user {user_id} within {START_DEBOUNCE_SECONDS}s window"
+        )
+        return
+    _last_start_sent_at[user_id] = now_monotonic
+
     welcome_text = """
 Привет! Здесь ты можешь подключиться к быстрому и безопасному VPN, который не подвержен блокировкам.
 
@@ -1512,6 +1525,9 @@ async def process_successful_payment(message: types.Message):
 async def handle_unknown(message: types.Message):
     """Handle unknown messages."""
     user_id = message.from_user.id
+    message_text = (message.text or "").strip().lower()
+    if message_text == "start":
+        return
 
     # Check if the user has paid access
     existing_peer = db.get_peer_by_telegram_id(user_id)
