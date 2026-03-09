@@ -1176,30 +1176,40 @@ async def handle_pay_yookassa_callback(callback_query: types.CallbackQuery):
         not payment_manager.yookassa_client.shop_id
         or not payment_manager.yookassa_client.secret_key
     ):
-        await callback_query.message.reply(
+        await safe_edit_callback_message(
+            callback_query.message,
             "❌ Оплата через банковскую карту временно недоступна.\n\n"
             "💡 Используйте оплату через Telegram Stars.\n\n"
-            "🔧 Для настройки ЮKassa обратитесь к администратору."
+            "🔧 Для настройки ЮKassa обратитесь к администратору.",
+            reply_markup=create_back_to_menu_keyboard(),
         )
         return
 
-    # Send invoice for YooKassa payment
-    success = await payment_manager.send_yookassa_payment_request(
-        callback_query.message.chat.id, user_id, tariff_key, username
+    payment_view = await payment_manager.get_yookassa_payment_view(
+        user_id, tariff_key, username
     )
-
-    if not success:
+    if not payment_view:
         user_tariffs = payment_manager.get_user_tariffs(user_id)
         tariff_data = user_tariffs.get(tariff_key, {})
         tariff_name = tariff_data.get("name", "неизвестный тариф")
         rub_price = tariff_data.get("rub_price", 0)
-        await callback_query.message.reply(
+        await safe_edit_callback_message(
+            callback_query.message,
             f"❌ Ошибка при создании запроса на оплату через ЮKassa.\n\n"
             f"🔧 Возможные причины:\n"
             f"• Проблемы с настройкой платежей\n\n"
             f"💡 Используйте оплату через Telegram Stars.\n"
-            f"💳 Стоимость: {rub_price} руб. за {tariff_name} доступа"
+            f"💳 Стоимость: {rub_price} руб. за {tariff_name} доступа",
+            reply_markup=create_back_to_menu_keyboard(),
         )
+        return
+
+    payment_text, keyboard = payment_view
+    await safe_edit_callback_message(
+        callback_query.message,
+        payment_text,
+        reply_markup=keyboard,
+    )
 
 
 @dp.callback_query(F.data.startswith("pay_yookassa_disabled_"))
@@ -1214,12 +1224,46 @@ async def handle_pay_yookassa_disabled_callback(callback_query: types.CallbackQu
 
     await safe_answer_callback(callback_query)
 
-    await callback_query.message.reply(
+    await safe_edit_callback_message(
+        callback_query.message,
         "❌ Оплата через банковскую карту временно недоступна.\n\n"
         "💡 Используй оплату через Telegram Stars:\n"
         "⭐ 1 Starsа за 30 дней доступа\n\n"
-        "🔧 Для настройки ЮKassa обратитесь к администратору."
+        "🔧 Для настройки ЮKassa обратитесь к администратору.",
+        reply_markup=create_back_to_menu_keyboard(),
     )
+
+
+@dp.callback_query(F.data.startswith("cancel_yookassa_"))
+async def handle_cancel_yookassa_callback(callback_query: types.CallbackQuery):
+    """Return from the YooKassa payment screen to tariff selection."""
+    user_id = int(callback_query.data.replace("cancel_yookassa_", ""))
+    if callback_query.from_user.id != user_id:
+        await safe_answer_callback(callback_query, "❌ Ошибка: неверный пользователь")
+        return
+
+    await safe_answer_callback(callback_query)
+    payment_text, keyboard = await payment_manager.get_payment_selection_view(user_id)
+    await safe_edit_callback_message(
+        callback_query.message,
+        payment_text,
+        reply_markup=keyboard,
+    )
+
+
+@dp.callback_query(F.data.startswith("cancel_stars_invoice_"))
+async def handle_cancel_stars_invoice_callback(callback_query: types.CallbackQuery):
+    """Delete the Stars invoice message on cancel."""
+    user_id = int(callback_query.data.replace("cancel_stars_invoice_", ""))
+    if callback_query.from_user.id != user_id:
+        await safe_answer_callback(callback_query, "❌ Ошибка: неверный пользователь")
+        return
+
+    await safe_answer_callback(callback_query)
+    try:
+        await callback_query.message.delete()
+    except TelegramAPIError as e:
+        logger.error(f"Failed to delete Stars invoice message for user {user_id}: {e}")
 
 
 # Retry config creation after successful payment if the initial attempt failed

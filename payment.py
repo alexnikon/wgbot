@@ -144,12 +144,22 @@ class PaymentManager:
             tariff_data = user_tariffs[tariff_key]
             
             # Build payment button
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(
-                    text=f"⭐ Оплатить {tariff_data['stars_price']} звезд",
-                    pay=True
-                )]
-            ])
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=f"⭐ Оплатить {tariff_data['stars_price']} звезд",
+                            pay=True,
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="❌ Отмена",
+                            callback_data=f"cancel_stars_invoice_{user_id}",
+                        )
+                    ],
+                ]
+            )
             
             # Build invoice
             invoice_data = {
@@ -378,6 +388,52 @@ class PaymentManager:
         except Exception as e:
             logger.error(f"Failed to send YooKassa payment request to user {user_id}, tariff {tariff_key}: {e}")
             return False
+
+    async def get_yookassa_payment_view(
+        self, user_id: int, tariff_key: str, username: str = None
+    ) -> Optional[tuple[str, InlineKeyboardMarkup]]:
+        """
+        Build text and keyboard for the YooKassa payment screen inside the current message.
+        """
+        try:
+            payment_url = await self.create_yookassa_payment(user_id, tariff_key, username)
+            if not payment_url:
+                return None
+
+            user_tariffs = self.get_user_tariffs(user_id)
+            tariff_data = user_tariffs.get(tariff_key)
+            if not tariff_data:
+                logger.error(f"Unknown tariff for user {user_id}: {tariff_key}")
+                return None
+
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text=f"💳 Оплатить {tariff_data['rub_price']} руб.",
+                            url=payment_url,
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="❌ Отмена",
+                            callback_data=f"cancel_yookassa_{user_id}",
+                        )
+                    ],
+                ]
+            )
+            text = (
+                "💳 Оплата через банковскую карту\n\n"
+                f"📋 Тариф: {tariff_data['name']}\n"
+                f"💰 Сумма: {tariff_data['rub_price']} руб.\n\n"
+                "Нажмите кнопку ниже для перехода к оплате:"
+            )
+            return text, keyboard
+        except Exception as e:
+            logger.error(
+                f"Failed to build YooKassa payment view for user {user_id}, tariff {tariff_key}: {e}"
+            )
+            return None
     
     async def process_payment(self, pre_checkout_query) -> bool:
         """
