@@ -401,12 +401,6 @@ async def handle_pay_callback(callback_query: types.CallbackQuery):
     )
 
 
-@dp.callback_query(F.data.startswith("tariff_label_"))
-async def handle_tariff_label_callback(callback_query: types.CallbackQuery):
-    """Ignore taps on tariff label rows."""
-    await safe_answer_callback(callback_query)
-
-
 @dp.callback_query(F.data == "already_paid")
 async def handle_already_paid_callback(callback_query: types.CallbackQuery):
     """Handle the 'Access purchased' button."""
@@ -695,9 +689,11 @@ async def handle_extend_callback(callback_query: types.CallbackQuery):
         )
         return
 
-    # Send payment method selection for extension (creates a new invoice message)
-    await payment_manager.send_payment_selection(
-        callback_query.message.chat.id, user_id
+    payment_text, keyboard = await payment_manager.get_payment_selection_view(user_id)
+    await safe_edit_callback_message(
+        callback_query.message,
+        payment_text,
+        reply_markup=keyboard,
     )
 
 
