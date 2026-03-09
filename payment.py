@@ -69,6 +69,14 @@ class PaymentManager:
         user_tariffs = self.get_user_tariffs(user_id)
 
         for tariff_key, tariff_data in user_tariffs.items():
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text=tariff_data["name"],
+                        callback_data=f"tariff_label_{tariff_key}",
+                    )
+                ]
+            )
             if yookassa_available:
                 buttons.append(
                     [
@@ -107,16 +115,11 @@ class PaymentManager:
     ) -> tuple[str, InlineKeyboardMarkup]:
         """Build text and keyboard for the tariff selection screen."""
         keyboard = await self.create_payment_selection_keyboard(user_id)
-        user_tariffs = self.get_user_tariffs(user_id)
-        tariff_lines = []
-        for tariff_data in user_tariffs.values():
-            tariff_lines.append(f"{tariff_data['name']}")
-        tariffs_text = "\n\n".join(tariff_lines)
-        payment_text = (
-            "⏰ Выбери тариф VPN доступа:\n\n"
-            "Выбери удобный для тебя тариф:\n\n"
-            f"{tariffs_text}"
-        )
+        payment_text = """
+⏰ Выбери тариф VPN доступа:
+
+Выбери удобный для тебя тариф:
+        """
         return payment_text, keyboard
     
     async def create_stars_invoice(self, user_id: int, tariff_key: str, username: str = None) -> Optional[Dict[str, Any]]:

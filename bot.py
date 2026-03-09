@@ -88,7 +88,9 @@ def sync_bound_custom_peers_for_user(
 
 
 async def send_config_file(
-    chat_id: int, config_content: bytes | str | None, caption: str = "📁 Твой файл конфигурации"
+    chat_id: int,
+    config_content: bytes | str | None,
+    caption: str | None = "📁 Твой файл конфигурации",
 ) -> bool:
     if not config_content:
         return False
@@ -360,6 +362,15 @@ def create_guide_keyboard() -> InlineKeyboardMarkup:
     return keyboard
 
 
+def create_back_to_menu_keyboard() -> InlineKeyboardMarkup:
+    """Create a single-button keyboard to return to the main menu."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Вернуться в меню", callback_data="main")]
+        ]
+    )
+
+
 # Command handlers
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
@@ -399,6 +410,12 @@ async def handle_pay_callback(callback_query: types.CallbackQuery):
         payment_text,
         reply_markup=keyboard,
     )
+
+
+@dp.callback_query(F.data.startswith("tariff_label_"))
+async def handle_tariff_label_callback(callback_query: types.CallbackQuery):
+    """Ignore taps on tariff label rows."""
+    await safe_answer_callback(callback_query)
 
 
 @dp.callback_query(F.data == "already_paid")
@@ -505,6 +522,12 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
 
         # User has active access: try to send config or restore if missing
         try:
+            await safe_edit_callback_message(
+                callback_query.message,
+                "⏳ Скачиваю конфигурацию...",
+                reply_markup=create_back_to_menu_keyboard(),
+            )
+
             # First try to check if the peer exists
             peer_exists = False
             try:
@@ -560,28 +583,20 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                             f"Failed to update clients.json for user {user_id}"
                         )
 
-            # Send config
-            config_filename = "nikonVPN.conf"
-            config_bytes = (
-                peer_config
-                if isinstance(peer_config, (bytes, bytearray))
-                else peer_config.encode("utf-8")
+            sent = await send_config_file(
+                callback_query.message.chat.id, peer_config, caption=None
             )
-            await callback_query.message.reply_document(
-                document=types.BufferedInputFile(
-                    config_bytes, filename=config_filename
-                ),
-                caption="Вот твой файл конфигурации, добавь его в приложение AmneziaWG",
+            success_text = (
+                "✅ Конфигурация отправлена!\n\n"
+                "Используй кнопку ниже, чтобы вернуться в меню:"
+                if sent
+                else "❌ Не удалось отправить конфигурацию.\n\n"
+                "Используй кнопку ниже, чтобы вернуться в меню:"
             )
-            success_text = """
-✅ Конфигурация отправлена!
-
-Выбери действие с помощью кнопок ниже:
-            """
             await safe_edit_callback_message(
                 callback_query.message,
                 success_text,
-                reply_markup=create_main_menu_keyboard(user_id),
+                reply_markup=create_back_to_menu_keyboard(),
             )
         except Exception as e:
             logger.error(
@@ -604,37 +619,29 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                             logger.warning(
                                 f"Failed to update clients.json for user {user_id}"
                             )
-                    # If created successfully, send the config
-                    config_filename = "nikonVPN.conf"
-                    config_bytes = (
-                        new_config
-                        if isinstance(new_config, (bytes, bytearray))
-                        else new_config.encode("utf-8")
-                    )
-                    await callback_query.message.reply_document(
-                        document=types.BufferedInputFile(
-                            config_bytes, filename=config_filename
-                        ),
-                        caption="Вот твой файл конфигурации, добавь его в приложение AmneziaWG",
+                    sent = await send_config_file(
+                        callback_query.message.chat.id, new_config, caption=None
                     )
                     await safe_edit_callback_message(
                         callback_query.message,
-                        "✅ Конфигурация отправлена!\n\nВыбери действие с помощью кнопок ниже:",
-                        reply_markup=create_main_menu_keyboard(user_id),
+                        "✅ Конфигурация отправлена!\n\nИспользуй кнопку ниже, чтобы вернуться в меню:"
+                        if sent
+                        else "❌ Не удалось отправить конфигурацию.\n\nИспользуй кнопку ниже, чтобы вернуться в меню:",
+                        reply_markup=create_back_to_menu_keyboard(),
                     )
                     return
 
                 await safe_edit_callback_message(
                     callback_query.message,
-                    f"❌ Ошибка при получении конфигурации: {err if not ok else 'Не удалось скачать конфиг'}.\n\nВыбери действие с помощью кнопок ниже:",
-                    reply_markup=create_main_menu_keyboard(user_id),
+                    f"❌ Ошибка при получении конфигурации: {err if not ok else 'Не удалось скачать конфиг'}.\n\nИспользуй кнопку ниже, чтобы вернуться в меню:",
+                    reply_markup=create_back_to_menu_keyboard(),
                 )
             except Exception as e2:
                 logger.error(f"Critical error while creating new peer: {e2}")
                 await safe_edit_callback_message(
                     callback_query.message,
-                    "❌ Ошибка при получении конфигурации. Попробуй позже или обратись в поддержку.",
-                    reply_markup=create_main_menu_keyboard(user_id),
+                    "❌ Ошибка при получении конфигурации. Попробуй позже или обратись в поддержку.\n\nИспользуй кнопку ниже, чтобы вернуться в меню:",
+                    reply_markup=create_back_to_menu_keyboard(),
                 )
     else:
         # User has no peer
