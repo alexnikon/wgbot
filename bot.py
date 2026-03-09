@@ -845,16 +845,11 @@ async def handle_main_callback(callback_query: types.CallbackQuery):
     await safe_answer_callback(callback_query)
 
     user_id = callback_query.from_user.id
-    payment_info = payment_manager.get_payment_info()
 
-    welcome_text = f"""
+    welcome_text = """
 Привет! Здесь ты можешь подключиться к быстрому и безопасному VPN.
 
 Чтобы начать пользоваться нашим vpn, скачай клиент AmneziaWG из своего магазина приложений
-
-💎 Стоимость за {payment_info["period"]}:
-⭐ Telegram Stars: {payment_info["stars_price"]} Stars
-💳 Картой (Юmoney): {payment_info["rub_price"]} руб.
 
 Выбери действие с помощью кнопок ниже:
     """
