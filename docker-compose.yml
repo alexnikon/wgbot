@@ -31,13 +31,19 @@ services:
       - WEBHOOK_URL=${WEBHOOK_URL}
       - DOMAIN=${DOMAIN}
     volumes:
-      - ./wgbot-data:/app/data
+      - ./DB:/app/data
       - ./wgbot-logs:/app/logs
       - ./clients.json:/app/clients.json
       - ./promo.txt:/app/promo.txt
     network_mode: host
     healthcheck:
-      test: [ "CMD", "python", "-c", "import os; exit(0 if os.getenv('TELEGRAM_BOT_TOKEN') else 1)" ]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os; exit(0 if os.getenv('TELEGRAM_BOT_TOKEN') else 1)",
+        ]
       interval: 30s
       timeout: 10s
       retries: 2
@@ -47,7 +53,7 @@ services:
     build: .
     container_name: webhook
     restart: unless-stopped
-    command: [ "python", "webhook_server.py" ]
+    command: ["python", "webhook_server.py"]
     env_file:
       - .env
     environment:
@@ -59,11 +65,17 @@ services:
       - DATABASE_PATH=/app/data/wgbot.db
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      - ./wgbot-data:/app/data
+      - ./DB:/app/data
       - ./wgbot-logs:/app/logs
     network_mode: host
     healthcheck:
-      test: [ "CMD", "python", "-c", "import requests; requests.get('http://localhost:8001/health')" ]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import requests; requests.get('http://localhost:8001/health')",
+        ]
       interval: 30s
       timeout: 10s
       retries: 3
