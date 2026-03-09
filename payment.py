@@ -64,36 +64,64 @@ class PaymentManager:
         Returns:
             InlineKeyboardMarkup with tariff options
         """
-        # Check YooKassa availability
         yookassa_available = bool(self.yookassa_client.shop_id and self.yookassa_client.secret_key)
-        
         buttons = []
-        
-        # Get user-specific tariffs
         user_tariffs = self.get_user_tariffs(user_id)
-        
-        # Build buttons for each tariff
+
         for tariff_key, tariff_data in user_tariffs.items():
-            # Button for Stars payment
-            buttons.append([InlineKeyboardButton(
-                text=f"{tariff_data['name']} - {tariff_data['stars_price']} ⭐",
-                callback_data=f"pay_stars_{tariff_key}_{user_id}"
-            )])
-            
-            # Button for YooKassa payment
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text=tariff_data["name"],
+                        callback_data=f"tariff_label_{tariff_key}",
+                    )
+                ]
+            )
+
             if yookassa_available:
-                buttons.append([InlineKeyboardButton(
-                    text=f"{tariff_data['name']} - {tariff_data['rub_price']} ₽",
-                    callback_data=f"pay_yookassa_{tariff_key}_{user_id}"
-                )])
+                buttons.append(
+                    [
+                        InlineKeyboardButton(
+                            text=f"⭐ {tariff_data['stars_price']} Stars",
+                            callback_data=f"pay_stars_{tariff_key}_{user_id}",
+                        ),
+                        InlineKeyboardButton(
+                            text=f"💳 {tariff_data['rub_price']} руб.",
+                            callback_data=f"pay_yookassa_{tariff_key}_{user_id}",
+                        ),
+                    ]
+                )
             else:
-                buttons.append([InlineKeyboardButton(
-                    text=f"{tariff_data['name']} - {tariff_data['rub_price']} ₽ (недоступно)",
-                    callback_data=f"pay_yookassa_disabled_{user_id}"
-                )])
-        
+                buttons.append(
+                    [
+                        InlineKeyboardButton(
+                            text=f"⭐ {tariff_data['stars_price']} Stars",
+                            callback_data=f"pay_stars_{tariff_key}_{user_id}",
+                        ),
+                        InlineKeyboardButton(
+                            text=f"💳 {tariff_data['rub_price']} руб.",
+                            callback_data=f"pay_yookassa_disabled_{user_id}",
+                        ),
+                    ]
+                )
+
+        buttons.append(
+            [InlineKeyboardButton(text="🔙 Вернуться в меню", callback_data="main")]
+        )
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
         return keyboard
+
+    async def get_payment_selection_view(
+        self, user_id: int
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        """Build text and keyboard for the tariff selection screen."""
+        keyboard = await self.create_payment_selection_keyboard(user_id)
+        payment_text = """
+⏰ Выбери тариф VPN доступа:
+
+Выбери удобный для тебя тариф:
+        """
+        return payment_text, keyboard
     
     async def create_stars_invoice(self, user_id: int, tariff_key: str, username: str = None) -> Optional[Dict[str, Any]]:
         """
@@ -249,17 +277,7 @@ class PaymentManager:
             True if sent successfully
         """
         try:
-            keyboard = await self.create_payment_selection_keyboard(user_id)
-            
-            # Check YooKassa availability
-            yookassa_available = bool(self.yookassa_client.shop_id and self.yookassa_client.secret_key)
-            
-            payment_text = """
-⏰ Выбери тариф VPN доступа:
-
-Выбери удобный для тебя тариф:
-            """
-            
+            payment_text, keyboard = await self.get_payment_selection_view(user_id)
             await self.bot.send_message(
                 chat_id=chat_id,
                 text=payment_text,
