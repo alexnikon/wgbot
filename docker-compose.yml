@@ -1,25 +1,35 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-app-base: &app-base
+  image: wgbot:local
+  build: .
+  restart: unless-stopped
+  init: true
+  env_file:
+    - .env
+  network_mode: host
+  logging: *default-logging
+
 services:
   nginx:
     image: nginx:alpine
     container_name: nginx
     restart: unless-stopped
+    init: true
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./ssl:/etc/nginx/ssl:ro
       - ./wgbot-logs/nginx:/var/log/nginx
-    #depends_on:
-    #wgbot:
-    #condition: service_healthy
-    #webhook:
-    #condition: service_healthy
     network_mode: host
+    logging: *default-logging
 
   wgbot:
-    build: .
+    <<: *app-base
     container_name: wgbot
-    restart: unless-stopped
-    env_file:
-      - .env
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - YOOKASSA_SHOP_ID=${YOOKASSA_SHOP_ID}
@@ -35,7 +45,6 @@ services:
       - ./wgbot-logs:/app/logs
       - ./clients.json:/app/clients.json
       - ./promo.txt:/app/promo.txt
-    network_mode: host
     healthcheck:
       test:
         [
@@ -50,12 +59,9 @@ services:
       start_period: 30s
 
   webhook:
-    build: .
+    <<: *app-base
     container_name: webhook
-    restart: unless-stopped
     command: ["python", "webhook_server.py"]
-    env_file:
-      - .env
     environment:
       - YOOKASSA_SHOP_ID=${YOOKASSA_SHOP_ID}
       - YOOKASSA_SECRET_KEY=${YOOKASSA_SECRET_KEY}
@@ -67,7 +73,6 @@ services:
     volumes:
       - ./DB:/app/data
       - ./wgbot-logs:/app/logs
-    network_mode: host
     healthcheck:
       test:
         [

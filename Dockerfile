@@ -1,26 +1,35 @@
-FROM python:3.11-slim
+FROM python:3.11-slim AS builder
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
     gcc \
-    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Create working directory
+COPY requirements.txt .
+RUN pip wheel --wheel-dir /wheels -r requirements.txt
+
+
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
 WORKDIR /app
 
-# Copy requirements.txt and install dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY --from=builder /wheels /wheels
+RUN pip install --no-index --find-links=/wheels -r requirements.txt \
+    && rm -rf /wheels
 
-# Copy source code
 COPY . .
 
-# Create directories for logs and data
 RUN mkdir -p logs data
 
-# Set permissions
-RUN chmod +x *.py
-
-# Entry point (runs the bot by default)
 CMD ["python", "bot.py"]
