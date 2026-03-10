@@ -1,6 +1,5 @@
 import logging
-import asyncio
-from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import uvicorn
@@ -113,25 +112,20 @@ async def process_successful_payment(payment_data: dict):
         amount_info = payment_data.get('amount', {})
         amount_value = amount_info.get('value', '0')
         currency = amount_info.get('currency', 'RUB')
-        description = payment_data.get('description', '')
-        created_at = payment_data.get('created_at', '')
         
         logger.info(f"Start processing payment {payment_id}: {amount_value} {currency}")
         
         # Get payment method info
         payment_method = payment_data.get('payment_method', {})
         method_type = payment_method.get('type', 'unknown')
-        method_title = payment_method.get('title', '')
         
         # For bank cards, fetch extra details
         card_info = ""
         if method_type == 'bank_card':
             card = payment_method.get('card', {})
             if card:
-                first6 = card.get('first6', '')
                 last4 = card.get('last4', '')
                 card_type = card.get('card_type', '')
-                issuer_country = card.get('issuer_country', '')
                 issuer_name = card.get('issuer_name', '')
                 card_info = f" ({card_type} *{last4}, {issuer_name})"
         
@@ -139,8 +133,6 @@ async def process_successful_payment(payment_data: dict):
         auth_details = payment_data.get('authorization_details', {})
         three_d_secure = auth_details.get('three_d_secure', {})
         three_d_applied = three_d_secure.get('applied', False)
-        rrn = auth_details.get('rrn', '')
-        auth_code = auth_details.get('auth_code', '')
         
         if three_d_applied:
             logger.info(f"Payment {payment_id} passed 3D Secure authentication")
@@ -613,9 +605,6 @@ async def yookassa_webhook(request: Request):
             return JSONResponse(content={"status": "error", "message": "Invalid JSON"}, status_code=200)
         
         logger.info(f"Webhook parsed successfully: keys={list(webhook_data.keys())}")
-        
-        # Check notification type (required)
-        notification_type = webhook_data.get('type', '')
         
         # Get event data
         event_type = webhook_data.get('event', '')

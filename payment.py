@@ -336,59 +336,6 @@ class PaymentManager:
             logger.error(f"Failed to send Stars payment request to user {user_id}, tariff {tariff_key}: {e}")
             return False
     
-    async def send_yookassa_payment_request(self, chat_id: int, user_id: int, tariff_key: str, username: str = None) -> bool:
-        """
-        Send a YooKassa payment request.
-        
-        Args:
-            chat_id: Chat ID
-            user_id: Telegram user ID
-            tariff_key: Tariff key (14_days or 30_days)
-            username: Telegram username (optional)
-            
-        Returns:
-            True if request sent successfully
-        """
-        try:
-            # Create payment and get URL
-            payment_url = await self.create_yookassa_payment(user_id, tariff_key, username)
-            if not payment_url:
-                return False
-            
-            user_tariffs = self.get_user_tariffs(user_id)
-            tariff_data = user_tariffs.get(tariff_key)
-            if not tariff_data:
-                logger.error(f"Unknown tariff for user {user_id}: {tariff_key}")
-                return False
-            
-            # Build keyboard with payment button
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(
-                    text=f"💳 Оплатить {tariff_data['rub_price']} руб.",
-                    url=payment_url
-                )]
-            ])
-            
-            # Send message with payment button
-            await self.bot.send_message(
-                chat_id=chat_id,
-                text=f"💳 Оплата через банковскую карту\n\n"
-                     f"📋 Тариф: {tariff_data['name']}\n"
-                     f"💰 Сумма: {tariff_data['rub_price']} руб.\n\n"
-                     f"Нажмите кнопку ниже для перехода к оплате:",
-                reply_markup=keyboard
-            )
-            
-            logger.info(f"YooKassa payment request sent to user {user_id}, tariff {tariff_key}")
-            return True
-            
-        except TelegramAPIError as e:
-            logger.error(f"Telegram API error while sending YooKassa payment request: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"Failed to send YooKassa payment request to user {user_id}, tariff {tariff_key}: {e}")
-            return False
-
     async def get_yookassa_payment_view(
         self, user_id: int, tariff_key: str, username: str = None
     ) -> Optional[tuple[str, InlineKeyboardMarkup]]:

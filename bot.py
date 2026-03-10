@@ -3,11 +3,8 @@ import logging
 import time
 
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandStart
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -21,11 +18,7 @@ from custom_clients import CustomClientsManager, sync_custom_peers_access
 from database import Database
 from payment import PaymentManager
 from utils import (
-    format_peer_info,
-    format_peer_list,
     generate_peer_name,
-    sanitize_filename,
-    validate_peer_name,
     parse_date_flexible,
     format_date_for_user,
     ClientsJsonManager,
@@ -264,12 +257,6 @@ async def safe_edit_callback_message(
             logger.debug("Skip edit_text: message is not modified")
             return False
         raise
-
-
-# FSM states
-class PeerStates(StatesGroup):
-    waiting_for_peer_name = State()
-
 
 # Helper to check active access
 def is_access_active(existing_peer: dict) -> bool:
