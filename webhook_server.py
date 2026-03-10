@@ -29,6 +29,7 @@ db = Database()
 wg_api = WGDashboardAPI()
 clients_manager = ClientsJsonManager(CLIENTS_JSON_PATH)
 custom_clients_manager = CustomClientsManager(CUSTOM_CLIENTS_PATH)
+telegram_http_client: httpx.AsyncClient | None = None
 
 
 def sync_bound_custom_peers_for_user(
@@ -54,39 +55,52 @@ def sync_bound_custom_peers_for_user(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle management."""
+    global telegram_http_client
     logger.info("Webhook server starting...")
+    telegram_http_client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0))
     yield
+    if telegram_http_client is not None and not telegram_http_client.is_closed:
+        await telegram_http_client.aclose()
+    await yookassa_client.aclose()
+    wg_api.close()
     logger.info("Webhook server stopping...")
 
 app = FastAPI(title="WGBot Webhook Server", lifespan=lifespan)
 
+
+def get_telegram_http_client() -> httpx.AsyncClient:
+    """Return a shared Telegram HTTP client."""
+    global telegram_http_client
+    if telegram_http_client is None or telegram_http_client.is_closed:
+        telegram_http_client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0))
+    return telegram_http_client
+
 async def send_telegram_message(chat_id: int, text: str):
     """Send a message to Telegram."""
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={
-                    "chat_id": chat_id,
-                    "text": text,
-                    "parse_mode": "HTML"
-                },
-                timeout=10.0
-            )
-            
-            if response.status_code == 200:
-                logger.info(f"Message sent to user {chat_id}")
+        response = await get_telegram_http_client().post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "HTML"
+            },
+            timeout=10.0
+        )
+        
+        if response.status_code == 200:
+            logger.info(f"Message sent to user {chat_id}")
+        else:
+            response_data = response.json()
+            error_code = response_data.get('error_code', 'unknown')
+            error_description = response_data.get('description', 'unknown error')
+
+            if error_code == 400 and 'chat not found' in error_description:
+                logger.warning(f"User {chat_id} blocked the bot or deleted the chat")
             else:
-                response_data = response.json()
-                error_code = response_data.get('error_code', 'unknown')
-                error_description = response_data.get('description', 'unknown error')
-                
-                if error_code == 400 and 'chat not found' in error_description:
-                    logger.warning(f"User {chat_id} blocked the bot or deleted the chat")
-                else:
-                    logger.error(
-                        f"Failed to send message to user {chat_id}: {error_code} - {error_description}"
-                    )
+                logger.error(
+                    f"Failed to send message to user {chat_id}: {error_code} - {error_description}"
+                )
                     
     except Exception as e:
         logger.error(f"Error sending message to Telegram: {e}")
@@ -353,38 +367,37 @@ async def process_successful_payment(payment_data: dict):
 
                     logger.info(f"Sending config to user {user_id}")
                     # Send config via Telegram API
-                    async with httpx.AsyncClient() as client:
-                        files = {
-                            "document": (filename, config_content, "application/octet-stream")
-                        }
-                        data = {
-                            "chat_id": user_id,
-                            "caption": (
-                                "✅ Платеж успешно обработан!\n"
-                                "💳 Способ оплаты: Банковская карта\n"
-                                f"🎉 VPN доступ на {access_days} дней!\n"
-                                "📁 Ваша VPN конфигурация готова!"
-                            ),
-                        }
+                    files = {
+                        "document": (filename, config_content, "application/octet-stream")
+                    }
+                    data = {
+                        "chat_id": user_id,
+                        "caption": (
+                            "✅ Платеж успешно обработан!\n"
+                            "💳 Способ оплаты: Банковская карта\n"
+                            f"🎉 VPN доступ на {access_days} дней!\n"
+                            "📁 Ваша VPN конфигурация готова!"
+                        ),
+                    }
 
-                        response = await client.post(
-                            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
-                            files=files,
-                            data=data,
-                            timeout=30.0,
+                    response = await get_telegram_http_client().post(
+                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
+                        files=files,
+                        data=data,
+                        timeout=30.0,
+                    )
+
+                    if response.status_code == 200:
+                        logger.info(f"Config successfully sent to user {user_id}")
+                    else:
+                        logger.error(
+                            f"Config send error: {response.status_code} - {response.text}"
                         )
-
-                        if response.status_code == 200:
-                            logger.info(f"Config successfully sent to user {user_id}")
-                        else:
-                            logger.error(
-                                f"Config send error: {response.status_code} - {response.text}"
-                            )
-                            await send_telegram_message(
-                                user_id,
-                                f"✅ Платеж успешно обработан!\n💳 Способ оплаты: Банковская карта\n🎉 VPN доступ на {access_days} дней!\n\n"
-                                f"❌ Ошибка при отправке конфигурации. Используйте команду /connect для получения конфига.",
-                            )
+                        await send_telegram_message(
+                            user_id,
+                            f"✅ Платеж успешно обработан!\n💳 Способ оплаты: Банковская карта\n🎉 VPN доступ на {access_days} дней!\n\n"
+                            f"❌ Ошибка при отправке конфигурации. Используйте команду /connect для получения конфига.",
+                        )
 
                 except Exception as e:
                     logger.error(

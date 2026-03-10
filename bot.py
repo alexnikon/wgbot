@@ -1659,6 +1659,9 @@ async def main():
 
     except Exception as e:
         logger.error(f"Critical error: {e}")
+    finally:
+        await payment_manager.yookassa_client.aclose()
+        wg_api.close()
 
 
 if __name__ == "__main__":

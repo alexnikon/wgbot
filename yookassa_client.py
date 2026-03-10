@@ -4,7 +4,6 @@ import hmac
 import json
 import uuid
 from typing import Dict, Any, Optional
-from datetime import datetime
 import httpx
 from config import YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY
 
@@ -17,6 +16,8 @@ class YooKassaClient:
         self.shop_id = YOOKASSA_SHOP_ID
         self.secret_key = YOOKASSA_SECRET_KEY
         self.base_url = "https://api.yookassa.ru/v3"
+        self.timeout = httpx.Timeout(30.0, connect=10.0)
+        self._client: httpx.AsyncClient | None = None
         self.headers = {
             "Authorization": f"Basic {self._get_auth_token()}",
             "Content-Type": "application/json",
@@ -32,6 +33,17 @@ class YooKassaClient:
     def _generate_idempotence_key(self) -> str:
         """Generate a unique idempotence key."""
         return str(uuid.uuid4())
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """Return a shared async HTTP client."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close the shared async HTTP client."""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
     
     async def create_payment(self, amount: int, currency: str, description: str, 
                            return_url: str, metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -66,21 +78,19 @@ class YooKassaClient:
             headers = self.headers.copy()
             headers["Idempotence-Key"] = self._generate_idempotence_key()
             
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/payments",
-                    headers=headers,
-                    json=payment_data,
-                    timeout=30.0
-                )
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    logger.info(f"Payment created: {result.get('id')}")
-                    return result
-                else:
-                    logger.error(f"Payment creation error: {response.status_code} - {response.text}")
-                    return None
+            response = await self._get_client().post(
+                f"{self.base_url}/payments",
+                headers=headers,
+                json=payment_data,
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f"Payment created: {result.get('id')}")
+                return result
+
+            logger.error(f"Payment creation error: {response.status_code} - {response.text}")
+            return None
                     
         except Exception as e:
             logger.error(f"Payment creation error: {e}")
@@ -97,18 +107,16 @@ class YooKassaClient:
             Payment data or None on error
         """
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.base_url}/payments/{payment_id}",
-                    headers=self.headers,
-                    timeout=30.0
-                )
-                
-                if response.status_code == 200:
-                    return response.json()
-                else:
-                    logger.error(f"Payment fetch error: {response.status_code} - {response.text}")
-                    return None
+            response = await self._get_client().get(
+                f"{self.base_url}/payments/{payment_id}",
+                headers=self.headers,
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+
+            logger.error(f"Payment fetch error: {response.status_code} - {response.text}")
+            return None
                     
         except Exception as e:
             logger.error(f"Failed to fetch payment {payment_id}: {e}")

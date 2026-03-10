@@ -2,6 +2,7 @@ import requests
 import datetime
 import uuid
 import logging
+import urllib.parse
 from typing import Dict, Any, Optional, Tuple
 from config import WG_DASHBOARD_URL, WG_DASHBOARD_API_KEY, WG_CONFIG_NAME, PEER_EXPIRY_DAYS
 
@@ -12,22 +13,26 @@ class WGDashboardAPI:
         self.base_url = WG_DASHBOARD_URL
         self.api_key = WG_DASHBOARD_API_KEY
         self.config_name = WG_CONFIG_NAME
+        self.timeout = 15
         self.headers = {
             "Content-Type": "application/json",
             "wg-dashboard-apikey": self.api_key
         }
+        self.session = requests.Session()
+        self.session.headers.update(self.headers)
     
     def _make_request(self, method: str, endpoint: str, data: Optional[Dict] = None) -> Dict[str, Any]:
         """Execute an HTTP request to the WGDashboard API."""
         url = f"{self.base_url}{endpoint}"
         
         try:
-            if method.upper() == "GET":
-                response = requests.get(url, headers=self.headers)
-            elif method.upper() == "POST":
-                response = requests.post(url, json=data, headers=self.headers)
-            else:
+            request_kwargs: Dict[str, Any] = {"timeout": self.timeout}
+            if method.upper() == "POST":
+                request_kwargs["json"] = data
+            elif method.upper() != "GET":
                 raise ValueError(f"Unsupported HTTP method: {method}")
+
+            response = self.session.request(method.upper(), url, **request_kwargs)
             
             response.raise_for_status()
             return response.json()
@@ -213,11 +218,10 @@ class WGDashboardAPI:
             if not peer_id:
                 return False
                 
-            import urllib.parse
             encoded_peer_id = urllib.parse.quote(peer_id, safe='')
             url = f"{self.base_url}/api/downloadPeer/{self.config_name}?id={encoded_peer_id}"
             
-            response = requests.get(url, headers=self.headers)
+            response = self.session.get(url, timeout=self.timeout)
             
             if response.status_code == 200:
                 # Inspect response content
@@ -256,12 +260,11 @@ class WGDashboardAPI:
         if not peer_id:
             raise Exception("Peer ID cannot be empty")
             
-        import urllib.parse
         encoded_peer_id = urllib.parse.quote(peer_id, safe='')
         url = f"{self.base_url}/api/downloadPeer/{self.config_name}?id={encoded_peer_id}"
         
         try:
-            response = requests.get(url, headers=self.headers)
+            response = self.session.get(url, timeout=self.timeout)
             response.raise_for_status()
             
             # API returns JSON containing config
@@ -281,3 +284,7 @@ class WGDashboardAPI:
         except Exception as e:
             logger.error(f"Unexpected error while downloading config: {e}")
             raise Exception(f"Failed to download config: {e}")
+
+    def close(self) -> None:
+        """Close the underlying HTTP session."""
+        self.session.close()

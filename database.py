@@ -13,12 +13,24 @@ logger = logging.getLogger(__name__)
 class Database:
     def __init__(self, db_file: str = DATABASE_FILE):
         self.db_file = db_file
+        self.connection_timeout = 30.0
+        self.busy_timeout_ms = 30000
         self.init_database()
+
+    def _connect(self) -> sqlite3.Connection:
+        """Create a SQLite connection with settings tuned for concurrent access."""
+        conn = sqlite3.connect(self.db_file, timeout=self.connection_timeout)
+        conn.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
+        return conn
 
     def init_database(self):
         """Initialize the database and create required tables."""
-        with sqlite3.connect(self.db_file) as conn:
+        with self._connect() as conn:
             cursor = conn.cursor()
+            cursor.execute("PRAGMA journal_mode = WAL")
+            cursor.execute("PRAGMA synchronous = NORMAL")
+            cursor.execute("PRAGMA foreign_keys = ON")
+            cursor.execute("PRAGMA temp_store = MEMORY")
 
             # Table for peer records
             cursor.execute("""
@@ -66,6 +78,23 @@ class Database:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     metadata TEXT
                 )
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_peers_telegram_user_active
+                ON peers (telegram_user_id, is_active)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_peers_active_expire_date
+                ON peers (is_active, expire_date)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_peers_active_notification
+                ON peers (is_active, notification_sent, expire_date)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_peers_active_expired_notification
+                ON peers (is_active, expired_notification_sent, expire_date)
             """)
 
             # Migration: add new columns if missing
@@ -163,7 +192,7 @@ class Database:
             True if successfully inserted
         """
         try:
-            with sqlite3.connect(self.db_file) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -220,7 +249,7 @@ class Database:
         pending_job_id = f"pending_job_{uuid.uuid4()}"
 
         try:
-            with sqlite3.connect(self.db_file) as conn:
+            with self._connect() as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute(
@@ -332,7 +361,7 @@ class Database:
         mode = stage_info.get("mode", "update")
 
         try:
-            with sqlite3.connect(self.db_file) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -394,7 +423,7 @@ class Database:
         mode = stage_info.get("mode")
 
         try:
-            with sqlite3.connect(self.db_file) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 if mode == "create":
@@ -452,7 +481,7 @@ class Database:
 
     def get_peer_by_name(self, peer_name: str) -> Optional[Dict[str, Any]]:
         """Get peer info by name."""
-        with sqlite3.connect(self.db_file) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM peers WHERE peer_name = ?", (peer_name,))
@@ -463,7 +492,7 @@ class Database:
         self, telegram_user_id: int
     ) -> Optional[Dict[str, Any]]:
         """Get peer info by Telegram user ID."""
-        with sqlite3.connect(self.db_file) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute(
@@ -475,7 +504,7 @@ class Database:
 
     def get_all_peers(self) -> List[Dict[str, Any]]:
         """Get all active peers."""
-        with sqlite3.connect(self.db_file) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute(
@@ -494,7 +523,7 @@ class Database:
             True if successfully deactivated
         """
         try:
-            with sqlite3.connect(self.db_file) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     "UPDATE peers SET is_active = 0 WHERE peer_name = ?", (peer_name,)
@@ -530,7 +559,7 @@ class Database:
     def log_operation(self, peer_name: str, operation: str, details: str):
         """Log an operation to the database."""
         try:
-            with sqlite3.connect(self.db_file) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -547,7 +576,7 @@ class Database:
         self, peer_name: str = None, limit: int = 50
     ) -> List[Dict[str, Any]]:
         """Get operation logs."""
-        with sqlite3.connect(self.db_file) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
@@ -575,7 +604,7 @@ class Database:
 
     def get_expired_peers(self) -> List[Dict[str, Any]]:
         """Get expired peers that have not been notified yet."""
-        with sqlite3.connect(self.db_file) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("""
@@ -605,7 +634,7 @@ class Database:
             True if successfully updated
         """
         try:
-            with sqlite3.connect(self.db_file) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 if new_expire_date:
@@ -661,7 +690,7 @@ class Database:
             True if successfully updated
         """
         try:
-            with sqlite3.connect(self.db_file) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 # Update fields depending on payment method
@@ -736,7 +765,7 @@ class Database:
             Tuple (success: bool, new_expire_date: str)
         """
         try:
-            with sqlite3.connect(self.db_file) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
 
                 # Fetch current expiration date
@@ -804,7 +833,7 @@ class Database:
             Tuple (success: bool, new_expire_date: str)
         """
         try:
-            with sqlite3.connect(self.db_file) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 
                 # Fetch current expiration date
@@ -866,7 +895,7 @@ class Database:
         Returns:
             List of users to notify
         """
-        with sqlite3.connect(self.db_file) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute(
@@ -893,7 +922,7 @@ class Database:
             True if successfully marked
         """
         try:
-            with sqlite3.connect(self.db_file) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -917,7 +946,7 @@ class Database:
         Mark that the expiration notification was sent (one-time).
         """
         try:
-            with sqlite3.connect(self.db_file) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -959,7 +988,7 @@ class Database:
             True if successfully added
         """
         try:
-            with sqlite3.connect(self.db_file) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -1008,7 +1037,7 @@ class Database:
                 logger.error(f"Invalid payment status: {status}")
                 return False
 
-            with sqlite3.connect(self.db_file) as conn:
+            with self._connect() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -1042,7 +1071,7 @@ class Database:
         Returns:
             Payment data or None
         """
-        with sqlite3.connect(self.db_file) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM payments WHERE payment_id = ?", (payment_id,))
@@ -1059,7 +1088,7 @@ class Database:
         Returns:
             List of payments
         """
-        with sqlite3.connect(self.db_file) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute(
@@ -1079,7 +1108,7 @@ class Database:
         Returns:
             List of pending payments
         """
-        with sqlite3.connect(self.db_file) as conn:
+        with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("""
