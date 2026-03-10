@@ -84,6 +84,7 @@ async def send_config_file(
     chat_id: int,
     config_content: bytes | str | None,
     caption: str | None = "📁 Твой файл конфигурации",
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> bool:
     if not config_content:
         return False
@@ -98,6 +99,7 @@ async def send_config_file(
             chat_id=chat_id,
             document=types.BufferedInputFile(file=config_bytes, filename="nikonVPN.conf"),
             caption=caption,
+            reply_markup=reply_markup,
         )
         return True
     except Exception as e:
@@ -257,6 +259,16 @@ async def safe_edit_callback_message(
             logger.debug("Skip edit_text: message is not modified")
             return False
         raise
+
+
+def create_home_keyboard() -> InlineKeyboardMarkup:
+    """Create a compact keyboard with a main menu button."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="На главную", callback_data="main")]
+        ]
+    )
+
 
 # Helper to check active access
 def is_access_active(existing_peer: dict) -> bool:
@@ -1431,7 +1443,8 @@ async def process_successful_payment(message: types.Message):
                 f"✅ Платеж успешно обработан!\n"
                 f"🎉 Продлили тебе доступ на {access_days} дней!\n"
                 f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
-                f"Текущая конфигурация остается актуальной."
+                f"Текущая конфигурация остается актуальной.",
+                reply_markup=create_home_keyboard(),
             )
             sync_bound_custom_peers_for_user(
                 user_id=user_id,
@@ -1462,14 +1475,16 @@ async def process_successful_payment(message: types.Message):
                     f"✅ Платеж успешно обработан!\n"
                     f"🎉 Продлили тебе доступ на {access_days} дней!\n"
                     f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
-                    f"Конфигурация отправлена."
+                    f"Конфигурация отправлена.",
+                    reply_markup=create_home_keyboard(),
                 )
             else:
                 await message.reply(
                     f"✅ Платеж успешно обработан!\n"
                     f"🎉 Продлили тебе доступ на {access_days} дней!\n"
                     f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
-                    f"Доступ восстановлен, используй /connect для получения актуального конфига."
+                    f"Доступ восстановлен, используй /connect для получения актуального конфига.",
+                    reply_markup=create_home_keyboard(),
                 )
             refreshed_peer = db.get_peer_by_telegram_id(user_id)
             if refreshed_peer and refreshed_peer.get("expire_date"):
@@ -1520,14 +1535,16 @@ async def process_successful_payment(message: types.Message):
                     f"✅ Платеж успешно обработан!\n"
                     f"🎉 VPN доступ на {access_days} дней активирован!\n"
                     f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
-                    f"Конфигурация отправлена."
+                    f"Конфигурация отправлена.",
+                    reply_markup=create_home_keyboard(),
                 )
             else:
                 await message.reply(
                     f"✅ Платеж успешно обработан!\n"
                     f"🎉 VPN доступ на {access_days} дней активирован!\n"
                     f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
-                    f"❌ Не удалось отправить конфигурацию. Используй /connect для получения конфига."
+                    f"❌ Не удалось отправить конфигурацию. Используй /connect для получения конфига.",
+                    reply_markup=create_home_keyboard(),
                 )
             refreshed_peer = db.get_peer_by_telegram_id(user_id)
             if refreshed_peer and refreshed_peer.get("expire_date"):

@@ -1,4 +1,5 @@
 import logging
+import json
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
@@ -74,16 +75,30 @@ def get_telegram_http_client() -> httpx.AsyncClient:
         telegram_http_client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0))
     return telegram_http_client
 
-async def send_telegram_message(chat_id: int, text: str):
+
+def create_home_reply_markup() -> dict:
+    """Create a compact inline keyboard with a main menu button."""
+    return {
+        "inline_keyboard": [
+            [{"text": "На главную", "callback_data": "main"}]
+        ]
+    }
+
+
+async def send_telegram_message(chat_id: int, text: str, reply_markup: dict | None = None):
     """Send a message to Telegram."""
     try:
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML"
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+
         response = await get_telegram_http_client().post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": "HTML"
-            },
+            json=payload,
             timeout=10.0
         )
         
@@ -228,7 +243,8 @@ async def process_successful_payment(payment_data: dict):
                         f"✅ Платеж успешно обработан!\n"
                         f"🎉 Продлили тебе доступ на {access_days} дней!\n"
                         f"💳 Способ оплаты: Банковская карта\n\n"
-                        f"Текущая конфигурация остается актуальной."
+                        f"Текущая конфигурация остается актуальной.",
+                        reply_markup=create_home_reply_markup(),
                     )
                     sync_bound_custom_peers_for_user(
                         user_id=user_id,
@@ -370,6 +386,7 @@ async def process_successful_payment(payment_data: dict):
                             f"🎉 VPN доступ на {access_days} дней!\n"
                             "📁 Ваша VPN конфигурация готова!"
                         ),
+                        "reply_markup": json.dumps(create_home_reply_markup()),
                     }
 
                     response = await get_telegram_http_client().post(
@@ -389,6 +406,7 @@ async def process_successful_payment(payment_data: dict):
                             user_id,
                             f"✅ Платеж успешно обработан!\n💳 Способ оплаты: Банковская карта\n🎉 VPN доступ на {access_days} дней!\n\n"
                             f"❌ Ошибка при отправке конфигурации. Используйте команду /connect для получения конфига.",
+                            reply_markup=create_home_reply_markup(),
                         )
 
                 except Exception as e:
@@ -400,6 +418,7 @@ async def process_successful_payment(payment_data: dict):
                         user_id,
                         f"✅ Платеж успешно обработан!\n💳 Способ оплаты: Банковская карта\n🎉 VPN доступ на {access_days} дней!\n\n"
                         f"❌ Ошибка при отправке конфигурации. Используйте команду /connect для получения конфига.",
+                        reply_markup=create_home_reply_markup(),
                     )
 
             except Exception as e:
