@@ -44,6 +44,7 @@ services:
       - ./DB:/app/data
       - ./wgbot-logs:/app/logs
       - ./clients.json:/app/clients.json
+      - ./custom_clients.txt:/app/custom_clients.txt
       - ./promo.txt:/app/promo.txt
     healthcheck:
       test:
@@ -73,6 +74,8 @@ services:
     volumes:
       - ./DB:/app/data
       - ./wgbot-logs:/app/logs
+      - ./clients.json:/app/clients.json
+      - ./custom_clients.txt:/app/custom_clients.txt
     healthcheck:
       test:
         [
