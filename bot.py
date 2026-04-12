@@ -261,6 +261,43 @@ async def safe_edit_callback_message(
         raise
 
 
+async def show_menu_from_callback(
+    callback_query: types.CallbackQuery, text: str, reply_markup: InlineKeyboardMarkup
+) -> None:
+    """Show a menu from any callback source message without crashing on media messages."""
+    message = callback_query.message
+    if message is None:
+        await bot.send_message(
+            callback_query.from_user.id,
+            text,
+            reply_markup=reply_markup,
+        )
+        return
+
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+        return
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            return
+        if "there is no text in the message to edit" not in str(e):
+            raise
+
+    try:
+        await message.edit_caption(caption=text, reply_markup=reply_markup)
+        return
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            return
+        logger.info(f"Falling back to send_message for callback menu: {e}")
+
+    await bot.send_message(
+        callback_query.from_user.id,
+        text,
+        reply_markup=reply_markup,
+    )
+
+
 def create_home_keyboard() -> InlineKeyboardMarkup:
     """Create a compact keyboard with a main menu button."""
     return InlineKeyboardMarkup(
@@ -863,8 +900,10 @@ async def handle_main_callback(callback_query: types.CallbackQuery):
 Выбери действие с помощью кнопок ниже:
     """
 
-    await callback_query.message.edit_text(
-        welcome_text, reply_markup=create_main_menu_keyboard(user_id)
+    await show_menu_from_callback(
+        callback_query,
+        welcome_text,
+        create_main_menu_keyboard(user_id),
     )
 
 
