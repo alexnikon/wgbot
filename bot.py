@@ -713,8 +713,10 @@ async def handle_extend_callback(callback_query: types.CallbackQuery):
 
 Выбери действие с помощью кнопок ниже:
         """
-        await callback_query.message.edit_text(
-            error_text, reply_markup=create_main_menu_keyboard(user_id)
+        await safe_edit_callback_message(
+            callback_query.message,
+            error_text,
+            reply_markup=create_main_menu_keyboard(user_id),
         )
         return
 
@@ -727,8 +729,10 @@ async def handle_extend_callback(callback_query: types.CallbackQuery):
 
 Выбери действие с помощью кнопок ниже:
         """
-        await callback_query.message.edit_text(
-            error_text, reply_markup=create_main_menu_keyboard(user_id)
+        await safe_edit_callback_message(
+            callback_query.message,
+            error_text,
+            reply_markup=create_main_menu_keyboard(user_id),
         )
         return
 
@@ -758,8 +762,10 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
 
 Выбери действие с помощью кнопок ниже:
         """
-        await callback_query.message.edit_text(
-            error_text, reply_markup=create_main_menu_keyboard(user_id)
+        await safe_edit_callback_message(
+            callback_query.message,
+            error_text,
+            reply_markup=create_main_menu_keyboard(user_id),
         )
         return
 
@@ -837,8 +843,10 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
 Выбери действие с помощью кнопок ниже:
                 """
 
-        await callback_query.message.edit_text(
-            status_text, reply_markup=create_main_menu_keyboard(user_id)
+        await safe_edit_callback_message(
+            callback_query.message,
+            status_text,
+            reply_markup=create_main_menu_keyboard(user_id),
         )
 
     except Exception as e:
@@ -848,8 +856,10 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
 
 Выбери действие с помощью кнопок ниже:
         """
-        await callback_query.message.edit_text(
-            error_text, reply_markup=create_main_menu_keyboard(user_id)
+        await safe_edit_callback_message(
+            callback_query.message,
+            error_text,
+            reply_markup=create_main_menu_keyboard(user_id),
         )
 
 
