@@ -491,8 +491,10 @@ async def handle_already_paid_callback(callback_query: types.CallbackQuery):
 {tariff_text}Выбери действие с помощью кнопок ниже:
         """
         # Update message with new keyboard (button switches to "Buy access")
-        await callback_query.message.edit_text(
-            expired_text, reply_markup=create_main_menu_keyboard(user_id)
+        await show_menu_from_callback(
+            callback_query,
+            expired_text,
+            create_main_menu_keyboard(user_id),
         )
         return
 
@@ -508,8 +510,10 @@ async def handle_already_paid_callback(callback_query: types.CallbackQuery):
     """
 
     # Update message with the current keyboard
-    await callback_query.message.edit_text(
-        already_paid_text, reply_markup=create_main_menu_keyboard(user_id)
+    await show_menu_from_callback(
+        callback_query,
+        already_paid_text,
+        create_main_menu_keyboard(user_id),
     )
 
 
