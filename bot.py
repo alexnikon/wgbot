@@ -1677,24 +1677,34 @@ async def check_expired_peers():
 
             for user in users_for_notification:
                 try:
-                    payment_info = payment_manager.get_payment_info()
-                    tariffs = payment_info["tariffs"]
+                    user_id = user["telegram_user_id"]
+                    tariffs = payment_manager.get_user_tariffs(user_id)
 
                     # Build text with available tariffs
                     tariff_text = ""
-                    for tariff_key, tariff_data in tariffs.items():
+                    for tariff_data in tariffs.values():
                         tariff_text += f"⭐ {tariff_data['name']} - {tariff_data['stars_price']} Stars\n"
                         tariff_text += f"💳 {tariff_data['name']} - {tariff_data['rub_price']} руб.\n\n"
 
                     await bot.send_message(
-                        chat_id=user["telegram_user_id"],
+                        chat_id=user_id,
                         text=f"⏰ Твой VPN доступ истекает завтра!\n\n"
                              f"💎 Доступные тарифы для продления:\n{tariff_text}"
                              f"Используй кнопки ниже для продления доступа.",
+                        reply_markup=InlineKeyboardMarkup(
+                            inline_keyboard=[
+                                [
+                                    InlineKeyboardButton(
+                                        text="⏰ Продлить доступ",
+                                        callback_data="extend",
+                                    )
+                                ]
+                            ]
+                        ),
                     )
 
                     # Mark notification as sent
-                    db.mark_notification_sent(user["telegram_user_id"])
+                    db.mark_notification_sent(user_id)
 
                 except TelegramAPIError:
                     logger.warning(
