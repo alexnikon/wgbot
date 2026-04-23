@@ -5,8 +5,10 @@ import uvicorn
 
 import bot as bot_module
 import webhook_server
+from logging_setup import configure_logging
 
 
+configure_logging()
 logger = logging.getLogger(__name__)
 
 

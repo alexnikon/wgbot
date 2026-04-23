@@ -1,9 +1,11 @@
+import asyncio
 import logging
 import json
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import uvicorn
+from logging_setup import configure_logging
 from utils import generate_peer_name
 from config import TELEGRAM_BOT_TOKEN
 from custom_clients import sync_custom_peers_access
@@ -17,15 +19,7 @@ from services import (
 )
 import httpx
 
-# Logging configuration
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/webhook.log'),
-        logging.StreamHandler()
-    ]
-)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 telegram_http_client: httpx.AsyncClient | None = None
@@ -117,6 +111,74 @@ async def send_telegram_message(chat_id: int, text: str, reply_markup: dict | No
                     
     except Exception as e:
         logger.error(f"Error sending message to Telegram: {e}")
+
+
+async def send_telegram_document(
+    chat_id: int,
+    filename: str,
+    file_content: bytes | str,
+    caption: str | None = None,
+    reply_markup: dict | None = None,
+) -> bool:
+    """Send a document to Telegram."""
+    try:
+        logger.info(f"Sending document to user {chat_id}: {filename}")
+        files = {
+            "document": (
+                filename,
+                file_content,
+                "application/octet-stream",
+            )
+        }
+        data: dict[str, str] = {"chat_id": str(chat_id)}
+        if caption is not None:
+            data["caption"] = caption
+        if reply_markup is not None:
+            data["reply_markup"] = json.dumps(reply_markup)
+
+        response = await get_telegram_http_client().post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
+            files=files,
+            data=data,
+            timeout=30.0,
+        )
+
+        if response.status_code == 200:
+            logger.info(f"Document sent to user {chat_id}")
+            return True
+
+        logger.error(
+            f"Failed to send document to user {chat_id}: {response.status_code} - {response.text}"
+        )
+        return False
+    except Exception as e:
+        logger.error(f"Error sending document to Telegram: {e}", exc_info=True)
+        return False
+
+
+async def send_config_confirmation(chat_id: int) -> None:
+    """Send delayed confirmation after config delivery."""
+    await asyncio.sleep(3)
+    await send_telegram_message(
+        chat_id,
+        "✅ Прислал тебе конфиг файл.\nДобавь его в приложение AmneziWG",
+        reply_markup=create_home_reply_markup(),
+    )
+
+
+async def send_config_with_confirmation(chat_id: int, config_content: bytes | str) -> bool:
+    """Send config file first, then send a delayed confirmation message."""
+    sent = await send_telegram_document(
+        chat_id=chat_id,
+        filename="nikonVPN.conf",
+        file_content=config_content,
+        caption=None,
+    )
+    if not sent:
+        return False
+
+    await send_config_confirmation(chat_id)
+    return True
 
 async def process_successful_payment(payment_data: dict):
     """Process successful payment."""
@@ -372,37 +434,8 @@ async def process_successful_payment(payment_data: dict):
                 try:
                     logger.info(f"Downloading config for peer {peer_id}")
                     config_content = wg_api.download_peer_config(peer_id)
-                    filename = "nikonVPN.conf"
-
                     logger.info(f"Sending config to user {user_id}")
-                    # Send config via Telegram API
-                    files = {
-                        "document": (filename, config_content, "application/octet-stream")
-                    }
-                    data = {
-                        "chat_id": user_id,
-                        "caption": (
-                            "✅ Платеж успешно обработан!\n"
-                            "💳 Способ оплаты: Банковская карта\n"
-                            f"🎉 VPN доступ на {access_days} дней!\n"
-                            "📁 Ваша VPN конфигурация готова!"
-                        ),
-                        "reply_markup": json.dumps(create_home_reply_markup()),
-                    }
-
-                    response = await get_telegram_http_client().post(
-                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
-                        files=files,
-                        data=data,
-                        timeout=30.0,
-                    )
-
-                    if response.status_code == 200:
-                        logger.info(f"Config successfully sent to user {user_id}")
-                    else:
-                        logger.error(
-                            f"Config send error: {response.status_code} - {response.text}"
-                        )
+                    if not await send_config_with_confirmation(user_id, config_content):
                         await send_telegram_message(
                             user_id,
                             f"✅ Платеж успешно обработан!\n💳 Способ оплаты: Банковская карта\n🎉 VPN доступ на {access_days} дней!\n\n"

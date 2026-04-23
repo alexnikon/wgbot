@@ -13,25 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from bot import main
-
-def setup_logging():
-    """Configure logging for production."""
-    # Create logs directory if it does not exist
-    os.makedirs('logs', exist_ok=True)
-    
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler('logs/wgbot.log', encoding='utf-8'),
-            logging.StreamHandler(sys.stdout)
-        ]
-    )
-    
-    # Reduce noise from aiogram/aiohttp
-    logging.getLogger('aiogram').setLevel(logging.WARNING)
-    logging.getLogger('aiohttp').setLevel(logging.WARNING)
+from logging_setup import configure_logging
 
 def check_environment():
     """Validate required environment variables."""
@@ -72,7 +54,7 @@ def main_production():
     create_directories()
     
     # Configure logging
-    setup_logging()
+    configure_logging()
     
     print("✅ Initialization complete")
     print("🤖 Starting bot...")

@@ -10,12 +10,11 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import (
-    CLIENTS_JSON_PATH,
-    CUSTOM_CLIENTS_PATH,
     SUPPORT_URL,
     TELEGRAM_BOT_TOKEN,
 )
-from custom_clients import CustomClientsManager, sync_custom_peers_access
+from custom_clients import sync_custom_peers_access
+from logging_setup import configure_logging
 from payment import PaymentManager
 from services import (
     clients_manager,
@@ -31,12 +30,7 @@ from utils import (
     format_date_for_user,
 )
 
-# Logging configuration
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler("logs/wgbot.log"), logging.StreamHandler()],
-)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 # Bot and dispatcher initialization
@@ -122,6 +116,7 @@ async def send_config_file(
         return False
 
     try:
+        logger.info(f"Sending config file to chat {chat_id}")
         config_bytes = (
             config_content
             if isinstance(config_content, (bytes, bytearray))
@@ -133,10 +128,43 @@ async def send_config_file(
             caption=caption,
             reply_markup=reply_markup,
         )
+        logger.info(f"Config file sent to chat {chat_id}")
         return True
     except Exception as e:
         logger.error(f"Failed to send config file to chat {chat_id}: {e}", exc_info=True)
         return False
+
+
+async def send_config_confirmation(chat_id: int) -> None:
+    """Send delayed confirmation after a config document is delivered."""
+    await asyncio.sleep(3)
+    logger.info(f"Sending delayed config confirmation to chat {chat_id}")
+    await bot.send_message(
+        chat_id=chat_id,
+        text="✅ Прислал тебе конфиг файл.\nДобавь его в приложение AmneziWG",
+        reply_markup=create_home_keyboard(),
+    )
+
+
+async def send_config_with_confirmation(
+    chat_id: int,
+    config_content: bytes | str | None,
+    source_message: types.Message | None = None,
+    caption: str | None = None,
+) -> bool:
+    """Send config file first, then send a delayed confirmation message."""
+    sent = await send_config_file(chat_id, config_content, caption=caption)
+    if not sent:
+        return False
+
+    if source_message is not None:
+        try:
+            await source_message.delete()
+        except Exception as e:
+            logger.warning(f"Failed to delete temporary config status message: {e}")
+
+    await send_config_confirmation(chat_id)
+    return True
 
 
 # Helper: create or restore a peer and return config
@@ -656,21 +684,18 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                             f"Failed to update clients.json for user {user_id}"
                         )
 
-            sent = await send_config_file(
-                callback_query.message.chat.id, peer_config, caption=None
+            sent = await send_config_with_confirmation(
+                callback_query.message.chat.id,
+                peer_config,
+                source_message=callback_query.message,
+                caption=None,
             )
-            success_text = (
-                "✅ Конфигурация отправлена!\n\n"
-                "Используй кнопку ниже, чтобы вернуться в меню:"
-                if sent
-                else "❌ Не удалось отправить конфигурацию.\n\n"
-                "Используй кнопку ниже, чтобы вернуться в меню:"
-            )
-            await safe_edit_callback_message(
-                callback_query.message,
-                success_text,
-                reply_markup=create_back_to_menu_keyboard(),
-            )
+            if not sent:
+                await safe_edit_callback_message(
+                    callback_query.message,
+                    "❌ Не удалось отправить конфигурацию.\n\nИспользуй кнопку ниже, чтобы вернуться в меню:",
+                    reply_markup=create_back_to_menu_keyboard(),
+                )
         except Exception as e:
             logger.error(
                 f"Error while fetching/restoring configuration: {e}", exc_info=True
@@ -692,16 +717,18 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                             logger.warning(
                                 f"Failed to update clients.json for user {user_id}"
                             )
-                    sent = await send_config_file(
-                        callback_query.message.chat.id, new_config, caption=None
+                    sent = await send_config_with_confirmation(
+                        callback_query.message.chat.id,
+                        new_config,
+                        source_message=callback_query.message,
+                        caption=None,
                     )
-                    await safe_edit_callback_message(
-                        callback_query.message,
-                        "✅ Конфигурация отправлена!\n\nИспользуй кнопку ниже, чтобы вернуться в меню:"
-                        if sent
-                        else "❌ Не удалось отправить конфигурацию.\n\nИспользуй кнопку ниже, чтобы вернуться в меню:",
-                        reply_markup=create_back_to_menu_keyboard(),
-                    )
+                    if not sent:
+                        await safe_edit_callback_message(
+                            callback_query.message,
+                            "❌ Не удалось отправить конфигурацию.\n\nИспользуй кнопку ниже, чтобы вернуться в меню:",
+                            reply_markup=create_back_to_menu_keyboard(),
+                        )
                     return
 
                 await safe_edit_callback_message(
@@ -1007,7 +1034,7 @@ async def cmd_connect(message: types.Message):
             config_downloaded = False
             if peer_exists:
                 try:
-                    await message.reply("Скачиваю конфиг...")
+                    progress_message = await message.reply("Скачиваю конфиг...")
                     config_content = wg_api.download_peer_config(
                         existing_peer["peer_id"]
                     )
@@ -1018,7 +1045,11 @@ async def cmd_connect(message: types.Message):
                             f"Failed to update clients.json for user {user_id}"
                         )
 
-                    await send_config_file(message.chat.id, config_content)
+                    await send_config_with_confirmation(
+                        message.chat.id,
+                        config_content,
+                        source_message=progress_message,
+                    )
                     return
                 except Exception as e:
                     logger.warning(
@@ -1028,7 +1059,7 @@ async def cmd_connect(message: types.Message):
 
             # If config download failed, create a new peer
             if not config_downloaded:
-                await message.reply("Создаю новый конфиг...")
+                progress_message = await message.reply("Создаю новый конфиг...")
                 ok, err, new_config = await create_or_restore_peer_for_user(
                     user_id, username, existing_peer.get("tariff_key")
                 )
@@ -1043,7 +1074,11 @@ async def cmd_connect(message: types.Message):
                         logger.warning(
                             f"Failed to update clients.json for user {user_id}"
                         )
-                if not await send_config_file(message.chat.id, new_config):
+                if not await send_config_with_confirmation(
+                    message.chat.id,
+                    new_config,
+                    source_message=progress_message,
+                ):
                     await message.reply(
                         "❌ Не удалось отправить конфигурацию. Используй /connect для повторной попытки."
                     )
@@ -1052,7 +1087,7 @@ async def cmd_connect(message: types.Message):
             logger.error(f"Error while getting config in /connect: {e}", exc_info=True)
             # Try to create a new peer on any error
             try:
-                await message.reply("Попытка создать новый конфиг...")
+                progress_message = await message.reply("Попытка создать новый конфиг...")
                 ok, err, new_config = await create_or_restore_peer_for_user(
                     user_id, username, existing_peer.get("tariff_key")
                 )
@@ -1067,7 +1102,11 @@ async def cmd_connect(message: types.Message):
                         logger.warning(
                             f"Failed to update clients.json for user {user_id}"
                         )
-                if not await send_config_file(message.chat.id, new_config):
+                if not await send_config_with_confirmation(
+                    message.chat.id,
+                    new_config,
+                    source_message=progress_message,
+                ):
                     await message.reply(
                         "❌ Не удалось отправить конфигурацию. Используй /connect для повторной попытки."
                     )
@@ -1376,7 +1415,11 @@ async def handle_retry_peer_callback(callback_query: types.CallbackQuery):
                 "✅ Доступ создан. Отправляю конфигурацию...",
                 reply_markup=create_main_menu_keyboard(user_id),
             )
-            sent = await send_config_file(callback_query.message.chat.id, new_config)
+            sent = await send_config_with_confirmation(
+                callback_query.message.chat.id,
+                new_config,
+                source_message=callback_query.message,
+            )
             if not sent:
                 await callback_query.message.reply(
                     "❌ Не удалось отправить конфигурацию. Используй /connect для повторной попытки."
@@ -1559,14 +1602,14 @@ async def process_successful_payment(message: types.Message):
                 )
                 return
 
-            sent = await send_config_file(message.chat.id, new_config)
+            sent = await send_config_with_confirmation(
+                message.chat.id,
+                new_config,
+                caption=None,
+            )
             if sent:
-                await message.reply(
-                    f"✅ Платеж успешно обработан!\n"
-                    f"🎉 Продлили тебе доступ на {access_days} дней!\n"
-                    f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
-                    f"Конфигурация отправлена.",
-                    reply_markup=create_home_keyboard(),
+                logger.info(
+                    f"Config sent with delayed confirmation after peer restore for user {user_id}"
                 )
             else:
                 await message.reply(
@@ -1620,14 +1663,14 @@ async def process_successful_payment(message: types.Message):
                     reply_markup=keyboard,
                 )
                 return
-            sent = await send_config_file(message.chat.id, new_config)
+            sent = await send_config_with_confirmation(
+                message.chat.id,
+                new_config,
+                caption=None,
+            )
             if sent:
-                await message.reply(
-                    f"✅ Платеж успешно обработан!\n"
-                    f"🎉 VPN доступ на {access_days} дней активирован!\n"
-                    f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
-                    f"Конфигурация отправлена.",
-                    reply_markup=create_home_keyboard(),
+                logger.info(
+                    f"Config sent with delayed confirmation after new access activation for user {user_id}"
                 )
             else:
                 await message.reply(
