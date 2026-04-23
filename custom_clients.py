@@ -95,7 +95,14 @@ def sync_custom_peers_access(
     primary_job_id: Optional[str] = None,
 ) -> Dict[str, int]:
     peers = custom_clients_manager.get_peers_for_user(user_id)
+    if primary_peer_id and primary_peer_id not in peers:
+        logger.warning(
+            f"Primary peer {primary_peer_id} is not listed in custom_clients for user_id={user_id}; adding it to sync set"
+        )
+        peers.append(primary_peer_id)
+
     if not peers:
+        logger.info(f"No custom peers configured for user_id={user_id}")
         return {"total": 0, "updated": 0, "failed": 0}
 
     excluded = exclude_peer_ids or set()
@@ -103,14 +110,28 @@ def sync_custom_peers_access(
     updated = 0
     failed = 0
 
+    logger.info(
+        f"Starting custom peer sync for user_id={user_id}: peers={peers}, primary_peer_id={primary_peer_id}, primary_job_id={primary_job_id}, allow_access={allow_access}"
+    )
+
     for peer_id in peers:
         if peer_id in excluded:
+            logger.info(
+                f"Skipping excluded custom peer for user_id={user_id}: peer={peer_id}"
+            )
             continue
         total += 1
 
         try:
+            is_primary_peer = primary_peer_id == peer_id
             if allow_access:
+                logger.info(
+                    f"Calling allow_access_peer for user_id={user_id}, peer={peer_id}, is_primary={is_primary_peer}"
+                )
                 allow_result = wg_api.allow_access_peer(peer_id)
+                logger.info(
+                    f"allow_access_peer result for user_id={user_id}, peer={peer_id}: {allow_result}"
+                )
                 if allow_result and isinstance(allow_result, dict) and allow_result.get("status") is False:
                     logger.warning(
                         f"allowAccessPeers returned an error for user_id={user_id}, peer={peer_id}: {allow_result}"
@@ -121,15 +142,27 @@ def sync_custom_peers_access(
                 if primary_peer_id == peer_id and primary_job_id
                 else build_custom_job_id(user_id, peer_id)
             )
+            logger.info(
+                f"Saving schedule job for user_id={user_id}, peer={peer_id}, is_primary={is_primary_peer}, job_id={job_id}, expire_date={expire_date}"
+            )
             update_result = wg_api.update_job_expire_date(job_id, peer_id, expire_date)
+            logger.info(
+                f"savePeerScheduleJob result for user_id={user_id}, peer={peer_id}, job_id={job_id}: {update_result}"
+            )
             if update_result and isinstance(update_result, dict) and update_result.get("status") is False:
                 raise Exception(f"savePeerScheduleJob error: {update_result}")
 
             updated += 1
+            logger.info(
+                f"Custom peer sync succeeded for user_id={user_id}, peer={peer_id}, job_id={job_id}"
+            )
         except Exception as e:
             failed += 1
             logger.error(
                 f"Failed to sync custom peer user_id={user_id}, peer={peer_id}: {e}"
             )
 
+    logger.info(
+        f"Completed custom peer sync for user_id={user_id}: total={total}, updated={updated}, failed={failed}"
+    )
     return {"total": total, "updated": updated, "failed": failed}
