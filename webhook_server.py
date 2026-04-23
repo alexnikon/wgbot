@@ -36,16 +36,17 @@ def sync_bound_custom_peers_for_user(
     user_id: int,
     expire_date: str,
     allow_access: bool = True,
-    exclude_peer_id: str | None = None,
+    primary_peer_id: str | None = None,
+    primary_job_id: str | None = None,
 ):
-    exclude_peer_ids = {exclude_peer_id} if exclude_peer_id else set()
     result = sync_custom_peers_access(
         wg_api=wg_api,
         custom_clients_manager=custom_clients_manager,
         user_id=user_id,
         expire_date=expire_date,
         allow_access=allow_access,
-        exclude_peer_ids=exclude_peer_ids,
+        primary_peer_id=primary_peer_id,
+        primary_job_id=primary_job_id,
     )
     if result["total"] > 0:
         logger.info(
@@ -250,7 +251,8 @@ async def process_successful_payment(payment_data: dict):
                         user_id=user_id,
                         expire_date=new_expire_date,
                         allow_access=True,
-                        exclude_peer_id=existing_peer["peer_id"],
+                        primary_peer_id=existing_peer["peer_id"],
+                        primary_job_id=existing_peer["job_id"],
                     )
                 elif peer_exists is False:
                     logger.warning(
@@ -361,7 +363,8 @@ async def process_successful_payment(payment_data: dict):
                     user_id=user_id,
                     expire_date=final_expire_date,
                     allow_access=True,
-                    exclude_peer_id=peer_id,
+                    primary_peer_id=peer_id,
+                    primary_job_id=job_id,
                 )
 
                 # Update payment status in peers table
@@ -539,7 +542,8 @@ async def process_refund_succeeded(refund_data: dict):
                     user_id=user_id,
                     expire_date=new_expire_date,
                     allow_access=False,
-                    exclude_peer_id=peer_info["peer_id"],
+                    primary_peer_id=peer_info["peer_id"],
+                    primary_job_id=peer_info["job_id"],
                 )
             else:
                 logger.warning(f"Peer not found for user {user_id} during refund processing")

@@ -63,16 +63,17 @@ def sync_bound_custom_peers_for_user(
     user_id: int,
     expire_date: str,
     allow_access: bool = True,
-    exclude_peer_id: str | None = None,
+    primary_peer_id: str | None = None,
+    primary_job_id: str | None = None,
 ) -> None:
-    exclude_peer_ids = {exclude_peer_id} if exclude_peer_id else set()
     result = sync_custom_peers_access(
         wg_api=wg_api,
         custom_clients_manager=custom_clients_manager,
         user_id=user_id,
         expire_date=expire_date,
         allow_access=allow_access,
-        exclude_peer_ids=exclude_peer_ids,
+        primary_peer_id=primary_peer_id,
+        primary_job_id=primary_job_id,
     )
     if result["total"] > 0:
         logger.info(
@@ -192,7 +193,8 @@ async def create_or_restore_peer_for_user(
                 user_id=user_id,
                 expire_date=final_expire_date,
                 allow_access=True,
-                exclude_peer_id=peer_id,
+                primary_peer_id=peer_id,
+                primary_job_id=new_job_id,
             )
         except Exception as e:
             # Compensation: delete created peer, then roll back staged DB record
@@ -1503,7 +1505,8 @@ async def process_successful_payment(message: types.Message):
                 user_id=user_id,
                 expire_date=new_expire_date,
                 allow_access=True,
-                exclude_peer_id=existing_peer["peer_id"],
+                primary_peer_id=existing_peer["peer_id"],
+                primary_job_id=existing_peer["job_id"],
             )
         elif peer_exists is False:
             logger.warning(
@@ -1545,7 +1548,8 @@ async def process_successful_payment(message: types.Message):
                     user_id=user_id,
                     expire_date=refreshed_peer["expire_date"],
                     allow_access=True,
-                    exclude_peer_id=refreshed_peer.get("peer_id"),
+                    primary_peer_id=refreshed_peer.get("peer_id"),
+                    primary_job_id=refreshed_peer.get("job_id"),
                 )
         else:
             await message.reply(
@@ -1605,7 +1609,8 @@ async def process_successful_payment(message: types.Message):
                     user_id=user_id,
                     expire_date=refreshed_peer["expire_date"],
                     allow_access=True,
-                    exclude_peer_id=refreshed_peer.get("peer_id"),
+                    primary_peer_id=refreshed_peer.get("peer_id"),
+                    primary_job_id=refreshed_peer.get("job_id"),
                 )
         except Exception as e:
             logger.error(f"Error creating peer after payment: {e}")

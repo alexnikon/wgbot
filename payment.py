@@ -163,13 +163,15 @@ class PaymentManager:
             
             # Build invoice
             invoice_data = {
-                'title': f'VPN доступ на {tariff_data["name"]} (Stars)',
-                'description': f'{tariff_data["description"]}\n\n'
-                              f'Пользователь: @{username}' if username else tariff_data['description'],
+                'title': f'Доступ к сервису на {tariff_data["name"]} (Stars)',
+                'description': (
+                    f'Доступ к сервису на {tariff_data["name"]}\n\n'
+                    f'Пользователь: @{username}'
+                ) if username else f'Доступ к сервису на {tariff_data["name"]}',
                 'payload': f'vpn_access_stars_{tariff_key}_{user_id}',
                 'provider_token': '',  # Not required for Telegram Stars
                 'currency': 'XTR',  # Currency code for Telegram Stars
-                'prices': [LabeledPrice(label=f'VPN доступ {tariff_data["name"]}', amount=tariff_data['stars_price'])],
+                'prices': [LabeledPrice(label=f'Доступ к сервису {tariff_data["name"]}', amount=tariff_data['stars_price'])],
                 'reply_markup': keyboard
             }
             
@@ -223,7 +225,7 @@ class PaymentManager:
                 'user_id': str(user_id),
                 'tariff_key': tariff_key,
                 'username': effective_username,
-                'description': f'VPN доступ на {tariff_data["name"]}'
+                'description': f'Доступ к сервису на {tariff_data["name"]}'
             }
             
             logger.info(f"Creating YooKassa payment for user {user_id}, tariff {tariff_key}, amount {amount} kopeks, metadata: {metadata}")
@@ -232,7 +234,7 @@ class PaymentManager:
             payment_data = await self.yookassa_client.create_payment(
                 amount=amount,
                 currency='RUB',
-                description=f'VPN доступ на {tariff_data["name"]}',
+                description=f'Доступ к сервису на {tariff_data["name"]}',
                 return_url=return_url,
                 metadata=metadata
             )

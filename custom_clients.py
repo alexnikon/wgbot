@@ -91,6 +91,8 @@ def sync_custom_peers_access(
     expire_date: str,
     allow_access: bool = True,
     exclude_peer_ids: Optional[Set[str]] = None,
+    primary_peer_id: Optional[str] = None,
+    primary_job_id: Optional[str] = None,
 ) -> Dict[str, int]:
     peers = custom_clients_manager.get_peers_for_user(user_id)
     if not peers:
@@ -114,7 +116,11 @@ def sync_custom_peers_access(
                         f"allowAccessPeers returned an error for user_id={user_id}, peer={peer_id}: {allow_result}"
                     )
 
-            job_id = build_custom_job_id(user_id, peer_id)
+            job_id = (
+                primary_job_id
+                if primary_peer_id == peer_id and primary_job_id
+                else build_custom_job_id(user_id, peer_id)
+            )
             update_result = wg_api.update_job_expire_date(job_id, peer_id, expire_date)
             if update_result and isinstance(update_result, dict) and update_result.get("status") is False:
                 raise Exception(f"savePeerScheduleJob error: {update_result}")
