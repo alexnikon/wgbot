@@ -98,7 +98,12 @@ class WGDashboardAPI:
         data = {"peers": [peer_id]}
         return self._make_request("POST", f"/api/allowAccessPeers/{self.config_name}", data)
     
-    def create_restrict_job(self, peer_id: str, expire_date_str: str = None) -> Tuple[Dict[str, Any], str, str]:
+    def create_restrict_job(
+        self,
+        peer_id: str,
+        expire_date_str: str = None,
+        job_id: Optional[str] = None,
+    ) -> Tuple[Dict[str, Any], str, str]:
         """
         Create a restriction job for a peer.
         
@@ -109,7 +114,7 @@ class WGDashboardAPI:
         Returns:
             Tuple: (API result, job_id, expiration date)
         """
-        job_id = str(uuid.uuid4())
+        job_id = job_id or str(uuid.uuid4())
         
         if expire_date_str is None:
             # If no date provided, use +30 days
@@ -147,6 +152,49 @@ class WGDashboardAPI:
         
         result = self._make_request("POST", "/api/savePeerScheduleJob", data)
         return result, job_id, expire_date_str
+
+    def ensure_restrict_job(
+        self,
+        peer_id: str,
+        expire_date_str: str,
+        job_id: Optional[str] = None,
+    ) -> Tuple[Dict[str, Any], str, str, bool]:
+        """
+        Ensure that a peer has a restriction job with the requested expiration date.
+
+        Returns:
+            Tuple: (API result, resolved_job_id, resolved_expire_date, created_new_job)
+        """
+        if job_id:
+            try:
+                logger.info(
+                    f"Attempting to update restrict job for peer {peer_id[:20]}... with job_id={job_id}, expire_date={expire_date_str}"
+                )
+                update_result = self.update_job_expire_date(job_id, peer_id, expire_date_str)
+                if not (
+                    isinstance(update_result, dict)
+                    and update_result.get("status") is False
+                ):
+                    return update_result, job_id, expire_date_str, False
+
+                logger.warning(
+                    f"Existing restrict job update failed for peer {peer_id[:20]}... with job_id={job_id}: {update_result}. Creating a new job."
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to update restrict job for peer {peer_id[:20]}... with job_id={job_id}: {e}. Creating a new job."
+                )
+        else:
+            logger.warning(
+                f"No job_id provided for peer {peer_id[:20]}...; creating a new restrict job"
+            )
+
+        create_result, created_job_id, resolved_expire_date = self.create_restrict_job(
+            peer_id,
+            expire_date_str,
+            job_id=job_id,
+        )
+        return create_result, created_job_id, resolved_expire_date, True
     
     def delete_job(self, job_data: Dict[str, Any]) -> Dict[str, Any]:
         """

@@ -94,6 +94,7 @@ def sync_bound_custom_peers_for_user(
     result = sync_custom_peers_access(
         wg_api=wg_api,
         custom_clients_manager=custom_clients_manager,
+        db=db,
         user_id=user_id,
         expire_date=expire_date,
         allow_access=allow_access,
@@ -1554,14 +1555,33 @@ async def process_successful_payment(message: types.Message):
 
         if peer_exists is True:
             try:
-                job_update_result = wg_api.update_job_expire_date(
-                    existing_peer["job_id"], existing_peer["peer_id"], new_expire_date
+                job_update_result, resolved_job_id, resolved_expire_date, created_new_job = (
+                    wg_api.ensure_restrict_job(
+                        existing_peer["peer_id"],
+                        new_expire_date,
+                        existing_peer.get("job_id"),
+                    )
                 )
 
                 if job_update_result and job_update_result.get("status"):
                     logger.info(
-                        f"Job updated for user {user_id}, new date: {new_expire_date}"
+                        f"Job ensured for user {user_id}, resolved_job_id={resolved_job_id}, created_new_job={created_new_job}, new date: {resolved_expire_date}"
                     )
+                    if (
+                        resolved_job_id != existing_peer.get("job_id")
+                        or resolved_expire_date != new_expire_date
+                    ):
+                        persisted = db.update_peer_info(
+                            existing_peer["peer_name"],
+                            existing_peer["peer_id"],
+                            resolved_job_id,
+                            resolved_expire_date,
+                        )
+                        logger.info(
+                            f"Persisted ensured job for user {user_id}: persisted={persisted}, resolved_job_id={resolved_job_id}"
+                        )
+                        existing_peer["job_id"] = resolved_job_id
+                        new_expire_date = resolved_expire_date
                 else:
                     logger.error(
                         f"Error updating job for user {user_id}: {job_update_result}"
@@ -1583,7 +1603,7 @@ async def process_successful_payment(message: types.Message):
                 expire_date=new_expire_date,
                 allow_access=True,
                 primary_peer_id=existing_peer["peer_id"],
-                primary_job_id=existing_peer["job_id"],
+                primary_job_id=existing_peer.get("job_id"),
             )
         elif peer_exists is False:
             logger.warning(

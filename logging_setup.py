@@ -2,6 +2,17 @@ import logging
 import os
 
 
+class HealthcheckAccessLogFilter(logging.Filter):
+    """Drop noisy healthcheck access log records from uvicorn."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return (
+            'GET /health HTTP/1.1' not in message
+            and 'GET /webhook/yookassa/health HTTP/1.1' not in message
+        )
+
+
 def configure_logging() -> None:
     """Configure application-wide logging once for file and docker logs."""
     root_logger = logging.getLogger()
@@ -24,4 +35,8 @@ def configure_logging() -> None:
     root_logger.handlers.clear()
     root_logger.addHandler(file_handler)
     root_logger.addHandler(stream_handler)
+
+    healthcheck_filter = HealthcheckAccessLogFilter()
+    logging.getLogger("uvicorn.access").addFilter(healthcheck_filter)
+
     root_logger._wgbot_logging_configured = True
