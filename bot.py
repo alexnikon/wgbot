@@ -423,15 +423,15 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
             f"create_main_menu_keyboard user_id={user_id}, existing_peer=None, has_active_access={has_active_access}"
         )
 
-    button_text = "✅ Доступ приобретен" if has_active_access else "💎 Купить доступ"
-    button_callback = "already_paid" if has_active_access else "pay"
-    status_button_text = "📅 Статус доступа" if has_active_access else "💵 Оплатить доступ"
-    status_button_callback = "status" if has_active_access else "pay"
-
-    inline_keyboard = [
-        [InlineKeyboardButton(text=button_text, callback_data=button_callback)],
-        [InlineKeyboardButton(text=status_button_text, callback_data=status_button_callback)],
-    ]
+    if has_active_access:
+        inline_keyboard = [
+            [InlineKeyboardButton(text="✅ Доступ приобретен", callback_data="already_paid")],
+            [InlineKeyboardButton(text="📅 Статус доступа", callback_data="status")],
+        ]
+    else:
+        inline_keyboard = [
+            [InlineKeyboardButton(text="💵 Оплатить доступ", callback_data="pay")],
+        ]
     if has_active_access:
         inline_keyboard.append(
             [InlineKeyboardButton(text="💵 Продлить доступ", callback_data="extend")]
@@ -490,8 +490,6 @@ async def cmd_start(message: types.Message):
 
 Чтобы начать пользоваться нашим VPN, скачай клиент AmneziaWG из своего магазина приложений.
 В инструкции есть ссылки на скачивание приложения и описан процесс подключения.
-
-Выбери действие с помощью кнопок ниже:
     """
 
     await message.answer(welcome_text, reply_markup=create_main_menu_keyboard(user_id))
@@ -962,8 +960,6 @@ async def handle_main_callback(callback_query: types.CallbackQuery):
 
 Чтобы начать пользоваться нашим VPN, скачай клиент AmneziaWG из своего магазина приложений.
 В инструкции есть ссылки на скачивание приложения и описан процесс подключения.
-
-Выбери действие с помощью кнопок ниже:
     """
 
     await show_menu_from_callback(
