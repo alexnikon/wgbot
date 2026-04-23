@@ -4,12 +4,17 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import uvicorn
-from yookassa_client import YooKassaClient
-from database import Database
-from wg_api import WGDashboardAPI
-from utils import ClientsJsonManager, generate_peer_name
-from config import CLIENTS_JSON_PATH, CUSTOM_CLIENTS_PATH, TELEGRAM_BOT_TOKEN
-from custom_clients import CustomClientsManager, sync_custom_peers_access
+from utils import generate_peer_name
+from config import TELEGRAM_BOT_TOKEN
+from custom_clients import sync_custom_peers_access
+from services import (
+    clients_manager,
+    close_shared_services,
+    custom_clients_manager,
+    db,
+    wg_api,
+    yookassa_client,
+)
 import httpx
 
 # Logging configuration
@@ -23,12 +28,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Component initialization
-yookassa_client = YooKassaClient()
-db = Database()
-wg_api = WGDashboardAPI()
-clients_manager = ClientsJsonManager(CLIENTS_JSON_PATH)
-custom_clients_manager = CustomClientsManager(CUSTOM_CLIENTS_PATH)
 telegram_http_client: httpx.AsyncClient | None = None
 
 
@@ -62,8 +61,7 @@ async def lifespan(app: FastAPI):
     yield
     if telegram_http_client is not None and not telegram_http_client.is_closed:
         await telegram_http_client.aclose()
-    await yookassa_client.aclose()
-    wg_api.close()
+    await close_shared_services()
     logger.info("Webhook server stopping...")
 
 app = FastAPI(title="WGBot Webhook Server", lifespan=lifespan)

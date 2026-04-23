@@ -13,10 +13,15 @@ logger = logging.getLogger(__name__)
 class PaymentManager:
     """Payment manager for Telegram Stars and YooKassa."""
     
-    def __init__(self, bot: Bot):
+    def __init__(
+        self,
+        bot: Bot,
+        yookassa_client: YooKassaClient | None = None,
+        db: Database | None = None,
+    ):
         self.bot = bot
-        self.yookassa_client = YooKassaClient()
-        self.db = Database()
+        self.yookassa_client = yookassa_client or YooKassaClient()
+        self.db = db or Database()
         self.webhook_url = WEBHOOK_URL
         self.domain = DOMAIN
         self.promo_manager = PromoManager(PROMO_FILE_PATH)

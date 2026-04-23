@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from typing import Any, Awaitable, Callable
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
@@ -15,15 +16,20 @@ from config import (
     TELEGRAM_BOT_TOKEN,
 )
 from custom_clients import CustomClientsManager, sync_custom_peers_access
-from database import Database
 from payment import PaymentManager
+from services import (
+    clients_manager,
+    close_shared_services,
+    custom_clients_manager,
+    db,
+    wg_api,
+    yookassa_client,
+)
 from utils import (
     generate_peer_name,
     parse_date_flexible,
     format_date_for_user,
-    ClientsJsonManager,
 )
-from wg_api import WGDashboardAPI
 
 # Logging configuration
 logging.basicConfig(
@@ -38,12 +44,37 @@ bot = Bot(token=TELEGRAM_BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# Component initialization
-wg_api = WGDashboardAPI()
-db = Database()
-payment_manager = PaymentManager(bot)
-clients_manager = ClientsJsonManager(CLIENTS_JSON_PATH)
-custom_clients_manager = CustomClientsManager(CUSTOM_CLIENTS_PATH)
+class OperationLoggingMiddleware:
+    """Log every incoming bot operation for docker/file logs."""
+
+    async def __call__(
+        self,
+        handler: Callable[[Any, dict[str, Any]], Awaitable[Any]],
+        event: types.TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        if isinstance(event, types.Message):
+            user_id = event.from_user.id if event.from_user else "unknown"
+            chat_id = event.chat.id if event.chat else "unknown"
+            text = (event.text or event.caption or "").replace("\n", " ").strip()
+            logger.info(
+                f"Incoming message operation: user_id={user_id}, chat_id={chat_id}, text={text[:200] or '<non-text>'}"
+            )
+        elif isinstance(event, types.CallbackQuery):
+            user_id = event.from_user.id if event.from_user else "unknown"
+            message = event.message
+            chat_id = message.chat.id if message and message.chat else "unknown"
+            logger.info(
+                f"Incoming callback operation: user_id={user_id}, chat_id={chat_id}, data={event.data}"
+            )
+
+        return await handler(event, data)
+
+
+dp.message.outer_middleware(OperationLoggingMiddleware())
+dp.callback_query.outer_middleware(OperationLoggingMiddleware())
+
+payment_manager = PaymentManager(bot, yookassa_client=yookassa_client, db=db)
 _last_start_sent_at: dict[int, float] = {}
 START_DEBOUNCE_SECONDS = 5.0
 
@@ -836,7 +867,7 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
 
                 if days_left <= 3:
                     status_text += (
-                        "\n\n⚠️ Доступ истекает скоро! Используй /extend для продления."
+                        '\n\n⚠️ Доступ к сервису скоро истекает! Нажми "Продлить доступ" для продления.'
                     )
 
                 status_text += "\n\nВыбери действие с помощью кнопок ниже:"
@@ -1151,7 +1182,7 @@ async def cmd_status(message: types.Message):
 
         if days_left <= 3:
             status_text += (
-                "\n\n⚠️ Доступ истекает скоро! Используй /extend для продления."
+                '\n\n⚠️ Доступ к сервису скоро истекает! Нажми "Продлить доступ" для продления.'
             )
 
         await message.reply(status_text)
@@ -1378,6 +1409,9 @@ async def handle_retry_peer_callback(callback_query: types.CallbackQuery):
 @dp.pre_checkout_query()
 async def process_pre_checkout_query(pre_checkout_query):
     """Handle pre-checkout validation."""
+    logger.info(
+        f"Incoming pre-checkout operation: user_id={pre_checkout_query.from_user.id}, payload={pre_checkout_query.invoice_payload}"
+    )
     await payment_manager.process_payment(pre_checkout_query)
 
 
@@ -1732,8 +1766,7 @@ async def main():
     except Exception as e:
         logger.error(f"Critical error: {e}")
     finally:
-        await payment_manager.yookassa_client.aclose()
-        wg_api.close()
+        await close_shared_services()
 
 
 if __name__ == "__main__":
