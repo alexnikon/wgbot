@@ -32,4 +32,4 @@ COPY . .
 
 RUN mkdir -p logs data
 
-CMD ["python", "bot.py"]
+CMD ["python", "app.py"]
