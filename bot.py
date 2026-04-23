@@ -1795,7 +1795,13 @@ async def check_expired_peers():
                                         text="⏰ Продлить доступ",
                                         callback_data="extend",
                                     )
-                                ]
+                                ],
+                                [
+                                    InlineKeyboardButton(
+                                        text="На главную",
+                                        callback_data="main",
+                                    )
+                                ],
                             ]
                         ),
                     )

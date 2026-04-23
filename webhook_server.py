@@ -624,7 +624,8 @@ async def process_refund_succeeded(refund_data: dict):
             f"💳 Сумма возврата: {amount} руб.\n"
             f"📉 Ваш оплаченный период был уменьшен на {days_to_reduce} дней в связи с возвратом.\n"
             f"📅 Срок действия доступа обновлен.\n\n"
-            f"📧 Деньги будут возвращены на карту в течение 1-3 рабочих дней."
+            f"📧 Деньги будут возвращены на карту в течение 1-3 рабочих дней.",
+            reply_markup=create_home_reply_markup(),
         )
         
         # Update payment status in the database
