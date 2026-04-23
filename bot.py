@@ -425,17 +425,19 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
     button_text = "✅ Доступ приобретен" if has_active_access else "💎 Купить доступ"
     button_callback = "already_paid" if has_active_access else "pay"
+    status_button_text = "📅 Статус доступа" if has_active_access else "💵 Оплатить доступ"
+    status_button_callback = "status" if has_active_access else "pay"
 
     inline_keyboard = [
         [InlineKeyboardButton(text=button_text, callback_data=button_callback)],
-        [InlineKeyboardButton(text="📊 Статус доступа", callback_data="status")],
+        [InlineKeyboardButton(text=status_button_text, callback_data=status_button_callback)],
     ]
-    if has_paid_access:
+    if has_active_access:
         inline_keyboard.append(
-            [InlineKeyboardButton(text="⏰ Продлить доступ", callback_data="extend")]
+            [InlineKeyboardButton(text="💵 Продлить доступ", callback_data="extend")]
         )
         inline_keyboard.append(
-            [InlineKeyboardButton(text="📁 Получить конфиг", callback_data="get_config")]
+            [InlineKeyboardButton(text="💾 Получить конфиг", callback_data="get_config")]
         )
     inline_keyboard.extend(
         [
@@ -484,9 +486,10 @@ async def cmd_start(message: types.Message):
     _last_start_sent_at[user_id] = now_monotonic
 
     welcome_text = """
-Привет! Здесь ты можешь подключиться к быстрому и безопасному VPN, который не подвержен блокировкам.
+👋🏻 Привет! Здесь ты можешь подключиться к быстрому и безопасному VPN.
 
-Чтобы начать пользоваться нашим vpn, скачай клиент AmneziaWG из своего магазина приложений
+Чтобы начать пользоваться нашим VPN, скачай клиент AmneziaWG из своего магазина приложений.
+В инструкции есть ссылки на скачивание приложения и описан процесс подключения.
 
 Выбери действие с помощью кнопок ниже:
     """
@@ -530,27 +533,14 @@ async def handle_already_paid_callback(callback_query: types.CallbackQuery):
         expire_date_formatted = format_date_for_user(expire_date_str) if expire_date_str != "Неизвестно" else "Неизвестно"
         await safe_answer_callback(callback_query, "⚠️ Твой VPN доступ истек!")
 
-        # Fetch current tariffs
-        payment_info = payment_manager.get_payment_info()
-        tariffs = payment_info["tariffs"]
-        tariff_text = ""
-        for tariff_key, tariff_data in tariffs.items():
-            tariff_text += (
-                f"⭐ {tariff_data['name']} - {tariff_data['stars_price']} Stars\n"
-            )
-            tariff_text += (
-                f"💳 {tariff_data['name']} - {tariff_data['rub_price']} руб.\n\n"
-            )
-
         expired_text = f"""
 ⚠️ Твой доступ к VPN истек!
 
 📅 Дата истечения: {expire_date_formatted}
 
-💎 Для продолжения использования VPN необходимо продлить доступ.
+⚠️ Для продолжения пользования сервисом, необходимо продлить доступ.
 
-💎 Доступные тарифы:
-{tariff_text}Выбери действие с помощью кнопок ниже:
+Выбери действие с помощью кнопок ниже:
         """
         # Update message with new keyboard (button switches to "Buy access")
         await show_menu_from_callback(
@@ -602,7 +592,7 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
 
 📅 Дата истечения: {expire_date_formatted}
 
-💎 Для получения VPN конфигурации необходимо продлить доступ.
+⚠️ Для продолжения пользования сервисом, необходимо продлить доступ.
 
 Выбери действие с помощью кнопок ниже:
                 """
@@ -866,7 +856,7 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
 
 ⚠️ Твой VPN доступ истек!
 
-💎 Для продолжения использования VPN необходимо продлить доступ.
+⚠️ Для продолжения пользования сервисом, необходимо продлить доступ.
 
 Выбери действие с помощью кнопок ниже:
             """
@@ -942,7 +932,7 @@ async def handle_guide_callback(callback_query: types.CallbackQuery):
    • iOS/macOS: App Store https://apps.apple.com/pl/app/amneziawg/id6478942365
 
 2️⃣ Получите конфигурацию:
-   • Нажмите "📁 Получить конфиг"
+   • Нажмите "💾 Получить конфиг"
    • Скачайте .conf файл
 
 3️⃣ Импортируйте конфигурацию:
@@ -968,9 +958,10 @@ async def handle_main_callback(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
 
     welcome_text = """
-Привет! Здесь ты можешь подключиться к быстрому и безопасному VPN.
+👋🏻 Привет! Здесь ты можешь подключиться к быстрому и безопасному VPN.
 
-Чтобы начать пользоваться нашим vpn, скачай клиент AmneziaWG из своего магазина приложений
+Чтобы начать пользоваться нашим VPN, скачай клиент AmneziaWG из своего магазина приложений.
+В инструкции есть ссылки на скачивание приложения и описан процесс подключения.
 
 Выбери действие с помощью кнопок ниже:
     """
@@ -1792,7 +1783,7 @@ async def check_expired_peers():
                             inline_keyboard=[
                                 [
                                     InlineKeyboardButton(
-                                        text="⏰ Продлить доступ",
+                                        text="💵 Продлить доступ",
                                         callback_data="extend",
                                     )
                                 ],
