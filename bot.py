@@ -1182,7 +1182,23 @@ async def cmd_status(message: types.Message):
 
         if expire_date <= now:
             await message.reply(
-                "⚠️ Твой VPN доступ истек!\nИспользуйте /extend для продления."
+                "⚠️ Оплаченный период закончился, для возобновления доступа к сервису, необходимо оплатить доступ.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="💵 Оплатить доступ",
+                                callback_data="pay",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                text="На главную",
+                                callback_data="main",
+                            )
+                        ],
+                    ]
+                ),
             )
             return
 
@@ -1747,8 +1763,25 @@ async def check_expired_peers():
                 try:
                     await bot.send_message(
                         chat_id=peer["telegram_user_id"],
-                        text=f"⚠️ Твой VPN доступ истек!\n\n"
-                        f"Используй /extend для продления доступа на 30 дней.",
+                        text=(
+                            "⚠️ Оплаченный период закончился, для возобновления доступа к сервису, необходимо оплатить доступ."
+                        ),
+                        reply_markup=InlineKeyboardMarkup(
+                            inline_keyboard=[
+                                [
+                                    InlineKeyboardButton(
+                                        text="💵 Оплатить доступ",
+                                        callback_data="pay",
+                                    )
+                                ],
+                                [
+                                    InlineKeyboardButton(
+                                        text="На главную",
+                                        callback_data="main",
+                                    )
+                                ],
+                            ]
+                        ),
                     )
                     db.mark_expired_notification_sent(peer["telegram_user_id"])
                 except TelegramAPIError:
