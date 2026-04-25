@@ -10,7 +10,7 @@ db = Database()
 wg_api = WGDashboardAPI()
 yookassa_client = YooKassaClient()
 clients_manager = ClientsJsonManager(CLIENTS_JSON_PATH)
-custom_clients_manager = CustomClientsManager(CUSTOM_CLIENTS_PATH)
+custom_clients_manager = CustomClientsManager(CUSTOM_CLIENTS_PATH, CLIENTS_JSON_PATH)
 
 
 async def close_shared_services() -> None:

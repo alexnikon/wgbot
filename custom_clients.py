@@ -1,4 +1,5 @@
 import logging
+import json
 import os
 import re
 import uuid
@@ -18,8 +19,9 @@ class CustomClientsManager:
     Comments and empty lines are ignored.
     """
 
-    def __init__(self, file_path: str):
+    def __init__(self, file_path: str, clients_json_path: str | None = None):
         self.file_path = file_path
+        self.clients_json_path = clients_json_path
 
     def _parse_line(self, raw_line: str) -> Optional[tuple[str, List[str]]]:
         line = raw_line.split("#", 1)[0].strip()
@@ -52,6 +54,10 @@ class CustomClientsManager:
         return user_id, deduped
 
     def get_peers_for_user(self, user_id: int) -> List[str]:
+        unified_peers = self._get_peers_from_clients_json(user_id)
+        if unified_peers:
+            return unified_peers
+
         if not os.path.exists(self.file_path):
             return []
 
@@ -78,6 +84,43 @@ class CustomClientsManager:
             return []
 
         return result
+
+    def _get_peers_from_clients_json(self, user_id: int) -> List[str]:
+        if not self.clients_json_path or not os.path.exists(self.clients_json_path):
+            return []
+
+        try:
+            with open(self.clients_json_path, "r", encoding="utf-8") as file:
+                data = json.load(file)
+
+            if not isinstance(data, dict) or not isinstance(data.get("clients"), list):
+                return []
+
+            result: List[str] = []
+            seen: Set[str] = set()
+            for client in data["clients"]:
+                if not isinstance(client, dict):
+                    continue
+                if str(client.get("telegramId")) != str(user_id):
+                    continue
+
+                peers = client.get("peers") or []
+                if not isinstance(peers, list):
+                    return []
+
+                for peer in peers:
+                    if not isinstance(peer, dict):
+                        continue
+                    public_key = str(peer.get("publicKey") or "").strip()
+                    if not public_key or public_key in seen:
+                        continue
+                    seen.add(public_key)
+                    result.append(public_key)
+                return result
+        except Exception as e:
+            logger.error(f"Failed to read custom peers from clients.json: {e}")
+
+        return []
 
 
 def build_custom_job_id(user_id: int, peer_id: str) -> str:

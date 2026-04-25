@@ -80,7 +80,11 @@ def sync_clients_json_for_user(
     if username:
         clients_manager.remove_client(str(user_id))
     return clients_manager.add_update_client(
-        client_id_for_json, peer_id, force_write=True
+        client_id_for_json,
+        peer_id,
+        force_write=True,
+        telegram_user_id=user_id,
+        username=username,
     )
 
 

@@ -434,7 +434,11 @@ async def process_successful_payment(payment_data: dict):
                 if effective_username:
                     clients_manager.remove_client(str(user_id))
                 if not clients_manager.add_update_client(
-                    client_id_for_json, peer_id, force_write=True
+                    client_id_for_json,
+                    peer_id,
+                    force_write=True,
+                    telegram_user_id=user_id,
+                    username=effective_username or "",
                 ):
                     raise Exception("Failed to update clients.json")
 
