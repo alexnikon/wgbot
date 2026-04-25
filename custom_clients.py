@@ -85,6 +85,64 @@ class CustomClientsManager:
 
         return result
 
+    def get_job_id_for_peer(self, user_id: int, peer_id: str) -> Optional[str]:
+        if not self.clients_json_path or not os.path.exists(self.clients_json_path):
+            return None
+
+        try:
+            with open(self.clients_json_path, "r", encoding="utf-8") as file:
+                data = json.load(file)
+
+            if not isinstance(data, dict) or not isinstance(data.get("clients"), list):
+                return None
+
+            for client in data["clients"]:
+                if not isinstance(client, dict):
+                    continue
+                if str(client.get("telegramId")) != str(user_id):
+                    continue
+
+                for peer in client.get("peers") or []:
+                    if not isinstance(peer, dict):
+                        continue
+                    if str(peer.get("publicKey") or "").strip() == peer_id:
+                        job_id = str(peer.get("jobId") or "").strip()
+                        return job_id or None
+        except Exception as e:
+            logger.error(f"Failed to read jobId from clients.json: {e}")
+
+        return None
+
+    def update_job_id_for_peer(self, user_id: int, peer_id: str, job_id: str) -> bool:
+        if not self.clients_json_path or not os.path.exists(self.clients_json_path):
+            return False
+
+        try:
+            with open(self.clients_json_path, "r", encoding="utf-8") as file:
+                data = json.load(file)
+
+            if not isinstance(data, dict) or not isinstance(data.get("clients"), list):
+                return False
+
+            for client in data["clients"]:
+                if not isinstance(client, dict):
+                    continue
+                if str(client.get("telegramId")) != str(user_id):
+                    continue
+
+                for peer in client.get("peers") or []:
+                    if not isinstance(peer, dict):
+                        continue
+                    if str(peer.get("publicKey") or "").strip() == peer_id:
+                        peer["jobId"] = job_id
+                        with open(self.clients_json_path, "w", encoding="utf-8") as file:
+                            json.dump(data, file, indent=2, ensure_ascii=False)
+                        return True
+        except Exception as e:
+            logger.error(f"Failed to write jobId to clients.json: {e}")
+
+        return False
+
     def _get_peers_from_clients_json(self, user_id: int) -> List[str]:
         if not self.clients_json_path or not os.path.exists(self.clients_json_path):
             return []
@@ -184,7 +242,8 @@ def sync_custom_peers_access(
             job_id = (
                 primary_job_id
                 if primary_peer_id == peer_id and primary_job_id
-                else build_custom_job_id(user_id, peer_id)
+                else custom_clients_manager.get_job_id_for_peer(user_id, peer_id)
+                or build_custom_job_id(user_id, peer_id)
             )
             logger.info(
                 f"Ensuring schedule job for user_id={user_id}, peer={peer_id}, is_primary={is_primary_peer}, job_id={job_id}, expire_date={expire_date}"
@@ -214,6 +273,15 @@ def sync_custom_peers_access(
                     logger.warning(
                         f"Primary peer DB record not found or mismatched for user_id={user_id}, peer={peer_id}; resolved_job_id={resolved_job_id} was not persisted"
                     )
+            elif not is_primary_peer and resolved_job_id != job_id:
+                persisted = custom_clients_manager.update_job_id_for_peer(
+                    user_id,
+                    peer_id,
+                    resolved_job_id,
+                )
+                logger.info(
+                    f"Manual peer jobId persistence for user_id={user_id}, peer={peer_id}, resolved_job_id={resolved_job_id}, persisted={persisted}"
+                )
 
             updated += 1
             logger.info(

@@ -165,6 +165,7 @@ class WGDashboardAPI:
         Returns:
             Tuple: (API result, resolved_job_id, resolved_expire_date, created_new_job)
         """
+        use_requested_job_id_for_create = True
         if job_id:
             try:
                 logger.info(
@@ -176,6 +177,10 @@ class WGDashboardAPI:
                     and update_result.get("status") is False
                 ):
                     return update_result, job_id, expire_date_str, False
+
+                message = str(update_result.get("message") or "")
+                if "UNIQUE constraint failed: PeerJobs.JobID" in message:
+                    use_requested_job_id_for_create = False
 
                 logger.warning(
                     f"Existing restrict job update failed for peer {peer_id[:20]}... with job_id={job_id}: {update_result}. Creating a new job."
@@ -189,11 +194,25 @@ class WGDashboardAPI:
                 f"No job_id provided for peer {peer_id[:20]}...; creating a new restrict job"
             )
 
+        create_job_id = job_id if use_requested_job_id_for_create else None
         create_result, created_job_id, resolved_expire_date = self.create_restrict_job(
             peer_id,
             expire_date_str,
-            job_id=job_id,
+            job_id=create_job_id,
         )
+        if (
+            isinstance(create_result, dict)
+            and create_result.get("status") is False
+            and "UNIQUE constraint failed: PeerJobs.JobID" in str(create_result.get("message") or "")
+        ):
+            logger.warning(
+                f"Restrict job creation hit a JobID conflict for peer {peer_id[:20]}... with job_id={created_job_id}. Retrying with a new UUID."
+            )
+            create_result, created_job_id, resolved_expire_date = self.create_restrict_job(
+                peer_id,
+                expire_date_str,
+                job_id=None,
+            )
         return create_result, created_job_id, resolved_expire_date, True
     
     def delete_job(self, job_data: Dict[str, Any]) -> Dict[str, Any]:
