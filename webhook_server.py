@@ -111,6 +111,43 @@ async def send_telegram_message(chat_id: int, text: str, reply_markup: dict | No
         logger.error(f"Error sending message to Telegram: {e}")
 
 
+async def delete_telegram_message(chat_id: int, message_id: int) -> bool:
+    """Delete a Telegram message sent by the bot."""
+    try:
+        response = await get_telegram_http_client().post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage",
+            json={"chat_id": chat_id, "message_id": message_id},
+            timeout=10.0,
+        )
+        if response.status_code == 200:
+            logger.info(f"Deleted Telegram message {message_id} in chat {chat_id}")
+            return True
+
+        logger.warning(
+            f"Failed to delete Telegram message {message_id} in chat {chat_id}: {response.status_code} - {response.text}"
+        )
+        return False
+    except Exception as e:
+        logger.warning(
+            f"Error deleting Telegram message {message_id} in chat {chat_id}: {e}"
+        )
+        return False
+
+
+async def delete_yookassa_payment_message(metadata: dict) -> None:
+    """Delete the YooKassa payment screen when payment is completed."""
+    try:
+        chat_id_raw = metadata.get("payment_chat_id")
+        message_id_raw = metadata.get("payment_message_id")
+        if not chat_id_raw or not message_id_raw:
+            logger.info("Payment message metadata is missing; nothing to delete")
+            return
+
+        await delete_telegram_message(int(chat_id_raw), int(message_id_raw))
+    except (TypeError, ValueError) as e:
+        logger.warning(f"Invalid payment message metadata, cannot delete message: {e}")
+
+
 async def send_telegram_document(
     chat_id: int,
     filename: str,
@@ -228,6 +265,8 @@ async def process_successful_payment(payment_data: dict):
         if not user_id:
             logger.error(f"user_id not found in payment {payment_id} metadata. Metadata: {metadata}")
             return
+
+        await delete_yookassa_payment_message(metadata)
         
         logger.info(f"Processing payment {payment_id} for user {user_id}, tariff: {tariff_key}")
         

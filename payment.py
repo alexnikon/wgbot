@@ -186,7 +186,14 @@ class PaymentManager:
             logger.error(f"Failed to create Stars invoice for user {user_id}, tariff {tariff_key}: {e}")
             return None
     
-    async def create_yookassa_payment(self, user_id: int, tariff_key: str, username: str = None) -> Optional[str]:
+    async def create_yookassa_payment(
+        self,
+        user_id: int,
+        tariff_key: str,
+        username: str = None,
+        payment_chat_id: int | None = None,
+        payment_message_id: int | None = None,
+    ) -> Optional[str]:
         """
         Create a YooKassa payment and return the checkout URL.
         
@@ -232,6 +239,10 @@ class PaymentManager:
                 'username': effective_username,
                 'description': f'Доступ к сервису на {tariff_data["name"]}'
             }
+            if payment_chat_id is not None:
+                metadata["payment_chat_id"] = str(payment_chat_id)
+            if payment_message_id is not None:
+                metadata["payment_message_id"] = str(payment_message_id)
             
             logger.info(f"Creating YooKassa payment for user {user_id}, tariff {tariff_key}, amount {amount} kopeks, metadata: {metadata}")
             
@@ -344,13 +355,24 @@ class PaymentManager:
             return False
     
     async def get_yookassa_payment_view(
-        self, user_id: int, tariff_key: str, username: str = None
+        self,
+        user_id: int,
+        tariff_key: str,
+        username: str = None,
+        payment_chat_id: int | None = None,
+        payment_message_id: int | None = None,
     ) -> Optional[tuple[str, InlineKeyboardMarkup]]:
         """
         Build text and keyboard for the YooKassa payment screen inside the current message.
         """
         try:
-            payment_url = await self.create_yookassa_payment(user_id, tariff_key, username)
+            payment_url = await self.create_yookassa_payment(
+                user_id,
+                tariff_key,
+                username,
+                payment_chat_id=payment_chat_id,
+                payment_message_id=payment_message_id,
+            )
             if not payment_url:
                 return None
 

@@ -1309,8 +1309,14 @@ async def handle_pay_yookassa_callback(callback_query: types.CallbackQuery):
         )
         return
 
+    payment_chat_id = callback_query.message.chat.id if callback_query.message else None
+    payment_message_id = callback_query.message.message_id if callback_query.message else None
     payment_view = await payment_manager.get_yookassa_payment_view(
-        user_id, tariff_key, username
+        user_id,
+        tariff_key,
+        username,
+        payment_chat_id=payment_chat_id,
+        payment_message_id=payment_message_id,
     )
     if not payment_view:
         user_tariffs = payment_manager.get_user_tariffs(user_id)
