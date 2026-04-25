@@ -6,6 +6,10 @@ config/
 clients.json
 promo.txt
 custom_clients.txt
+migration.sh
+clients.migrated.json
+api_yookassa.txt
+wgdashboard_doc.txt
 
 # C extensions
 *.so
