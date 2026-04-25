@@ -10,6 +10,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import (
+    get_admin_telegram_ids,
     SUPPORT_URL,
     TELEGRAM_BOT_TOKEN,
 )
@@ -71,6 +72,40 @@ dp.callback_query.outer_middleware(OperationLoggingMiddleware())
 payment_manager = PaymentManager(bot, yookassa_client=yookassa_client, db=db)
 _last_start_sent_at: dict[int, float] = {}
 START_DEBOUNCE_SECONDS = 5.0
+
+
+def format_admin_payment_notification(
+    title: str,
+    user_id: int,
+    username: str | None,
+    tariff_name: str,
+    amount: str,
+    payment_method: str,
+    expire_date: str | None = None,
+) -> str:
+    user_line = f"@{username}" if username else "без username"
+    text = (
+        f"{title}\n\n"
+        f"👤 Пользователь: {user_line}\n"
+        f"🆔 Telegram ID: {user_id}\n"
+        f"📋 Тариф: {tariff_name}\n"
+        f"💰 Стоимость: {amount}\n"
+        f"💳 Способ оплаты: {payment_method}"
+    )
+    if expire_date:
+        text += f"\n📅 Новый срок: {format_date_for_user(expire_date)}"
+    return text
+
+
+async def notify_admins(text: str) -> None:
+    """Send a best-effort notification to configured admins."""
+    for admin_id in get_admin_telegram_ids():
+        try:
+            await bot.send_message(admin_id, text)
+        except TelegramAPIError as e:
+            logger.warning(f"Failed to send admin notification to {admin_id}: {e}")
+        except Exception as e:
+            logger.warning(f"Unexpected admin notification error for {admin_id}: {e}")
 
 
 def sync_clients_json_for_user(
@@ -1609,6 +1644,17 @@ async def process_successful_payment(message: types.Message):
                 allow_access=True,
                 primary_peer_id=existing_peer["peer_id"],
             )
+            await notify_admins(
+                format_admin_payment_notification(
+                    "🔁 Клиент продлил подписку",
+                    user_id=user_id,
+                    username=username,
+                    tariff_name=tariff_data.get("name", tariff_key),
+                    amount=f"{amount_paid} Stars",
+                    payment_method="Telegram Stars",
+                    expire_date=new_expire_date,
+                )
+            )
         elif peer_exists is False:
             logger.warning(
                 f"Peer for user {user_id} not found in WGDashboard, creating new one"
@@ -1650,6 +1696,17 @@ async def process_successful_payment(message: types.Message):
                     expire_date=refreshed_peer["expire_date"],
                     allow_access=True,
                     primary_peer_id=refreshed_peer.get("peer_id"),
+                )
+                await notify_admins(
+                    format_admin_payment_notification(
+                        "🔁 Клиент продлил подписку",
+                        user_id=user_id,
+                        username=username,
+                        tariff_name=tariff_data.get("name", tariff_key),
+                        amount=f"{amount_paid} Stars",
+                        payment_method="Telegram Stars",
+                        expire_date=refreshed_peer["expire_date"],
+                    )
                 )
         else:
             await message.reply(
@@ -1710,6 +1767,17 @@ async def process_successful_payment(message: types.Message):
                     expire_date=refreshed_peer["expire_date"],
                     allow_access=True,
                     primary_peer_id=refreshed_peer.get("peer_id"),
+                )
+                await notify_admins(
+                    format_admin_payment_notification(
+                        "🆕 Новый клиент подключился",
+                        user_id=user_id,
+                        username=username,
+                        tariff_name=tariff_data.get("name", tariff_key),
+                        amount=f"{amount_paid} Stars",
+                        payment_method="Telegram Stars",
+                        expire_date=refreshed_peer["expire_date"],
+                    )
                 )
         except Exception as e:
             logger.error(f"Error creating peer after payment: {e}")

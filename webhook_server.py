@@ -6,8 +6,8 @@ from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import uvicorn
 from logging_setup import configure_logging
-from utils import generate_peer_name
-from config import TELEGRAM_BOT_TOKEN
+from utils import format_date_for_user, generate_peer_name
+from config import get_admin_telegram_ids, TELEGRAM_BOT_TOKEN
 from custom_clients import sync_custom_peers_access
 from services import (
     clients_manager,
@@ -76,6 +76,29 @@ def create_home_reply_markup() -> dict:
     }
 
 
+def format_admin_payment_notification(
+    title: str,
+    user_id: int,
+    username: str | None,
+    tariff_name: str,
+    amount: str,
+    payment_method: str,
+    expire_date: str | None = None,
+) -> str:
+    user_line = f"@{username}" if username else "без username"
+    text = (
+        f"{title}\n\n"
+        f"👤 Пользователь: {user_line}\n"
+        f"🆔 Telegram ID: {user_id}\n"
+        f"📋 Тариф: {tariff_name}\n"
+        f"💰 Стоимость: {amount}\n"
+        f"💳 Способ оплаты: {payment_method}"
+    )
+    if expire_date:
+        text += f"\n📅 Новый срок: {format_date_for_user(expire_date)}"
+    return text
+
+
 async def send_telegram_message(chat_id: int, text: str, reply_markup: dict | None = None):
     """Send a message to Telegram."""
     try:
@@ -109,6 +132,15 @@ async def send_telegram_message(chat_id: int, text: str, reply_markup: dict | No
                     
     except Exception as e:
         logger.error(f"Error sending message to Telegram: {e}")
+
+
+async def notify_admins(text: str) -> None:
+    """Send a best-effort notification to configured admins."""
+    for admin_id in get_admin_telegram_ids():
+        try:
+            await send_telegram_message(admin_id, text)
+        except Exception as e:
+            logger.warning(f"Unexpected admin notification error for {admin_id}: {e}")
 
 
 async def delete_telegram_message(chat_id: int, message_id: int) -> bool:
@@ -369,6 +401,17 @@ async def process_successful_payment(payment_data: dict):
                         allow_access=True,
                         primary_peer_id=existing_peer["peer_id"],
                     )
+                    await notify_admins(
+                        format_admin_payment_notification(
+                            "🔁 Клиент продлил подписку",
+                            user_id=user_id,
+                            username=effective_username or None,
+                            tariff_name=tariff_data.get("name", tariff_key),
+                            amount=f"{amount_value} руб.",
+                            payment_method="Банковская карта",
+                            expire_date=new_expire_date,
+                        )
+                    )
                 elif peer_exists is False:
                     logger.warning(
                         f"Peer for user {user_id} not found in WGDashboard, creating a new one"
@@ -481,6 +524,17 @@ async def process_successful_payment(payment_data: dict):
                     expire_date=final_expire_date,
                     allow_access=True,
                     primary_peer_id=peer_id,
+                )
+                await notify_admins(
+                    format_admin_payment_notification(
+                        "🆕 Новый клиент подключился",
+                        user_id=user_id,
+                        username=effective_username or None,
+                        tariff_name=tariff_data.get("name", tariff_key),
+                        amount=f"{amount_value} руб.",
+                        payment_method="Банковская карта",
+                        expire_date=final_expire_date,
+                    )
                 )
 
                 # Update payment status in peers table

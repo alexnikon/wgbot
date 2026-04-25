@@ -32,19 +32,22 @@ DOMAIN=your-domain.com
 # Ссылки и файлы
 SUPPORT_URL=
 CLIENTS_JSON_PATH=clients.json
+
+# Админ-уведомления
+ADMIN_TELEGRAM_IDS=123456789
 ```
 
 3. При необходимости настройте тарифы в `.env`:
 
 ```env
-TARIFF_14_DAYS_STARS=100
-TARIFF_14_DAYS_RUB=150
-TARIFF_30_DAYS_STARS=200
-TARIFF_30_DAYS_RUB=300
-TARIFF_90_DAYS_STARS=500
-TARIFF_90_DAYS_RUB=800
-TARIFF_180_DAYS_STARS=900
-TARIFF_180_DAYS_RUB=1500
+TARIFF_14_DAYS_STARS=
+TARIFF_14_DAYS_RUB=
+TARIFF_30_DAYS_STARS=
+TARIFF_30_DAYS_RUB=
+TARIFF_90_DAYS_STARS=
+TARIFF_90_DAYS_RUB=
+TARIFF_180_DAYS_STARS=
+TARIFF_180_DAYS_RUB=
 ```
 
 4. Запустите контейнеры:
@@ -66,6 +69,16 @@ docker-compose restart
 docker-compose down
 ```
 
+## Админ-уведомления
+
+Укажите один или несколько Telegram ID через запятую:
+
+```env
+ADMIN_TELEGRAM_IDS=123456789,987654321
+```
+
+Админ должен один раз открыть бота в Telegram и нажать `/start`, иначе Telegram не разрешит боту отправить личное сообщение.
+
 ## `clients.json`
 
 Единый файл управления клиентами, скидками и дополнительными устройствами.
@@ -75,18 +88,18 @@ docker-compose down
   "version": 1,
   "clients": [
     {
-      "telegramId": 1033564912,
-      "username": "alex_n1konov",
+      "telegramId": ,
+      "username": "",
       "promo": 0,
       "peers": [
         {
           "role": "bot",
-          "clientId": "alex_n1konov",
+          "clientId": "",
           "publicKey": "botPeerPublicKey"
         },
         {
           "role": "manual",
-          "clientId": "iPhone",
+          "clientId": "",
           "publicKey": "manualPeerPublicKey",
           "jobId": "optional-created-by-bot"
         },

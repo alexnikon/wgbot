@@ -31,6 +31,21 @@ DOMAIN = os.getenv("DOMAIN")
 # Support
 SUPPORT_URL = os.getenv("SUPPORT_URL")
 
+# Admin notifications
+def get_admin_telegram_ids() -> list[int]:
+    """Parse admin Telegram IDs from ADMIN_TELEGRAM_IDS."""
+    raw_value = os.getenv("ADMIN_TELEGRAM_IDS", "")
+    result: list[int] = []
+    for raw_item in raw_value.split(","):
+        item = raw_item.strip()
+        if not item:
+            continue
+        try:
+            result.append(int(item))
+        except ValueError:
+            continue
+    return result
+
 # Tariff Configuration (env-driven with sensible defaults)
 def get_tariffs():
     """Load tariffs from environment variables (dynamically reloaded)."""
