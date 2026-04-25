@@ -32,8 +32,6 @@ DOMAIN=your-domain.com
 # Ссылки и файлы
 SUPPORT_URL=
 CLIENTS_JSON_PATH=clients.json
-CUSTOM_CLIENTS_PATH=custom_clients.txt
-PROMO_FILE_PATH=promo.txt
 ```
 
 3. При необходимости настройте тарифы в `.env`:
@@ -68,28 +66,39 @@ docker-compose restart
 docker-compose down
 ```
 
-## Дополнительные файлы
+## `clients.json`
 
-### `promo.txt`
+Единый файл управления клиентами, скидками и дополнительными устройствами.
 
-Персональные скидки/наценки.
-
-Пример:
-
-```txt
-123456789=20
+```json
+{
+  "version": 1,
+  "clients": [
+    {
+      "telegramId": 1033564912,
+      "username": "alex_n1konov",
+      "promo": 0,
+      "peers": [
+        {
+          "role": "bot",
+          "clientId": "alex_n1konov",
+          "publicKey": "botPeerPublicKey"
+        },
+        {
+          "role": "manual",
+          "clientId": "iPhone",
+          "publicKey": "manualPeerPublicKey",
+          "jobId": "optional-created-by-bot"
+        },
+        {
+          "role": "manual",
+          "clientId": "",
+          "publicKey": ""
+        }
+      ]
+    }
+  ]
+}
 ```
 
-### `custom_clients.txt`
-
-Ручная привязка дополнительных peer из WGDashboard к `telegram_id` пользователя.
-Используется для управления несколькими устройствами одного пользователя.
-
-Форматы строк:
-
-```txt
-123456789=peerPublicKey1,peerPublicKey2
-123456789:peerPublicKey3 peerPublicKey4
-```
-
-Пустые строки и строки с `#` игнорируются.
+`promo` указывается в процентах: `20` означает скидку 20%, `150` означает цену 150% от базовой. `role: "bot"` используется для peer, созданного ботом. `role: "manual"` используется для дополнительных peer из WGDashboard. Пустые `clientId` и `publicKey` у manual peer игнорируются.

@@ -80,17 +80,25 @@ class ClientsJsonManager:
     def __init__(self, file_path: str):
         self.file_path = file_path
 
-    def _read_clients(self) -> Any:
+    def _empty_registry(self) -> Dict[str, Any]:
+        return {"version": 1, "clients": []}
+
+    def _read_clients(self) -> Dict[str, Any]:
         if not os.path.exists(self.file_path):
-            return []
+            return self._empty_registry()
         try:
             with open(self.file_path, "r", encoding="utf-8") as file:
-                return json.load(file)
+                data = json.load(file)
+            if isinstance(data, dict) and isinstance(data.get("clients"), list):
+                data.setdefault("version", 1)
+                return data
+            logger.error("clients.json must use the unified object format")
+            return self._empty_registry()
         except (json.JSONDecodeError, IOError) as exc:
             logger.error(f"Error reading clients.json: {exc}")
-            return []
+            return self._empty_registry()
 
-    def _write_clients(self, clients: Any) -> bool:
+    def _write_clients(self, clients: Dict[str, Any]) -> bool:
         try:
             with open(self.file_path, "w", encoding="utf-8") as file:
                 json.dump(clients, file, indent=2, ensure_ascii=False)
@@ -98,9 +106,6 @@ class ClientsJsonManager:
         except IOError as exc:
             logger.error(f"Error writing clients.json: {exc}")
             return False
-
-    def _is_unified_format(self, data: Any) -> bool:
-        return isinstance(data, dict) and isinstance(data.get("clients"), list)
 
     def _base_client_id(self, client_id: str, username: str | None = None) -> str:
         return (username or client_id or "").strip()
@@ -195,107 +200,57 @@ class ClientsJsonManager:
             force_write: Force rewriting the file even when values match
         """
         data = self._read_clients()
-
-        if self._is_unified_format(data):
-            clients = data["clients"]
-            client = self._find_unified_client(
-                clients,
-                client_id=client_id,
-                telegram_user_id=telegram_user_id,
-                public_key=public_key,
-            )
-            if client is None:
-                clients.append(
-                    self._create_unified_client(
-                        client_id,
-                        public_key,
-                        telegram_user_id=telegram_user_id,
-                        username=username,
-                    )
+        clients = data["clients"]
+        client = self._find_unified_client(
+            clients,
+            client_id=client_id,
+            telegram_user_id=telegram_user_id,
+            public_key=public_key,
+        )
+        if client is None:
+            clients.append(
+                self._create_unified_client(
+                    client_id,
+                    public_key,
+                    telegram_user_id=telegram_user_id,
+                    username=username,
                 )
-                return self._write_clients(data)
-
-            self._ensure_unified_client_shape(client)
-            old_username = client.get("username")
-            old_telegram_id = client.get("telegramId")
-            old_client_id = client["peers"][0].get("clientId")
-            old_public_key = client["peers"][0].get("publicKey")
-
-            if telegram_user_id is not None:
-                client["telegramId"] = telegram_user_id
-            if username is not None:
-                client["username"] = username or ""
-
-            client["peers"][0]["role"] = "bot"
-            client["peers"][0]["clientId"] = self._base_client_id(client_id, username)
-            client["peers"][0]["publicKey"] = public_key
-
-            changed = (
-                old_username != client.get("username")
-                or old_telegram_id != client.get("telegramId")
-                or old_client_id != client["peers"][0].get("clientId")
-                or old_public_key != public_key
-                or force_write
             )
-            if changed:
-                return self._write_clients(data)
-            return True
+            return self._write_clients(data)
 
-        clients = data if isinstance(data, list) else []
+        self._ensure_unified_client_shape(client)
+        old_username = client.get("username")
+        old_telegram_id = client.get("telegramId")
+        old_client_id = client["peers"][0].get("clientId")
+        old_public_key = client["peers"][0].get("publicKey")
 
-        updated = False
-        found = False
-        for client in clients:
-            if not isinstance(client, dict):
-                continue
-            if client.get("clientId") == client_id:
-                found = True
-                old_public_key = client.get("publicKey")
-                client["publicKey"] = public_key
-                if old_public_key != public_key or force_write:
-                    updated = True
-                break
+        if telegram_user_id is not None:
+            client["telegramId"] = telegram_user_id
+        if username is not None:
+            client["username"] = username or ""
 
-        if not found:
-            clients.append({"clientId": client_id, "publicKey": public_key})
-            updated = True
+        client["peers"][0]["role"] = "bot"
+        client["peers"][0]["clientId"] = self._base_client_id(client_id, username)
+        client["peers"][0]["publicKey"] = public_key
 
-        if updated or force_write:
-            return self._write_clients(clients)
-        return True
-
-    def remove_client(self, client_id: str) -> bool:
-        """
-        Remove a client from the JSON file by client_id.
-        """
-        data = self._read_clients()
-
-        if self._is_unified_format(data):
-            # Unified records are keyed by telegramId and can contain manual peers.
-            # Keep the record intact to avoid losing manual bindings or promo data.
-            return True
-
-        clients = data if isinstance(data, list) else []
-        original_length = len(clients)
-        new_clients = [
-            client
-            for client in clients
-            if isinstance(client, dict) and client.get("clientId") != client_id
-        ]
-
-        if len(new_clients) < original_length:
-            return self._write_clients(new_clients)
-
+        changed = (
+            old_username != client.get("username")
+            or old_telegram_id != client.get("telegramId")
+            or old_client_id != client["peers"][0].get("clientId")
+            or old_public_key != public_key
+            or force_write
+        )
+        if changed:
+            return self._write_clients(data)
         return True
 
 
 class PromoManager:
-    def __init__(self, promo_file_path: str, clients_json_path: str | None = None):
-        self.promo_file_path = promo_file_path
+    def __init__(self, clients_json_path: str):
         self.clients_json_path = clients_json_path
 
-    def _get_unified_promo(self, user_id: int) -> Optional[int]:
-        if not self.clients_json_path or not os.path.exists(self.clients_json_path):
+    def _get_promo(self, user_id: int) -> Optional[int]:
+        if not os.path.exists(self.clients_json_path):
             return None
 
         try:
@@ -329,33 +284,7 @@ class PromoManager:
 
         If value <= 100, it is a discount percent (20 -> 0.8).
         If value > 100, it is a markup percent (150 -> 1.5).
-        Reads promo.txt on each call to support hot reload.
+        Reads clients.json on each call to support hot reload.
         """
-        unified_promo = self._get_unified_promo(user_id)
-        if unified_promo is not None:
-            return self._promo_to_factor(unified_promo)
-
-        if not os.path.exists(self.promo_file_path):
-            return 1.0
-
-        try:
-            with open(self.promo_file_path, "r", encoding="utf-8") as file:
-                for line in file:
-                    line = line.strip()
-                    if not line or "=" not in line:
-                        continue
-
-                    try:
-                        uid_str, val_str = line.split("=")
-                        uid = int(uid_str.strip())
-                        val = int(val_str.strip())
-
-                        if uid == user_id:
-                            return self._promo_to_factor(val)
-                    except ValueError:
-                        continue
-        except Exception:
-            # Fail open: ignore promo file errors and return the default multiplier.
-            pass
-
-        return 1.0
+        promo = self._get_promo(user_id)
+        return self._promo_to_factor(promo) if promo is not None else 1.0

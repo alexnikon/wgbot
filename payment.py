@@ -3,7 +3,7 @@ from typing import Optional, Dict, Any
 from aiogram import Bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
 from aiogram.exceptions import TelegramAPIError
-from config import get_tariffs, WEBHOOK_URL, DOMAIN, PROMO_FILE_PATH, CLIENTS_JSON_PATH
+from config import get_tariffs, WEBHOOK_URL, DOMAIN, CLIENTS_JSON_PATH
 from yookassa_client import YooKassaClient
 from database import Database
 from utils import PromoManager
@@ -24,7 +24,7 @@ class PaymentManager:
         self.db = db or Database()
         self.webhook_url = WEBHOOK_URL
         self.domain = DOMAIN
-        self.promo_manager = PromoManager(PROMO_FILE_PATH, CLIENTS_JSON_PATH)
+        self.promo_manager = PromoManager(CLIENTS_JSON_PATH)
     
     @property
     def tariffs(self):

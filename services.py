@@ -1,4 +1,4 @@
-from config import CLIENTS_JSON_PATH, CUSTOM_CLIENTS_PATH
+from config import CLIENTS_JSON_PATH
 from custom_clients import CustomClientsManager
 from database import Database
 from utils import ClientsJsonManager
@@ -10,7 +10,7 @@ db = Database()
 wg_api = WGDashboardAPI()
 yookassa_client = YooKassaClient()
 clients_manager = ClientsJsonManager(CLIENTS_JSON_PATH)
-custom_clients_manager = CustomClientsManager(CUSTOM_CLIENTS_PATH, CLIENTS_JSON_PATH)
+custom_clients_manager = CustomClientsManager(CLIENTS_JSON_PATH)
 
 
 async def close_shared_services() -> None:
