@@ -72,8 +72,9 @@ dp.callback_query.outer_middleware(OperationLoggingMiddleware())
 payment_manager = PaymentManager(bot, yookassa_client=yookassa_client, db=db)
 _last_start_sent_at: dict[int, float] = {}
 START_DEBOUNCE_SECONDS = 5.0
-_awaiting_broadcast_text: set[int] = set()
-_pending_broadcast_text: dict[int, str] = {}
+ADMIN_CLIENTS_PAGE_SIZE = 8
+_awaiting_admin_message: dict[int, dict[str, Any]] = {}
+_pending_admin_message: dict[int, dict[str, Any]] = {}
 
 
 def is_admin(user_id: int) -> bool:
@@ -84,6 +85,18 @@ def is_admin(user_id: int) -> bool:
 def get_broadcast_recipients() -> list[int]:
     """Return all unique client Telegram IDs for admin broadcasts."""
     return clients_manager.get_client_telegram_ids()
+
+
+def get_admin_client_options() -> list[dict[str, Any]]:
+    """Return clients available for admin direct messages."""
+    return clients_manager.get_admin_client_options()
+
+
+def format_admin_client_label(client: dict[str, Any]) -> str:
+    """Format a client button label for admin selection."""
+    username = client.get("username") or "без username"
+    username_label = f"@{username}" if username != "без username" else username
+    return f"{client['telegramId']} | {username_label}"
 
 
 def format_admin_payment_notification(
@@ -517,8 +530,81 @@ def create_back_to_menu_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def create_broadcast_confirm_keyboard() -> InlineKeyboardMarkup:
-    """Create the admin broadcast confirmation keyboard."""
+def create_admin_broadcast_menu_keyboard() -> InlineKeyboardMarkup:
+    """Create the admin broadcast menu keyboard."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📣 Рассылка всем",
+                    callback_data="admin_broadcast_all",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="👤 Сообщение клиенту",
+                    callback_data="admin_broadcast_client_menu",
+                )
+            ],
+            [InlineKeyboardButton(text="На главную", callback_data="main")],
+        ]
+    )
+
+
+def create_admin_clients_keyboard(page: int = 0) -> InlineKeyboardMarkup:
+    """Create a paginated client selection keyboard for admins."""
+    clients = get_admin_client_options()
+    total_pages = max(
+        1,
+        (len(clients) + ADMIN_CLIENTS_PAGE_SIZE - 1) // ADMIN_CLIENTS_PAGE_SIZE,
+    )
+    page = max(0, min(page, total_pages - 1))
+    start = page * ADMIN_CLIENTS_PAGE_SIZE
+    page_clients = clients[start : start + ADMIN_CLIENTS_PAGE_SIZE]
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for client in page_clients:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=format_admin_client_label(client),
+                    callback_data=f"admin_message_client_{client['telegramId']}",
+                )
+            ]
+        )
+
+    navigation_row: list[InlineKeyboardButton] = []
+    if page > 0:
+        navigation_row.append(
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=f"admin_clients_page_{page - 1}",
+            )
+        )
+    if page < total_pages - 1:
+        navigation_row.append(
+            InlineKeyboardButton(
+                text="Далее ➡️",
+                callback_data=f"admin_clients_page_{page + 1}",
+            )
+        )
+    if navigation_row:
+        rows.append(navigation_row)
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🔙 Назад",
+                callback_data="admin_broadcast",
+            )
+        ]
+    )
+    rows.append([InlineKeyboardButton(text="На главную", callback_data="main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def create_admin_message_confirm_keyboard() -> InlineKeyboardMarkup:
+    """Create the admin message confirmation keyboard."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -1032,38 +1118,40 @@ async def handle_main_callback(callback_query: types.CallbackQuery):
     )
 
 
-async def start_admin_broadcast(chat_id: int, admin_id: int) -> None:
-    """Ask an admin for broadcast text."""
+async def send_admin_broadcast_menu(chat_id: int, admin_id: int) -> None:
+    """Send the admin broadcast menu."""
     if not is_admin(admin_id):
-        logger.warning(f"Rejected broadcast start from non-admin user {admin_id}")
+        logger.warning(f"Rejected admin menu access from non-admin user {admin_id}")
         await bot.send_message(chat_id, "❌ Недостаточно прав.")
         return
 
-    _awaiting_broadcast_text.add(admin_id)
-    _pending_broadcast_text.pop(admin_id, None)
-    recipient_count = len(get_broadcast_recipients())
     await bot.send_message(
         chat_id,
-        "📣 Рассылка\n\n"
-        f"Получателей: {recipient_count}\n\n"
-        "Отправь текст сообщения для рассылки.\n"
-        "Для отмены используй /cancel.",
+        "📣 Админ-рассылка\n\nВыбери действие:",
+        reply_markup=create_admin_broadcast_menu_keyboard(),
     )
 
 
 @dp.message(Command("admin_broadcast"))
 async def cmd_admin_broadcast(message: types.Message):
-    """Start the admin broadcast flow from a command."""
-    await start_admin_broadcast(message.chat.id, message.from_user.id)
+    """Show the admin broadcast menu from a command."""
+    await send_admin_broadcast_menu(message.chat.id, message.from_user.id)
 
 
 @dp.callback_query(F.data == "admin_broadcast")
 async def handle_admin_broadcast_callback(callback_query: types.CallbackQuery):
-    """Start the admin broadcast flow from the main menu."""
+    """Show the admin broadcast menu from the main menu."""
     await safe_answer_callback(callback_query)
-    await start_admin_broadcast(
-        callback_query.message.chat.id,
-        callback_query.from_user.id,
+    admin_id = callback_query.from_user.id
+    if not is_admin(admin_id):
+        logger.warning(f"Rejected admin menu access from non-admin user {admin_id}")
+        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
+        return
+
+    await show_menu_from_callback(
+        callback_query,
+        "📣 Админ-рассылка\n\nВыбери действие:",
+        create_admin_broadcast_menu_keyboard(),
     )
 
 
@@ -1071,9 +1159,9 @@ async def handle_admin_broadcast_callback(callback_query: types.CallbackQuery):
 async def cmd_cancel(message: types.Message):
     """Cancel the current admin action."""
     user_id = message.from_user.id
-    if user_id in _awaiting_broadcast_text or user_id in _pending_broadcast_text:
-        _awaiting_broadcast_text.discard(user_id)
-        _pending_broadcast_text.pop(user_id, None)
+    if user_id in _awaiting_admin_message or user_id in _pending_admin_message:
+        _awaiting_admin_message.pop(user_id, None)
+        _pending_admin_message.pop(user_id, None)
         await message.answer(
             "Рассылка отменена.",
             reply_markup=create_main_menu_keyboard(user_id),
@@ -1083,54 +1171,229 @@ async def cmd_cancel(message: types.Message):
     await message.answer("Нет активного действия для отмены.")
 
 
-@dp.message(
-    lambda message: message.from_user
-    and message.from_user.id in _awaiting_broadcast_text
-)
-async def handle_admin_broadcast_text(message: types.Message):
-    """Save admin broadcast text and show a confirmation preview."""
-    admin_id = message.from_user.id
+async def start_admin_message_capture(
+    chat_id: int,
+    admin_id: int,
+    mode: str,
+    recipient_id: int | None = None,
+    recipient_label: str | None = None,
+) -> None:
+    """Ask an admin to send the message that should be copied."""
     if not is_admin(admin_id):
-        _awaiting_broadcast_text.discard(admin_id)
+        logger.warning(
+            f"Rejected admin message capture from non-admin user {admin_id}"
+        )
+        await bot.send_message(chat_id, "❌ Недостаточно прав.")
         return
 
-    text = (message.text or "").strip()
-    if not text:
-        await message.answer(
-            "Можно отправлять только текстовое сообщение.\n"
-            "Отправь текст или используй /cancel."
+    _awaiting_admin_message[admin_id] = {
+        "mode": mode,
+        "recipient_id": recipient_id,
+        "recipient_label": recipient_label,
+    }
+    _pending_admin_message.pop(admin_id, None)
+
+    if mode == "all":
+        recipient_text = f"Получателей: {len(get_broadcast_recipients())}"
+    else:
+        recipient_text = f"Получатель: {recipient_label or recipient_id}"
+
+    await bot.send_message(
+        chat_id,
+        "Отправь сообщение для пересылки клиентам.\n\n"
+        f"{recipient_text}\n\n"
+        "Можно отправить текст, фото, видео или файл с подписью.\n"
+        "Для отмены используй /cancel.",
+    )
+
+
+@dp.callback_query(F.data == "admin_broadcast_all")
+async def handle_admin_broadcast_all_callback(callback_query: types.CallbackQuery):
+    """Start broadcast-to-all message capture."""
+    await safe_answer_callback(callback_query)
+    admin_id = callback_query.from_user.id
+    if not is_admin(admin_id):
+        logger.warning(f"Rejected broadcast-all access from non-admin user {admin_id}")
+        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
+        return
+
+    await start_admin_message_capture(
+        callback_query.message.chat.id,
+        admin_id,
+        mode="all",
+    )
+
+
+@dp.callback_query(F.data == "admin_broadcast_client_menu")
+async def handle_admin_broadcast_client_menu(callback_query: types.CallbackQuery):
+    """Show clients for a direct admin message."""
+    await safe_answer_callback(callback_query)
+    admin_id = callback_query.from_user.id
+    if not is_admin(admin_id):
+        logger.warning(f"Rejected client selection from non-admin user {admin_id}")
+        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
+        return
+
+    clients = get_admin_client_options()
+    if not clients:
+        await show_menu_from_callback(
+            callback_query,
+            "В clients.json нет клиентов с telegramId.",
+            create_admin_broadcast_menu_keyboard(),
         )
         return
 
-    _awaiting_broadcast_text.discard(admin_id)
-    _pending_broadcast_text[admin_id] = text
-    recipient_count = len(get_broadcast_recipients())
+    await show_menu_from_callback(
+        callback_query,
+        "👤 Выбери клиента для отправки сообщения:",
+        create_admin_clients_keyboard(0),
+    )
+
+
+@dp.callback_query(F.data.startswith("admin_clients_page_"))
+async def handle_admin_clients_page(callback_query: types.CallbackQuery):
+    """Show a requested clients page for admin direct messages."""
+    await safe_answer_callback(callback_query)
+    admin_id = callback_query.from_user.id
+    if not is_admin(admin_id):
+        logger.warning(f"Rejected client page access from non-admin user {admin_id}")
+        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
+        return
+
+    try:
+        page = int(callback_query.data.replace("admin_clients_page_", ""))
+    except ValueError:
+        page = 0
+
+    await show_menu_from_callback(
+        callback_query,
+        "👤 Выбери клиента для отправки сообщения:",
+        create_admin_clients_keyboard(page),
+    )
+
+
+@dp.callback_query(F.data.startswith("admin_message_client_"))
+async def handle_admin_message_client(callback_query: types.CallbackQuery):
+    """Start direct message capture for a selected client."""
+    await safe_answer_callback(callback_query)
+    admin_id = callback_query.from_user.id
+    if not is_admin(admin_id):
+        logger.warning(
+            f"Rejected direct message access from non-admin user {admin_id}"
+        )
+        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
+        return
+
+    try:
+        recipient_id = int(callback_query.data.replace("admin_message_client_", ""))
+    except ValueError:
+        await safe_answer_callback(callback_query, "❌ Некорректный Telegram ID")
+        return
+
+    recipient_label = str(recipient_id)
+    for client in get_admin_client_options():
+        if client["telegramId"] == recipient_id:
+            recipient_label = format_admin_client_label(client)
+            break
+
+    await start_admin_message_capture(
+        callback_query.message.chat.id,
+        admin_id,
+        mode="client",
+        recipient_id=recipient_id,
+        recipient_label=recipient_label,
+    )
+
+
+def is_supported_admin_message(message: types.Message) -> bool:
+    """Check if the message can be copied to users."""
+    return any(
+        [
+            message.text,
+            message.photo,
+            message.document,
+            message.video,
+            message.animation,
+            message.audio,
+            message.voice,
+            message.video_note,
+        ]
+    )
+
+
+@dp.message(
+    lambda message: message.from_user
+    and message.from_user.id in _awaiting_admin_message
+)
+async def handle_admin_message_content(message: types.Message):
+    """Save a message reference for admin broadcast/direct sending."""
+    admin_id = message.from_user.id
+    flow = _awaiting_admin_message.get(admin_id)
+    if not flow or not is_admin(admin_id):
+        _awaiting_admin_message.pop(admin_id, None)
+        return
+
+    if not is_supported_admin_message(message):
+        await message.answer(
+            "Этот тип сообщения не поддерживается.\n"
+            "Отправь текст, фото, видео или файл с подписью, либо используй /cancel."
+        )
+        return
+
+    _awaiting_admin_message.pop(admin_id, None)
+    pending = {
+        **flow,
+        "source_chat_id": message.chat.id,
+        "source_message_id": message.message_id,
+    }
+    _pending_admin_message[admin_id] = pending
+
+    if flow["mode"] == "all":
+        target_text = f"Получателей: {len(get_broadcast_recipients())}"
+    else:
+        target_text = (
+            f"Получатель: {flow.get('recipient_label') or flow.get('recipient_id')}"
+        )
+
+    await message.answer("Предпросмотр сообщения:")
+    try:
+        await bot.copy_message(
+            chat_id=message.chat.id,
+            from_chat_id=message.chat.id,
+            message_id=message.message_id,
+        )
+    except TelegramAPIError as e:
+        _pending_admin_message.pop(admin_id, None)
+        logger.warning(f"Failed to create admin message preview: {e}")
+        await message.answer(
+            "Не удалось подготовить предпросмотр этого сообщения.\n"
+            "Попробуй отправить текст, фото, видео или файл ещё раз."
+        )
+        _awaiting_admin_message[admin_id] = flow
+        return
     await message.answer(
-        "Предпросмотр рассылки:\n\n"
-        f"{text}\n\n"
-        f"Получателей: {recipient_count}\n\n"
-        "Отправить сообщение всем клиентам?",
-        reply_markup=create_broadcast_confirm_keyboard(),
+        f"{target_text}\n\nОтправить сообщение?",
+        reply_markup=create_admin_message_confirm_keyboard(),
     )
 
 
 @dp.callback_query(F.data == "admin_broadcast_cancel")
 async def handle_admin_broadcast_cancel(callback_query: types.CallbackQuery):
-    """Cancel a pending admin broadcast."""
+    """Cancel a pending admin message."""
     await safe_answer_callback(callback_query)
     admin_id = callback_query.from_user.id
-    _awaiting_broadcast_text.discard(admin_id)
-    _pending_broadcast_text.pop(admin_id, None)
+    _awaiting_admin_message.pop(admin_id, None)
+    _pending_admin_message.pop(admin_id, None)
     await show_menu_from_callback(
         callback_query,
         "Рассылка отменена.",
-        create_main_menu_keyboard(admin_id),
+        create_admin_broadcast_menu_keyboard(),
     )
 
 
 @dp.callback_query(F.data == "admin_broadcast_confirm")
 async def handle_admin_broadcast_confirm(callback_query: types.CallbackQuery):
-    """Send the pending broadcast to all known clients."""
+    """Copy the pending admin message to selected recipients."""
     admin_id = callback_query.from_user.id
     if not is_admin(admin_id):
         logger.warning(f"Rejected broadcast confirm from non-admin user {admin_id}")
@@ -1138,23 +1401,31 @@ async def handle_admin_broadcast_confirm(callback_query: types.CallbackQuery):
         return
     await safe_answer_callback(callback_query)
 
-    text = _pending_broadcast_text.pop(admin_id, None)
-    _awaiting_broadcast_text.discard(admin_id)
-    if not text:
+    pending = _pending_admin_message.pop(admin_id, None)
+    _awaiting_admin_message.pop(admin_id, None)
+    if not pending:
         await show_menu_from_callback(
             callback_query,
-            "Нет подготовленного текста рассылки.",
+            "Нет подготовленного сообщения.",
             create_main_menu_keyboard(admin_id),
         )
         return
 
-    recipients = get_broadcast_recipients()
+    if pending["mode"] == "all":
+        recipients = get_broadcast_recipients()
+        target_description = f"Получателей: {len(recipients)}"
+    else:
+        recipients = [pending["recipient_id"]]
+        target_description = (
+            f"Получатель: {pending.get('recipient_label') or pending['recipient_id']}"
+        )
+
     logger.info(
-        f"Starting admin broadcast: admin_id={admin_id}, recipients={len(recipients)}"
+        f"Starting admin message send: admin_id={admin_id}, mode={pending['mode']}, recipients={len(recipients)}"
     )
     await show_menu_from_callback(
         callback_query,
-        f"📣 Рассылка запущена.\nПолучателей: {len(recipients)}",
+        f"📣 Отправка запущена.\n{target_description}",
         create_main_menu_keyboard(admin_id),
     )
 
@@ -1162,26 +1433,30 @@ async def handle_admin_broadcast_confirm(callback_query: types.CallbackQuery):
     failed_count = 0
     for recipient_id in recipients:
         try:
-            await bot.send_message(recipient_id, text)
+            await bot.copy_message(
+                chat_id=recipient_id,
+                from_chat_id=pending["source_chat_id"],
+                message_id=pending["source_message_id"],
+            )
             sent_count += 1
         except TelegramAPIError as e:
             failed_count += 1
             logger.warning(
-                f"Failed to send broadcast to user {recipient_id}: {e}"
+                f"Failed to copy admin message to user {recipient_id}: {e}"
             )
         except Exception as e:
             failed_count += 1
             logger.warning(
-                f"Unexpected broadcast error for user {recipient_id}: {e}"
+                f"Unexpected admin message error for user {recipient_id}: {e}"
             )
         await asyncio.sleep(0.07)
 
     logger.info(
-        f"Admin broadcast completed: admin_id={admin_id}, sent={sent_count}, failed={failed_count}"
+        f"Admin message send completed: admin_id={admin_id}, sent={sent_count}, failed={failed_count}"
     )
     await bot.send_message(
         admin_id,
-        "📣 Рассылка завершена.\n\n"
+        "📣 Отправка завершена.\n\n"
         f"Отправлено: {sent_count}\n"
         f"Не доставлено: {failed_count}",
         reply_markup=create_main_menu_keyboard(admin_id),

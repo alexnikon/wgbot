@@ -268,6 +268,42 @@ class ClientsJsonManager:
 
         return result
 
+    def get_admin_client_options(self) -> List[Dict[str, Any]]:
+        """Return unique clients for admin UI selection."""
+        data = self._read_clients()
+        result: List[Dict[str, Any]] = []
+        seen: set[int] = set()
+
+        for client in data["clients"]:
+            if not isinstance(client, dict):
+                continue
+
+            telegram_id = client.get("telegramId")
+            try:
+                normalized_id = int(telegram_id)
+            except (TypeError, ValueError):
+                continue
+
+            if normalized_id in seen:
+                continue
+
+            seen.add(normalized_id)
+            username = str(client.get("username") or "").strip()
+            result.append(
+                {
+                    "telegramId": normalized_id,
+                    "username": username,
+                }
+            )
+
+        return sorted(
+            result,
+            key=lambda item: (
+                (item.get("username") or "").lower(),
+                item.get("telegramId") or 0,
+            ),
+        )
+
 
 class PromoManager:
     def __init__(self, clients_json_path: str):
