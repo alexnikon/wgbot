@@ -244,6 +244,30 @@ class ClientsJsonManager:
             return self._write_clients(data)
         return True
 
+    def get_client_telegram_ids(self) -> List[int]:
+        """Return unique Telegram IDs from the unified clients registry."""
+        data = self._read_clients()
+        result: List[int] = []
+        seen: set[int] = set()
+
+        for client in data["clients"]:
+            if not isinstance(client, dict):
+                continue
+
+            telegram_id = client.get("telegramId")
+            try:
+                normalized_id = int(telegram_id)
+            except (TypeError, ValueError):
+                continue
+
+            if normalized_id in seen:
+                continue
+
+            seen.add(normalized_id)
+            result.append(normalized_id)
+
+        return result
+
 
 class PromoManager:
     def __init__(self, clients_json_path: str):

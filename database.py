@@ -614,6 +614,36 @@ class Database:
             """)
             return [dict(row) for row in cursor.fetchall()]
 
+    def sync_expired_access_statuses(self) -> int:
+        """Mark expired paid peers as expired while keeping their records active."""
+        try:
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            with self._connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    UPDATE peers
+                    SET payment_status = 'expired'
+                    WHERE is_active = 1
+                    AND payment_status = 'paid'
+                    AND expire_date IS NOT NULL
+                    AND expire_date < ?
+                """,
+                    (current_time,),
+                )
+                conn.commit()
+                updated_count = cursor.rowcount
+
+            if updated_count:
+                logger.info(
+                    f"Marked {updated_count} expired peer records with payment_status=expired"
+                )
+            return updated_count
+
+        except Exception as e:
+            logger.error(f"Failed to sync expired access statuses: {e}")
+            return 0
+
     def update_peer_info(
         self,
         peer_name: str,

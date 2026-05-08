@@ -72,6 +72,18 @@ dp.callback_query.outer_middleware(OperationLoggingMiddleware())
 payment_manager = PaymentManager(bot, yookassa_client=yookassa_client, db=db)
 _last_start_sent_at: dict[int, float] = {}
 START_DEBOUNCE_SECONDS = 5.0
+_awaiting_broadcast_text: set[int] = set()
+_pending_broadcast_text: dict[int, str] = {}
+
+
+def is_admin(user_id: int) -> bool:
+    """Check whether a Telegram user is configured as an admin."""
+    return user_id in get_admin_telegram_ids()
+
+
+def get_broadcast_recipients() -> list[int]:
+    """Return all unique client Telegram IDs for admin broadcasts."""
+    return clients_manager.get_client_telegram_ids()
 
 
 def format_admin_payment_notification(
@@ -442,7 +454,6 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     # IMPORTANT: always fetch fresh data from the DB when building the keyboard
     existing_peer = db.get_peer_by_telegram_id(user_id)
     has_active_access = is_access_active(existing_peer)
-    has_paid_access = bool(existing_peer and existing_peer.get("payment_status") == "paid")
 
     # Debug logging
     if existing_peer:
@@ -478,6 +489,10 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
             ],
         ]
     )
+    if is_admin(user_id):
+        inline_keyboard.append(
+            [InlineKeyboardButton(text="📣 Рассылка", callback_data="admin_broadcast")]
+        )
     keyboard = InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
     return keyboard
 
@@ -498,6 +513,23 @@ def create_back_to_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🔙 Вернуться в меню", callback_data="main")]
+        ]
+    )
+
+
+def create_broadcast_confirm_keyboard() -> InlineKeyboardMarkup:
+    """Create the admin broadcast confirmation keyboard."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Отправить", callback_data="admin_broadcast_confirm"
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отмена", callback_data="admin_broadcast_cancel"
+                ),
+            ],
+            [InlineKeyboardButton(text="На главную", callback_data="main")],
         ]
     )
 
@@ -997,6 +1029,162 @@ async def handle_main_callback(callback_query: types.CallbackQuery):
         callback_query,
         welcome_text,
         create_main_menu_keyboard(user_id),
+    )
+
+
+async def start_admin_broadcast(chat_id: int, admin_id: int) -> None:
+    """Ask an admin for broadcast text."""
+    if not is_admin(admin_id):
+        logger.warning(f"Rejected broadcast start from non-admin user {admin_id}")
+        await bot.send_message(chat_id, "❌ Недостаточно прав.")
+        return
+
+    _awaiting_broadcast_text.add(admin_id)
+    _pending_broadcast_text.pop(admin_id, None)
+    recipient_count = len(get_broadcast_recipients())
+    await bot.send_message(
+        chat_id,
+        "📣 Рассылка\n\n"
+        f"Получателей: {recipient_count}\n\n"
+        "Отправь текст сообщения для рассылки.\n"
+        "Для отмены используй /cancel.",
+    )
+
+
+@dp.message(Command("admin_broadcast"))
+async def cmd_admin_broadcast(message: types.Message):
+    """Start the admin broadcast flow from a command."""
+    await start_admin_broadcast(message.chat.id, message.from_user.id)
+
+
+@dp.callback_query(F.data == "admin_broadcast")
+async def handle_admin_broadcast_callback(callback_query: types.CallbackQuery):
+    """Start the admin broadcast flow from the main menu."""
+    await safe_answer_callback(callback_query)
+    await start_admin_broadcast(
+        callback_query.message.chat.id,
+        callback_query.from_user.id,
+    )
+
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: types.Message):
+    """Cancel the current admin action."""
+    user_id = message.from_user.id
+    if user_id in _awaiting_broadcast_text or user_id in _pending_broadcast_text:
+        _awaiting_broadcast_text.discard(user_id)
+        _pending_broadcast_text.pop(user_id, None)
+        await message.answer(
+            "Рассылка отменена.",
+            reply_markup=create_main_menu_keyboard(user_id),
+        )
+        return
+
+    await message.answer("Нет активного действия для отмены.")
+
+
+@dp.message(
+    lambda message: message.from_user
+    and message.from_user.id in _awaiting_broadcast_text
+)
+async def handle_admin_broadcast_text(message: types.Message):
+    """Save admin broadcast text and show a confirmation preview."""
+    admin_id = message.from_user.id
+    if not is_admin(admin_id):
+        _awaiting_broadcast_text.discard(admin_id)
+        return
+
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer(
+            "Можно отправлять только текстовое сообщение.\n"
+            "Отправь текст или используй /cancel."
+        )
+        return
+
+    _awaiting_broadcast_text.discard(admin_id)
+    _pending_broadcast_text[admin_id] = text
+    recipient_count = len(get_broadcast_recipients())
+    await message.answer(
+        "Предпросмотр рассылки:\n\n"
+        f"{text}\n\n"
+        f"Получателей: {recipient_count}\n\n"
+        "Отправить сообщение всем клиентам?",
+        reply_markup=create_broadcast_confirm_keyboard(),
+    )
+
+
+@dp.callback_query(F.data == "admin_broadcast_cancel")
+async def handle_admin_broadcast_cancel(callback_query: types.CallbackQuery):
+    """Cancel a pending admin broadcast."""
+    await safe_answer_callback(callback_query)
+    admin_id = callback_query.from_user.id
+    _awaiting_broadcast_text.discard(admin_id)
+    _pending_broadcast_text.pop(admin_id, None)
+    await show_menu_from_callback(
+        callback_query,
+        "Рассылка отменена.",
+        create_main_menu_keyboard(admin_id),
+    )
+
+
+@dp.callback_query(F.data == "admin_broadcast_confirm")
+async def handle_admin_broadcast_confirm(callback_query: types.CallbackQuery):
+    """Send the pending broadcast to all known clients."""
+    admin_id = callback_query.from_user.id
+    if not is_admin(admin_id):
+        logger.warning(f"Rejected broadcast confirm from non-admin user {admin_id}")
+        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
+        return
+    await safe_answer_callback(callback_query)
+
+    text = _pending_broadcast_text.pop(admin_id, None)
+    _awaiting_broadcast_text.discard(admin_id)
+    if not text:
+        await show_menu_from_callback(
+            callback_query,
+            "Нет подготовленного текста рассылки.",
+            create_main_menu_keyboard(admin_id),
+        )
+        return
+
+    recipients = get_broadcast_recipients()
+    logger.info(
+        f"Starting admin broadcast: admin_id={admin_id}, recipients={len(recipients)}"
+    )
+    await show_menu_from_callback(
+        callback_query,
+        f"📣 Рассылка запущена.\nПолучателей: {len(recipients)}",
+        create_main_menu_keyboard(admin_id),
+    )
+
+    sent_count = 0
+    failed_count = 0
+    for recipient_id in recipients:
+        try:
+            await bot.send_message(recipient_id, text)
+            sent_count += 1
+        except TelegramAPIError as e:
+            failed_count += 1
+            logger.warning(
+                f"Failed to send broadcast to user {recipient_id}: {e}"
+            )
+        except Exception as e:
+            failed_count += 1
+            logger.warning(
+                f"Unexpected broadcast error for user {recipient_id}: {e}"
+            )
+        await asyncio.sleep(0.07)
+
+    logger.info(
+        f"Admin broadcast completed: admin_id={admin_id}, sent={sent_count}, failed={failed_count}"
+    )
+    await bot.send_message(
+        admin_id,
+        "📣 Рассылка завершена.\n\n"
+        f"Отправлено: {sent_count}\n"
+        f"Не доставлено: {failed_count}",
+        reply_markup=create_main_menu_keyboard(admin_id),
     )
 
 
@@ -1799,17 +1987,25 @@ async def process_successful_payment(message: types.Message):
 
 
 # Unknown command handler
-@dp.message(~Command(commands=["start", "buy", "connect", "extend", "status"]))
+@dp.message(
+    ~Command(
+        commands=[
+            "start",
+            "buy",
+            "connect",
+            "extend",
+            "status",
+            "admin_broadcast",
+            "cancel",
+        ]
+    )
+)
 async def handle_unknown(message: types.Message):
     """Handle unknown messages."""
     user_id = message.from_user.id
     message_text = (message.text or "").strip().lower()
     if message_text == "start":
         return
-
-    # Check if the user has paid access
-    existing_peer = db.get_peer_by_telegram_id(user_id)
-    has_paid_access = existing_peer and existing_peer.get("payment_status") == "paid"
 
     # Show the main menu for unknown commands
     await message.answer(
@@ -1823,6 +2019,8 @@ async def check_expired_peers():
     """Check expired peers and notify users."""
     while True:
         try:
+            db.sync_expired_access_statuses()
+
             # Check expired peers
             expired_peers = db.get_expired_peers()
 
@@ -1912,6 +2110,8 @@ async def check_expired_peers():
 async def main():
     """Main bot entry point."""
     try:
+        db.sync_expired_access_statuses()
+
         # Start background checks for expired peers and notifications
         asyncio.create_task(check_expired_peers())
 
