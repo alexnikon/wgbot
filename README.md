@@ -44,20 +44,6 @@ TARIFF_180_DAYS_STARS=
 TARIFF_180_DAYS_RUB=
 ```
 
-Start the stack:
-
-```bash
-docker compose up -d --build
-```
-
-Useful commands:
-
-```bash
-docker compose logs -f wgbot
-docker compose restart wgbot
-docker compose down
-```
-
 ## clients.json
 
 `clients.json` is the editable registry for clients, discounts, and additional WGDashboard peers.
@@ -116,49 +102,3 @@ Admin features:
 - payment notifications;
 - broadcast to all clients;
 - direct message to a selected client.
-
-## CI/CD
-
-GitHub Actions workflows:
-
-- `CI`: validates Python files, Docker build, and Docker Compose config.
-- `Deploy`: runs manually or automatically after successful `CI` on `main`.
-- `Rollback`: manually deploys a selected GHCR image tag.
-
-Required GitHub repository secret:
-
-```text
-VPS_SSH_KEY
-```
-
-Required GitHub repository variables:
-
-```text
-VPS_HOST
-VPS_USER
-VPS_PORT
-DEPLOY_PATH
-```
-
-Deployment uses images from GitHub Container Registry:
-
-```text
-ghcr.io/alexnikon/wgbot:<commit-sha>
-```
-
-Rollback: GitHub Actions -> `Rollback` -> `Run workflow` -> enter the image tag.
-
-To skip CI/CD for documentation-only commits, include one of these markers in the commit message:
-
-```text
-[skip ci]
-[ci skip]
-```
-
-Example:
-
-```bash
-git commit -m "Update README [skip ci]"
-```
-
-GitHub will skip the `CI` workflow, and because deploy runs only after successful `CI`, deploy will not start either.
