@@ -36,3 +36,9 @@ jobs:
 
       - name: Build Docker image
         run: docker build -t wgbot:ci .
+
+      - name: Validate Docker Compose configuration
+        run: |
+          touch .env clients.json
+          mkdir -p DB logs ssl
+          docker compose config --quiet

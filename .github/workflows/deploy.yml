@@ -91,4 +91,15 @@ jobs:
           curl -fsS http://localhost:8001/health
           WGBOT_IMAGE="$IMAGE" docker compose ps wgbot
           WGBOT_IMAGE="$IMAGE" docker compose logs --tail=100 wgbot
+          docker image prune -f --filter "until=168h"
           REMOTE
+
+      - name: Deployment summary
+        run: |
+          {
+            echo "## Deployment completed"
+            echo ""
+            echo "- Image: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}\`"
+            echo "- Server: \`${{ secrets.VPS_HOST }}\`"
+            echo "- Path: \`${{ secrets.DEPLOY_PATH }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
