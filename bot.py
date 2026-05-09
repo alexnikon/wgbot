@@ -100,6 +100,17 @@ def format_admin_client_label(client: dict[str, Any]) -> str:
     return f"{client['telegramId']} | {username_label}"
 
 
+def build_admin_recipient_short_labels(user_ids: list[int]) -> dict[int, str]:
+    """Build compact recipient labels for admin send reports."""
+    labels = {user_id: str(user_id) for user_id in user_ids}
+    for client in get_admin_client_options():
+        telegram_id = client["telegramId"]
+        username = client.get("username") or ""
+        if telegram_id in labels and username:
+            labels[telegram_id] = f"@{username}"
+    return labels
+
+
 def format_admin_payment_notification(
     title: str,
     user_id: int,
@@ -1390,6 +1401,14 @@ def is_supported_admin_message(message: types.Message) -> bool:
     )
 
 
+def get_admin_message_text(message: types.Message) -> str:
+    """Return a short text representation for an admin message."""
+    text = (message.text or message.caption or "").strip()
+    if text:
+        return text
+    return "[медиа/файл без текста]"
+
+
 @dp.message(
     lambda message: message.from_user
     and message.from_user.id in _awaiting_admin_message
@@ -1421,6 +1440,7 @@ async def handle_admin_message_content(message: types.Message):
         **flow,
         "source_chat_id": message.chat.id,
         "source_message_id": message.message_id,
+        "source_text": get_admin_message_text(message),
     }
     _pending_admin_message[admin_id] = pending
 
@@ -1456,6 +1476,14 @@ async def handle_admin_broadcast_cancel(callback_query: types.CallbackQuery):
     flow = _pending_admin_message.pop(admin_id, None)
     if flow is None:
         flow = _awaiting_admin_message.pop(admin_id, None)
+    elif flow.get("source_chat_id") and flow.get("source_message_id"):
+        try:
+            await bot.delete_message(
+                chat_id=flow["source_chat_id"],
+                message_id=flow["source_message_id"],
+            )
+        except TelegramAPIError as e:
+            logger.warning(f"Failed to delete canceled admin source message: {e}")
     await show_admin_previous_step(callback_query, flow)
 
 
@@ -1472,6 +1500,14 @@ async def handle_admin_message_capture_cancel(callback_query: types.CallbackQuer
     flow = _awaiting_admin_message.pop(admin_id, None)
     if flow is None:
         flow = _pending_admin_message.pop(admin_id, None)
+        if flow and flow.get("source_chat_id") and flow.get("source_message_id"):
+            try:
+                await bot.delete_message(
+                    chat_id=flow["source_chat_id"],
+                    message_id=flow["source_message_id"],
+                )
+            except TelegramAPIError as e:
+                logger.warning(f"Failed to delete canceled admin source message: {e}")
     await show_admin_previous_step(callback_query, flow)
 
 
@@ -1515,6 +1551,7 @@ async def handle_admin_broadcast_confirm(callback_query: types.CallbackQuery):
 
     sent_count = 0
     failed_count = 0
+    sent_recipients: list[int] = []
     for recipient_id in recipients:
         try:
             await bot.copy_message(
@@ -1523,6 +1560,7 @@ async def handle_admin_broadcast_confirm(callback_query: types.CallbackQuery):
                 message_id=pending["source_message_id"],
             )
             sent_count += 1
+            sent_recipients.append(recipient_id)
         except TelegramAPIError as e:
             failed_count += 1
             logger.warning(
@@ -1535,14 +1573,48 @@ async def handle_admin_broadcast_confirm(callback_query: types.CallbackQuery):
             )
         await asyncio.sleep(0.07)
 
+    try:
+        await bot.delete_message(
+            chat_id=pending["source_chat_id"],
+            message_id=pending["source_message_id"],
+        )
+    except TelegramAPIError as e:
+        logger.warning(f"Failed to delete admin source message after send: {e}")
+    except Exception as e:
+        logger.warning(f"Unexpected admin source message delete error: {e}")
+
     logger.info(
         f"Admin message send completed: admin_id={admin_id}, sent={sent_count}, failed={failed_count}"
     )
+    message_text = pending.get("source_text") or "[медиа/файл без текста]"
+    if pending["mode"] == "all":
+        recipient_labels = build_admin_recipient_short_labels(sent_recipients)
+        delivered_labels = [
+            recipient_labels[recipient_id]
+            for recipient_id in sent_recipients
+            if recipient_id in recipient_labels
+        ]
+        displayed_labels = delivered_labels[:30]
+        recipients_text = "\n".join(displayed_labels)
+        remaining_count = max(0, len(delivered_labels) - len(displayed_labels))
+        if remaining_count:
+            recipients_text += f"\nи ещё {remaining_count}"
+        result_text = (
+            "📣 Рассылка завершена.\n\n"
+            f"Отправлено: {sent_count}\n"
+            f"Не доставлено: {failed_count}"
+        )
+        if recipients_text:
+            result_text += f"\n\nПолучатели:\n{recipients_text}"
+    else:
+        recipient_label = build_admin_recipient_short_labels([pending["recipient_id"]])[
+            pending["recipient_id"]
+        ]
+        result_text = f"📣 Отправка {recipient_label} завершена.\n\n{message_text}"
+
     await show_menu_from_callback(
         callback_query,
-        "📣 Отправка завершена.\n\n"
-        f"Отправлено: {sent_count}\n"
-        f"Не доставлено: {failed_count}",
+        result_text,
         create_main_menu_keyboard(admin_id),
     )
 
