@@ -5,8 +5,9 @@ x-logging: &default-logging
     max-file: "3"
 
 x-app-base: &app-base
-  image: wgbot:local
-  build: .
+  image: ${WGBOT_IMAGE:-wgbot:local}
+  build:
+    context: .
   restart: unless-stopped
   init: true
   env_file:
