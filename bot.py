@@ -1538,12 +1538,12 @@ async def handle_admin_broadcast_confirm(callback_query: types.CallbackQuery):
     logger.info(
         f"Admin message send completed: admin_id={admin_id}, sent={sent_count}, failed={failed_count}"
     )
-    await bot.send_message(
-        admin_id,
+    await show_menu_from_callback(
+        callback_query,
         "📣 Отправка завершена.\n\n"
         f"Отправлено: {sent_count}\n"
         f"Не доставлено: {failed_count}",
-        reply_markup=create_main_menu_keyboard(admin_id),
+        create_main_menu_keyboard(admin_id),
     )
 
 
