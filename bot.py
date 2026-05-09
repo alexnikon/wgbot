@@ -75,6 +75,7 @@ START_DEBOUNCE_SECONDS = 5.0
 ADMIN_CLIENTS_PAGE_SIZE = 8
 _awaiting_admin_message: dict[int, dict[str, Any]] = {}
 _pending_admin_message: dict[int, dict[str, Any]] = {}
+_admin_client_selection_pages: dict[int, int] = {}
 
 
 def is_admin(user_id: int) -> bool:
@@ -615,7 +616,20 @@ def create_admin_message_confirm_keyboard() -> InlineKeyboardMarkup:
                     text="❌ Отмена", callback_data="admin_broadcast_cancel"
                 ),
             ],
-            [InlineKeyboardButton(text="На главную", callback_data="main")],
+        ]
+    )
+
+
+def create_admin_message_cancel_keyboard() -> InlineKeyboardMarkup:
+    """Create a cancel keyboard for admin message capture."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data="admin_message_cancel",
+                )
+            ]
         ]
     )
 
@@ -1162,6 +1176,7 @@ async def cmd_cancel(message: types.Message):
     if user_id in _awaiting_admin_message or user_id in _pending_admin_message:
         _awaiting_admin_message.pop(user_id, None)
         _pending_admin_message.pop(user_id, None)
+        _admin_client_selection_pages.pop(user_id, None)
         await message.answer(
             "Рассылка отменена.",
             reply_markup=create_main_menu_keyboard(user_id),
@@ -1171,25 +1186,81 @@ async def cmd_cancel(message: types.Message):
     await message.answer("Нет активного действия для отмены.")
 
 
+async def show_admin_previous_step(
+    callback_query: types.CallbackQuery,
+    flow: dict[str, Any] | None,
+) -> None:
+    """Return the admin UI to the previous step for the current flow."""
+    admin_id = callback_query.from_user.id
+    if flow and flow.get("mode") == "client":
+        page = int(flow.get("return_page") or 0)
+        _admin_client_selection_pages[admin_id] = page
+        await show_menu_from_callback(
+            callback_query,
+            "👤 Выбери клиента для отправки сообщения:",
+            create_admin_clients_keyboard(page),
+        )
+        return
+
+    await show_menu_from_callback(
+        callback_query,
+        "📣 Админ-рассылка\n\nВыбери действие:",
+        create_admin_broadcast_menu_keyboard(),
+    )
+
+
+async def edit_admin_service_message(
+    flow: dict[str, Any],
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> bool:
+    """Edit the stored admin service message when possible."""
+    chat_id = flow.get("service_chat_id")
+    message_id = flow.get("service_message_id")
+    if not chat_id or not message_id:
+        return False
+
+    try:
+        await bot.edit_message_text(
+            text,
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=reply_markup,
+        )
+        return True
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            return True
+        logger.warning(f"Failed to edit admin service message: {e}")
+        return False
+    except TelegramAPIError as e:
+        logger.warning(f"Failed to edit admin service message: {e}")
+        return False
+
+
 async def start_admin_message_capture(
-    chat_id: int,
-    admin_id: int,
+    callback_query: types.CallbackQuery,
     mode: str,
     recipient_id: int | None = None,
     recipient_label: str | None = None,
+    return_page: int = 0,
 ) -> None:
     """Ask an admin to send the message that should be copied."""
+    admin_id = callback_query.from_user.id
     if not is_admin(admin_id):
         logger.warning(
             f"Rejected admin message capture from non-admin user {admin_id}"
         )
-        await bot.send_message(chat_id, "❌ Недостаточно прав.")
+        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
         return
 
     _awaiting_admin_message[admin_id] = {
         "mode": mode,
         "recipient_id": recipient_id,
         "recipient_label": recipient_label,
+        "return_page": return_page,
+        "service_chat_id": callback_query.message.chat.id,
+        "service_message_id": callback_query.message.message_id,
     }
     _pending_admin_message.pop(admin_id, None)
 
@@ -1198,12 +1269,12 @@ async def start_admin_message_capture(
     else:
         recipient_text = f"Получатель: {recipient_label or recipient_id}"
 
-    await bot.send_message(
-        chat_id,
+    await show_menu_from_callback(
+        callback_query,
         "Отправь сообщение для пересылки клиентам.\n\n"
         f"{recipient_text}\n\n"
-        "Можно отправить текст, фото, видео или файл с подписью.\n"
-        "Для отмены используй /cancel.",
+        "Можно отправить текст, фото, видео или файл с подписью.",
+        create_admin_message_cancel_keyboard(),
     )
 
 
@@ -1217,11 +1288,7 @@ async def handle_admin_broadcast_all_callback(callback_query: types.CallbackQuer
         await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
         return
 
-    await start_admin_message_capture(
-        callback_query.message.chat.id,
-        admin_id,
-        mode="all",
-    )
+    await start_admin_message_capture(callback_query, mode="all")
 
 
 @dp.callback_query(F.data == "admin_broadcast_client_menu")
@@ -1243,6 +1310,7 @@ async def handle_admin_broadcast_client_menu(callback_query: types.CallbackQuery
         )
         return
 
+    _admin_client_selection_pages[admin_id] = 0
     await show_menu_from_callback(
         callback_query,
         "👤 Выбери клиента для отправки сообщения:",
@@ -1265,6 +1333,7 @@ async def handle_admin_clients_page(callback_query: types.CallbackQuery):
     except ValueError:
         page = 0
 
+    _admin_client_selection_pages[admin_id] = page
     await show_menu_from_callback(
         callback_query,
         "👤 Выбери клиента для отправки сообщения:",
@@ -1297,11 +1366,11 @@ async def handle_admin_message_client(callback_query: types.CallbackQuery):
             break
 
     await start_admin_message_capture(
-        callback_query.message.chat.id,
-        admin_id,
+        callback_query,
         mode="client",
         recipient_id=recipient_id,
         recipient_label=recipient_label,
+        return_page=_admin_client_selection_pages.get(admin_id, 0),
     )
 
 
@@ -1334,10 +1403,17 @@ async def handle_admin_message_content(message: types.Message):
         return
 
     if not is_supported_admin_message(message):
-        await message.answer(
+        error_text = (
             "Этот тип сообщения не поддерживается.\n"
-            "Отправь текст, фото, видео или файл с подписью, либо используй /cancel."
+            "Отправь текст, фото, видео или файл с подписью."
         )
+        edited = await edit_admin_service_message(
+            flow,
+            error_text,
+            create_admin_message_cancel_keyboard(),
+        )
+        if not edited:
+            await message.answer(error_text)
         return
 
     _awaiting_admin_message.pop(admin_id, None)
@@ -1355,40 +1431,48 @@ async def handle_admin_message_content(message: types.Message):
             f"Получатель: {flow.get('recipient_label') or flow.get('recipient_id')}"
         )
 
-    await message.answer("Предпросмотр сообщения:")
-    try:
-        await bot.copy_message(
-            chat_id=message.chat.id,
-            from_chat_id=message.chat.id,
-            message_id=message.message_id,
-        )
-    except TelegramAPIError as e:
-        _pending_admin_message.pop(admin_id, None)
-        logger.warning(f"Failed to create admin message preview: {e}")
-        await message.answer(
-            "Не удалось подготовить предпросмотр этого сообщения.\n"
-            "Попробуй отправить текст, фото, видео или файл ещё раз."
-        )
-        _awaiting_admin_message[admin_id] = flow
-        return
-    await message.answer(
-        f"{target_text}\n\nОтправить сообщение?",
-        reply_markup=create_admin_message_confirm_keyboard(),
+    edited = await edit_admin_service_message(
+        flow,
+        f"{target_text}\n\nОтправить это сообщение?",
+        create_admin_message_confirm_keyboard(),
     )
+    if not edited:
+        await message.answer(
+            f"{target_text}\n\nОтправить это сообщение?",
+            reply_markup=create_admin_message_confirm_keyboard(),
+        )
 
 
 @dp.callback_query(F.data == "admin_broadcast_cancel")
 async def handle_admin_broadcast_cancel(callback_query: types.CallbackQuery):
     """Cancel a pending admin message."""
-    await safe_answer_callback(callback_query)
     admin_id = callback_query.from_user.id
-    _awaiting_admin_message.pop(admin_id, None)
-    _pending_admin_message.pop(admin_id, None)
-    await show_menu_from_callback(
-        callback_query,
-        "Рассылка отменена.",
-        create_admin_broadcast_menu_keyboard(),
-    )
+    if not is_admin(admin_id):
+        logger.warning(f"Rejected admin cancel from non-admin user {admin_id}")
+        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
+        return
+
+    await safe_answer_callback(callback_query)
+    flow = _pending_admin_message.pop(admin_id, None)
+    if flow is None:
+        flow = _awaiting_admin_message.pop(admin_id, None)
+    await show_admin_previous_step(callback_query, flow)
+
+
+@dp.callback_query(F.data == "admin_message_cancel")
+async def handle_admin_message_capture_cancel(callback_query: types.CallbackQuery):
+    """Cancel admin message capture and return to the previous step."""
+    admin_id = callback_query.from_user.id
+    if not is_admin(admin_id):
+        logger.warning(f"Rejected admin capture cancel from non-admin user {admin_id}")
+        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
+        return
+
+    await safe_answer_callback(callback_query)
+    flow = _awaiting_admin_message.pop(admin_id, None)
+    if flow is None:
+        flow = _pending_admin_message.pop(admin_id, None)
+    await show_admin_previous_step(callback_query, flow)
 
 
 @dp.callback_query(F.data == "admin_broadcast_confirm")
