@@ -2429,9 +2429,8 @@ async def check_expired_peers():
 
                     await bot.send_message(
                         chat_id=user_id,
-                        text=f"⏰ Твой VPN доступ истекает завтра!\n\n"
-                             f"💎 Доступные тарифы для продления:\n{tariff_text}"
-                             f"Используй кнопки ниже для продления доступа.",
+                        text=f"⏰ Доступ к nikonVPN истекает завтра!\n\n"
+                             f"💎 Доступные тарифы для продления:\n{tariff_text}",
                         reply_markup=InlineKeyboardMarkup(
                             inline_keyboard=[
                                 [
@@ -2475,7 +2474,7 @@ async def main():
         asyncio.create_task(check_expired_peers())
 
         # Start the bot
-        logger.info("Starting WireGuard bot...")
+        logger.info("Starting Wgbot app...")
         await dp.start_polling(bot, skip_updates=True)
 
     except Exception as e:
