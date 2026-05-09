@@ -1,43 +1,37 @@
 # wgbot
 
-Telegram-бот для продажи VPN-доступа с интеграцией WGDashboard, Telegram Stars и YooKassa.
+Telegram bot for selling and managing nikonVPN access through WGDashboard, Telegram Stars, and YooKassa.
 
-## Быстрый запуск
+## Run Locally
 
-1. Подготовьте `.env`:
+Create the environment file:
 
 ```bash
 cp env.docker.example .env
 ```
 
-2. Заполните обязательные параметры в `.env`:
+Edit `.env` and set the required values:
 
 ```env
-# Telegram
 TELEGRAM_BOT_TOKEN=
-
-# WGDashboard
-WG_DASHBOARD_URL=http://your-wg-dashboard:10086
+WG_DASHBOARD_URL=http://your-wgdashboard:10086
 WG_DASHBOARD_API_KEY=
 WG_CONFIG_NAME=awg0
-
-# YooKassa (если используете оплату картой)
-YOOKASSA_SHOP_ID=
-YOOKASSA_SECRET_KEY=
-
-# Webhook / домен (для YooKassa)
-WEBHOOK_URL=https://your-domain.com/webhook/yookassa
-DOMAIN=your-domain.com
-
-# Ссылки и файлы
 SUPPORT_URL=
 CLIENTS_JSON_PATH=clients.json
-
-# Админ-уведомления
 ADMIN_TELEGRAM_IDS=123456789
 ```
 
-3. При необходимости настройте тарифы в `.env`:
+Optional YooKassa settings:
+
+```env
+YOOKASSA_SHOP_ID=
+YOOKASSA_SECRET_KEY=
+WEBHOOK_URL=https://your-domain.com/webhook/yookassa
+DOMAIN=your-domain.com
+```
+
+Optional tariff overrides:
 
 ```env
 TARIFF_14_DAYS_STARS=
@@ -50,56 +44,41 @@ TARIFF_180_DAYS_STARS=
 TARIFF_180_DAYS_RUB=
 ```
 
-4. Запустите контейнеры:
+Start the stack:
 
 ```bash
-docker-compose up -d --build
+docker compose up -d --build
 ```
 
-## Управление
+Useful commands:
 
 ```bash
-# Логи
-docker-compose logs -f
-
-# Перезапуск
-docker-compose restart
-
-# Остановка
-docker-compose down
+docker compose logs -f wgbot
+docker compose restart wgbot
+docker compose down
 ```
 
-## Админ-уведомления
+## clients.json
 
-Укажите один или несколько Telegram ID через запятую:
-
-```env
-ADMIN_TELEGRAM_IDS=123456789,987654321
-```
-
-Админ должен один раз открыть бота в Telegram и нажать `/start`, иначе Telegram не разрешит боту отправить личное сообщение.
-
-## `clients.json`
-
-Единый файл управления клиентами, скидками и дополнительными устройствами.
+`clients.json` is the editable registry for clients, discounts, and additional WGDashboard peers.
 
 ```json
 {
   "version": 1,
   "clients": [
     {
-      "telegramId": ,
-      "username": "",
+      "telegramId": 123456789,
+      "username": "client_username",
       "promo": 0,
       "peers": [
         {
           "role": "bot",
-          "clientId": "",
+          "clientId": "client_username",
           "publicKey": "botPeerPublicKey"
         },
         {
           "role": "manual",
-          "clientId": "",
+          "clientId": "iPhone",
           "publicKey": "manualPeerPublicKey",
           "jobId": "optional-created-by-bot"
         },
@@ -114,4 +93,72 @@ ADMIN_TELEGRAM_IDS=123456789,987654321
 }
 ```
 
-`promo` указывается в процентах: `20` означает скидку 20%, `150` означает цену 150% от базовой. `role: "bot"` используется для peer, созданного ботом. `role: "manual"` используется для дополнительных peer из WGDashboard. Пустые `clientId` и `publicKey` у manual peer игнорируются.
+Notes:
+
+- `promo: 20` means a 20% discount.
+- `promo: 150` means 150% of the base price.
+- `role: "bot"` is the peer created by the bot.
+- `role: "manual"` is an additional peer created manually in WGDashboard.
+- Empty manual peers are ignored.
+
+## Admin
+
+Set admin Telegram IDs in `.env`:
+
+```env
+ADMIN_TELEGRAM_IDS=123456789,987654321
+```
+
+Admins must open the bot and press `/start` once before the bot can send them private notifications.
+
+Admin features:
+
+- payment notifications;
+- broadcast to all clients;
+- direct message to a selected client.
+
+## CI/CD
+
+GitHub Actions workflows:
+
+- `CI`: validates Python files, Docker build, and Docker Compose config.
+- `Deploy`: runs manually or automatically after successful `CI` on `main`.
+- `Rollback`: manually deploys a selected GHCR image tag.
+
+Required GitHub repository secret:
+
+```text
+VPS_SSH_KEY
+```
+
+Required GitHub repository variables:
+
+```text
+VPS_HOST
+VPS_USER
+VPS_PORT
+DEPLOY_PATH
+```
+
+Deployment uses images from GitHub Container Registry:
+
+```text
+ghcr.io/alexnikon/wgbot:<commit-sha>
+```
+
+Rollback: GitHub Actions -> `Rollback` -> `Run workflow` -> enter the image tag.
+
+To skip CI/CD for documentation-only commits, include one of these markers in the commit message:
+
+```text
+[skip ci]
+[ci skip]
+```
+
+Example:
+
+```bash
+git commit -m "Update README [skip ci]"
+```
+
+GitHub will skip the `CI` workflow, and because deploy runs only after successful `CI`, deploy will not start either.
