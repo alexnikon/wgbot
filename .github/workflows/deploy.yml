@@ -111,6 +111,4 @@ jobs:
             echo "## Deployment completed"
             echo ""
             echo "- Image: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.DEPLOY_SHA }}\`"
-            echo "- Server: \`${{ vars.VPS_HOST }}\`"
-            echo "- Path: \`${{ vars.DEPLOY_PATH }}\`"
           } >> "$GITHUB_STEP_SUMMARY"

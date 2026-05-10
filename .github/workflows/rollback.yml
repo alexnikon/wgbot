@@ -77,6 +77,4 @@ jobs:
             echo "## Rollback completed"
             echo ""
             echo "- Image: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}\`"
-            echo "- Server: \`${{ vars.VPS_HOST }}\`"
-            echo "- Path: \`${{ vars.DEPLOY_PATH }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
