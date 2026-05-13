@@ -771,7 +771,7 @@ class Database:
 
                 # Log operation
                 self.log_operation(
-                    f"user_{telegram_user_id}",
+                    f"telegram:{telegram_user_id}",
                     "PAYMENT_UPDATE",
                     f"Payment status updated: {payment_status}, {payment_method}: {amount_paid}, tariff: {tariff_key}",
                 )
@@ -839,7 +839,7 @@ class Database:
 
                 # Log operation
                 self.log_operation(
-                    f"user_{telegram_user_id}",
+                    f"telegram:{telegram_user_id}",
                     "EXTEND_ACCESS",
                     f"Extended access by {days} days. New date: {new_expire_date}",
                 )
@@ -903,7 +903,7 @@ class Database:
                 
                 # Log operation
                 self.log_operation(
-                    f"user_{telegram_user_id}", 
+                    f"telegram:{telegram_user_id}", 
                     "DECREASE_ACCESS", 
                     f"Decreased access by {days} days. New date: {new_expire_date}"
                 )
@@ -1039,7 +1039,7 @@ class Database:
 
                 # Log operation
                 self.log_operation(
-                    f"user_{user_id}",
+                    f"telegram:{user_id}",
                     "CREATE_PAYMENT",
                     f"Created payment {payment_id}, amount: {amount}",
                 )

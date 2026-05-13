@@ -263,9 +263,8 @@ async def create_or_restore_peer_for_user(
                 datetime.now() + timedelta(days=access_days)
             ).strftime("%Y-%m-%d %H:%M:%S")
 
-        # Peer name
-        # Prefer username_id format when username is present
-        # This fixes cases where the old peer used user_id and the user now has a username
+        # Peer name uses the Telegram username when available; otherwise it falls
+        # back to the Telegram ID.
         peer_name = generate_peer_name(username, user_id)
 
         # Step 1. Stage the DB record first

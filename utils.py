@@ -11,19 +11,17 @@ def generate_peer_name(
     telegram_username: Optional[str] = None, user_id: Optional[int] = None
 ) -> str:
     """
-    Generate a peer name in the username_telegramID format.
+    Generate a WGDashboard peer name.
 
     Args:
         telegram_username: Telegram username
         user_id: Telegram user ID
 
     Returns:
-        Peer name in username_telegramID format
+        Telegram username when it exists, otherwise Telegram user ID
     """
-    if telegram_username:
-        peer_name = f"{telegram_username}_{user_id}"
-    else:
-        peer_name = f"user_{user_id}"
+    username = (telegram_username or "").strip()
+    peer_name = username if username else str(user_id)
 
     if len(peer_name) > 50:
         peer_name = peer_name[:50]
