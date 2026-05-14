@@ -229,54 +229,6 @@ class YooKassaClient:
             logger.error(f"Webhook structure validation error: {e}", exc_info=True)
             return False
     
-    def is_payment_succeeded(self, payment_data: Dict[str, Any]) -> bool:
-        """
-        Check if payment is successful.
-        
-        Args:
-            payment_data: Payment data
-            
-        Returns:
-            True if successful
-        """
-        return payment_data.get("status") == "succeeded"
-    
-    def is_payment_canceled(self, payment_data: Dict[str, Any]) -> bool:
-        """
-        Check if payment is canceled.
-        
-        Args:
-            payment_data: Payment data
-            
-        Returns:
-            True if canceled
-        """
-        return payment_data.get("status") == "canceled"
-    
-    def is_payment_waiting_for_capture(self, payment_data: Dict[str, Any]) -> bool:
-        """
-        Check if payment is waiting for capture.
-        
-        Args:
-            payment_data: Payment data
-            
-        Returns:
-            True if waiting for capture
-        """
-        return payment_data.get("status") == "waiting_for_capture"
-    
-    def is_refund_succeeded(self, refund_data: Dict[str, Any]) -> bool:
-        """
-        Check if refund succeeded.
-        
-        Args:
-            refund_data: Refund data
-            
-        Returns:
-            True if successful
-        """
-        return refund_data.get("status") == "succeeded"
-    
     def get_payment_amount(self, payment_data: Dict[str, Any]) -> int:
         """
         Get payment amount in kopeks.

@@ -3,12 +3,14 @@ __pycache__/
 *.py[cod]
 *$py.class
 config/
+Docs/
 clients.json
 promo.txt
 custom_clients.txt
 migration.sh
 clients.migrated.json
 api_yookassa.txt
+webhook_yookassa_doc.txt
 wgdashboard_doc.txt
 
 # C extensions

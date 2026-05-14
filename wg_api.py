@@ -215,18 +215,6 @@ class WGDashboardAPI:
             )
         return create_result, created_job_id, resolved_expire_date, True
     
-    def delete_job(self, job_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Delete a peer job.
-        
-        Args:
-            job_data: Job data for deletion
-            
-        Returns:
-            Operation result
-        """
-        return self._make_request("POST", "/api/deletePeerScheduleJob", {"Job": job_data})
-    
     def update_job_expire_date(self, job_id: str, peer_id: str, new_expire_date_str: str) -> Dict[str, Any]:
         """
         Update the expiration date of an existing job.
@@ -257,19 +245,6 @@ class WGDashboardAPI:
         
         result = self._make_request("POST", "/api/savePeerScheduleJob", data)
         return result
-    
-    def get_peer_info(self, peer_id: str) -> Dict[str, Any]:
-        """
-        Get peer info.
-        
-        Args:
-            peer_id: Peer ID
-            
-        Returns:
-            Peer info
-        """
-        # This may require additional implementation depending on available endpoints
-        pass
     
     def check_peer_exists(self, peer_id: str) -> bool:
         """
@@ -305,14 +280,6 @@ class WGDashboardAPI:
         except Exception as e:
             logger.error(f"Failed to check peer existence {peer_id}: {e}")
             return False
-    
-    def get_configuration_info(self) -> Dict[str, Any]:
-        """Get WireGuard configuration info."""
-        return self._make_request("GET", f"/api/getWireguardConfigurationInfo?configurationName={self.config_name}")
-    
-    def get_available_ips(self) -> Dict[str, Any]:
-        """Get available IPs in the configuration."""
-        return self._make_request("GET", f"/api/getAvailableIPs/{self.config_name}")
     
     def download_peer_config(self, peer_id: str) -> bytes:
         """

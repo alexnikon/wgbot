@@ -48,6 +48,9 @@ Thumbs.db
 
 # Project specific
 .env
+clients.json
+clients.migrated.json
+migration.sh
 *.db
 *.sqlite
 *.sqlite3
@@ -56,7 +59,9 @@ data/
 *.log
 
 # Documentation
+Docs/
 docs/
+*.txt
 *.md
 !README.md
 

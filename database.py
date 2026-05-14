@@ -158,78 +158,6 @@ class Database:
         except Exception as e:
             logger.error(f"Database migration error: {e}")
 
-    def add_peer(
-        self,
-        peer_name: str,
-        peer_id: str,
-        job_id: str,
-        telegram_user_id: int,
-        telegram_username: str,
-        expire_date: str,
-        payment_status: str = "paid",
-        stars_paid: int = 0,
-        tariff_key: str = None,
-        payment_method: str = None,
-        rub_paid: int = 0,
-    ) -> bool:
-        """
-        Add a new peer record to the database.
-
-        Args:
-            peer_name: Peer name
-            peer_id: Peer ID in WireGuard
-            job_id: Job ID for restriction
-            telegram_user_id: Telegram user ID
-            telegram_username: Telegram username
-            expire_date: Expiration date
-            payment_status: Payment status ('paid', 'unpaid')
-            stars_paid: Stars paid amount
-            tariff_key: Tariff key (7_days, 30_days)
-            payment_method: Payment method (stars, yookassa)
-            rub_paid: RUB paid amount
-
-        Returns:
-            True if successfully inserted
-        """
-        try:
-            with self._connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    INSERT INTO peers (peer_name, peer_id, job_id, telegram_user_id,
-                                     telegram_username, created_at, expire_date, is_active,
-                                     payment_status, stars_paid, last_payment_date,
-                                     notification_sent, tariff_key, payment_method, rub_paid)
-                    VALUES (?, ?, ?, ?, ?, datetime('now'), ?, 1, ?, ?, NULL, 0, ?, ?, ?)
-                """,
-                    (
-                        peer_name,
-                        peer_id,
-                        job_id,
-                        telegram_user_id,
-                        telegram_username,
-                        expire_date,
-                        payment_status,
-                        stars_paid,
-                        tariff_key,
-                        payment_method,
-                        rub_paid,
-                    ),
-                )
-                conn.commit()
-
-                # Log operation
-                self.log_operation(
-                    peer_name,
-                    "CREATE_PEER",
-                    f"Created peer {peer_name}, tariff {tariff_key}",
-                )
-                return True
-
-        except sqlite3.IntegrityError as e:
-            logger.error(f"Failed to add peer {peer_name}: {e}")
-            return False
-
     def stage_peer_record(
         self,
         peer_name: str,
@@ -479,15 +407,6 @@ class Database:
             logger.error(f"Failed to rollback staged peer for user {telegram_user_id}: {e}")
             return False
 
-    def get_peer_by_name(self, peer_name: str) -> Optional[Dict[str, Any]]:
-        """Get peer info by name."""
-        with self._connect() as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM peers WHERE peer_name = ?", (peer_name,))
-            row = cursor.fetchone()
-            return dict(row) if row else None
-
     def get_peer_by_telegram_id(
         self, telegram_user_id: int
     ) -> Optional[Dict[str, Any]]:
@@ -501,60 +420,6 @@ class Database:
             )
             row = cursor.fetchone()
             return dict(row) if row else None
-
-    def get_all_peers(self) -> List[Dict[str, Any]]:
-        """Get all active peers."""
-        with self._connect() as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT * FROM peers WHERE is_active = 1 ORDER BY created_at DESC"
-            )
-            return [dict(row) for row in cursor.fetchall()]
-
-    def delete_peer(self, peer_name: str) -> bool:
-        """
-        Mark a peer as inactive in the database.
-
-        Args:
-            peer_name: Peer name to deactivate
-
-        Returns:
-            True if successfully deactivated
-        """
-        try:
-            with self._connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "UPDATE peers SET is_active = 0 WHERE peer_name = ?", (peer_name,)
-                )
-                conn.commit()
-
-                # Log operation
-                self.log_operation(peer_name, "DELETE_PEER", f"Deleted peer {peer_name}")
-                return cursor.rowcount > 0
-
-        except Exception as e:
-            logger.error(f"Failed to delete peer {peer_name}: {e}")
-            return False
-
-    def get_job_data(self, peer_name: str) -> Optional[Dict[str, Any]]:
-        """Get job data for deletion."""
-        peer = self.get_peer_by_name(peer_name)
-        if not peer:
-            return None
-
-        return {
-            "JobID": peer["job_id"],
-            "Configuration": "awg0",  # Could be moved to config
-            "Peer": peer["peer_id"],
-            "Field": "date",
-            "Operator": "lgt",
-            "Value": peer["expire_date"],
-            "CreationDate": peer["created_at"],
-            "ExpireDate": peer["expire_date"],
-            "Action": "restrict",
-        }
 
     def log_operation(self, peer_name: str, operation: str, details: str):
         """Log an operation to the database."""
@@ -571,36 +436,6 @@ class Database:
                 conn.commit()
         except Exception as e:
             logger.error(f"Failed to log operation: {e}")
-
-    def get_operation_logs(
-        self, peer_name: str = None, limit: int = 50
-    ) -> List[Dict[str, Any]]:
-        """Get operation logs."""
-        with self._connect() as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-
-            if peer_name:
-                cursor.execute(
-                    """
-                    SELECT * FROM operation_logs
-                    WHERE peer_name = ?
-                    ORDER BY timestamp DESC
-                    LIMIT ?
-                """,
-                    (peer_name, limit),
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT * FROM operation_logs
-                    ORDER BY timestamp DESC
-                    LIMIT ?
-                """,
-                    (limit,),
-                )
-
-            return [dict(row) for row in cursor.fetchall()]
 
     def get_expired_peers(self) -> List[Dict[str, Any]]:
         """Get expired peers that have not been notified yet."""
@@ -1107,43 +942,3 @@ class Database:
             cursor.execute("SELECT * FROM payments WHERE payment_id = ?", (payment_id,))
             row = cursor.fetchone()
             return dict(row) if row else None
-
-    def get_payments_by_user(self, user_id: int) -> List[Dict[str, Any]]:
-        """
-        Get all payments for a user.
-
-        Args:
-            user_id: User ID
-
-        Returns:
-            List of payments
-        """
-        with self._connect() as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT * FROM payments
-                WHERE user_id = ?
-                ORDER BY created_at DESC
-            """,
-                (user_id,),
-            )
-            return [dict(row) for row in cursor.fetchall()]
-
-    def get_pending_payments(self) -> List[Dict[str, Any]]:
-        """
-        Get all pending payments.
-
-        Returns:
-            List of pending payments
-        """
-        with self._connect() as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT * FROM payments
-                WHERE status = 'pending'
-                ORDER BY created_at ASC
-            """)
-            return [dict(row) for row in cursor.fetchall()]
