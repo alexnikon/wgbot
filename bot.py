@@ -380,14 +380,35 @@ async def safe_answer_callback(callback_query: types.CallbackQuery, text: str = 
 async def safe_edit_callback_message(
     message: types.Message, text: str, reply_markup: InlineKeyboardMarkup | None = None
 ) -> bool:
+    """Edit a callback source message, falling back safely for media messages."""
     try:
         await message.edit_text(text, reply_markup=reply_markup)
         return True
     except TelegramBadRequest as e:
-        if "message is not modified" in str(e):
+        error_text = str(e).lower()
+        if "message is not modified" in error_text:
             logger.debug("Skip edit_text: message is not modified")
             return False
-        raise
+        if "there is no text in the message to edit" not in error_text:
+            if "message can't be edited" not in error_text and "message to edit not found" not in error_text:
+                raise
+
+    try:
+        await message.edit_caption(caption=text, reply_markup=reply_markup)
+        return True
+    except TelegramBadRequest as e:
+        error_text = str(e).lower()
+        if "message is not modified" in error_text:
+            logger.debug("Skip edit_caption: message is not modified")
+            return False
+        logger.info(f"Falling back to send_message after edit failure: {e}")
+
+    await bot.send_message(
+        message.chat.id,
+        text,
+        reply_markup=reply_markup,
+    )
+    return True
 
 
 async def show_menu_from_callback(
@@ -403,28 +424,7 @@ async def show_menu_from_callback(
         )
         return
 
-    try:
-        await message.edit_text(text, reply_markup=reply_markup)
-        return
-    except TelegramBadRequest as e:
-        if "message is not modified" in str(e):
-            return
-        if "there is no text in the message to edit" not in str(e):
-            raise
-
-    try:
-        await message.edit_caption(caption=text, reply_markup=reply_markup)
-        return
-    except TelegramBadRequest as e:
-        if "message is not modified" in str(e):
-            return
-        logger.info(f"Falling back to send_message for callback menu: {e}")
-
-    await bot.send_message(
-        callback_query.from_user.id,
-        text,
-        reply_markup=reply_markup,
-    )
+    await safe_edit_callback_message(message, text, reply_markup=reply_markup)
 
 
 def create_home_keyboard() -> InlineKeyboardMarkup:
