@@ -81,6 +81,9 @@ class Database:
                 )
             """)
 
+            # Migration: add new columns if missing
+            self._migrate_database(cursor)
+
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_peers_telegram_user_active
                 ON peers (telegram_user_id, is_active)
@@ -101,9 +104,6 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_peers_active_hour_notification
                 ON peers (is_active, hour_notification_sent, expire_date)
             """)
-
-            # Migration: add new columns if missing
-            self._migrate_database(cursor)
 
             conn.commit()
             logger.info("Database initialized")
