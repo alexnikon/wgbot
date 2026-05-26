@@ -2484,6 +2484,48 @@ async def check_expired_peers():
                         f"Failed to send expiration notice to user {peer['telegram_user_id']}"
                     )
 
+            # Check users for 1-hour reminder
+            users_for_hour_notification = db.get_users_for_hour_notification()
+
+            for user in users_for_hour_notification:
+                try:
+                    user_id = user["telegram_user_id"]
+                    tariffs = payment_manager.get_user_tariffs(user_id)
+
+                    tariff_text = ""
+                    for tariff_data in tariffs.values():
+                        tariff_text += f"⭐ {tariff_data['name']} - {tariff_data['stars_price']} Stars\n"
+                        tariff_text += f"💳 {tariff_data['name']} - {tariff_data['rub_price']} руб.\n\n"
+
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text=f"⏰ Доступ к nikonVPN истекает через 1 час!\n\n"
+                             f"💎 Доступные тарифы для продления:\n{tariff_text}",
+                        reply_markup=InlineKeyboardMarkup(
+                            inline_keyboard=[
+                                [
+                                    InlineKeyboardButton(
+                                        text="💵 Продлить доступ",
+                                        callback_data="extend",
+                                    )
+                                ],
+                                [
+                                    InlineKeyboardButton(
+                                        text="На главную",
+                                        callback_data="main",
+                                    )
+                                ],
+                            ]
+                        ),
+                    )
+
+                    db.mark_hour_notification_sent(user_id)
+
+                except TelegramAPIError:
+                    logger.warning(
+                        f"Failed to send one-hour notification to user {user['telegram_user_id']}"
+                    )
+
             # Check users for 1-day reminder
             users_for_notification = db.get_users_for_notification(1)
 

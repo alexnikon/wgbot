@@ -48,6 +48,7 @@ class Database:
                     stars_paid INTEGER DEFAULT 0,
                     last_payment_date TIMESTAMP,
                     notification_sent BOOLEAN DEFAULT 0,
+                    hour_notification_sent BOOLEAN DEFAULT 0,
                     expired_notification_sent BOOLEAN DEFAULT 0
                 )
             """)
@@ -96,6 +97,10 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_peers_active_expired_notification
                 ON peers (is_active, expired_notification_sent, expire_date)
             """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_peers_active_hour_notification
+                ON peers (is_active, hour_notification_sent, expire_date)
+            """)
 
             # Migration: add new columns if missing
             self._migrate_database(cursor)
@@ -133,6 +138,12 @@ class Database:
                     "ALTER TABLE peers ADD COLUMN notification_sent BOOLEAN DEFAULT 0"
                 )
                 logger.info("Added column: notification_sent")
+
+            if "hour_notification_sent" not in columns:
+                cursor.execute(
+                    "ALTER TABLE peers ADD COLUMN hour_notification_sent BOOLEAN DEFAULT 0"
+                )
+                logger.info("Added column: hour_notification_sent")
 
             if "expired_notification_sent" not in columns:
                 cursor.execute(
@@ -665,7 +676,10 @@ class Database:
                 cursor.execute(
                     """
                     UPDATE peers
-                    SET expire_date = ?, notification_sent = 0, expired_notification_sent = 0
+                    SET expire_date = ?,
+                        notification_sent = 0,
+                        hour_notification_sent = 0,
+                        expired_notification_sent = 0
                     WHERE telegram_user_id = ? AND is_active = 1
                 """,
                     (new_expire_date, telegram_user_id),
@@ -729,7 +743,8 @@ class Database:
                 cursor.execute(
                     """
                     UPDATE peers 
-                    SET expire_date = ?
+                    SET expire_date = ?,
+                        hour_notification_sent = 0
                     WHERE telegram_user_id = ? AND is_active = 1
                     """,
                     (new_expire_date, telegram_user_id),
@@ -770,11 +785,52 @@ class Database:
                 AND payment_status = 'paid'
                 AND notification_sent = 0
                 AND expire_date <= datetime('now', '+{} days')
+                AND expire_date > datetime('now', '+1 hour')
                 AND expire_date > datetime('now')
                 ORDER BY expire_date ASC
             """.format(days_before)
             )
             return [dict(row) for row in cursor.fetchall()]
+
+    def get_users_for_hour_notification(self) -> List[Dict[str, Any]]:
+        """Get paid users whose access expires within the next hour."""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM peers
+                WHERE is_active = 1
+                AND payment_status = 'paid'
+                AND hour_notification_sent = 0
+                AND expire_date <= datetime('now', '+1 hour')
+                AND expire_date > datetime('now')
+                ORDER BY expire_date ASC
+            """
+            )
+            return [dict(row) for row in cursor.fetchall()]
+
+    def mark_hour_notification_sent(self, telegram_user_id: int) -> bool:
+        """Mark that the one-hour expiration reminder was sent."""
+        try:
+            with self._connect() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    UPDATE peers
+                    SET hour_notification_sent = 1
+                    WHERE telegram_user_id = ? AND is_active = 1
+                """,
+                    (telegram_user_id,),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+
+        except Exception as e:
+            logger.error(
+                f"Failed to mark one-hour notification for user {telegram_user_id}: {e}"
+            )
+            return False
 
     def mark_notification_sent(self, telegram_user_id: int) -> bool:
         """
