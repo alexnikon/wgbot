@@ -37,8 +37,13 @@ class PaymentManager:
         return {
             key: data
             for key, data in self.tariffs.items()
-            if data.get("enabled", True)
+            if self.is_tariff_enabled(key)
         }
+
+    def is_tariff_enabled(self, tariff_key: str) -> bool:
+        """Return whether a tariff is enabled for client-facing actions."""
+        tariff_data = self.tariffs.get(tariff_key)
+        return bool(tariff_data and tariff_data.get("enabled", True))
         
     def get_user_tariffs(self, user_id: int) -> Dict[str, Any]:
         """

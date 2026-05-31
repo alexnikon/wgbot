@@ -4,6 +4,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def parse_env_bool(name: str, default: bool = False) -> bool:
+    """Parse a boolean environment variable."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().strip("\"'").lower() in {"1", "true", "yes", "on"}
+
 # Telegram Bot Configuration
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
@@ -85,7 +93,7 @@ def get_tariffs():
             "description": "Доступ на 3 месяца",
         },
         "180_days": {
-            "enabled": os.getenv("TARIFF_180_DAYS_ENABLED", "false").lower() == "true",
+            "enabled": parse_env_bool("TARIFF_180_DAYS_ENABLED", False),
             "days": 180,
             "stars_price": int(os.getenv("TARIFF_180_DAYS_STARS", 900)),
             "rub_price": int(os.getenv("TARIFF_180_DAYS_RUB", 1500)),

@@ -1911,6 +1911,16 @@ async def handle_pay_stars_callback(callback_query: types.CallbackQuery):
         await safe_answer_callback(callback_query, "❌ Ошибка: неверный пользователь")
         return
 
+    if not payment_manager.is_tariff_enabled(tariff_key):
+        await safe_answer_callback(callback_query, "Этот тариф сейчас недоступен")
+        payment_text, keyboard = await payment_manager.get_payment_selection_view(user_id)
+        await safe_edit_callback_message(
+            callback_query.message,
+            payment_text,
+            reply_markup=keyboard,
+        )
+        return
+
     await safe_answer_callback(callback_query)
 
     # Send invoice for Stars payment
@@ -1944,6 +1954,16 @@ async def handle_pay_yookassa_callback(callback_query: types.CallbackQuery):
     # Ensure callback belongs to the correct user
     if callback_query.from_user.id != user_id:
         await safe_answer_callback(callback_query, "❌ Ошибка: неверный пользователь")
+        return
+
+    if not payment_manager.is_tariff_enabled(tariff_key):
+        await safe_answer_callback(callback_query, "Этот тариф сейчас недоступен")
+        payment_text, keyboard = await payment_manager.get_payment_selection_view(user_id)
+        await safe_edit_callback_message(
+            callback_query.message,
+            payment_text,
+            reply_markup=keyboard,
+        )
         return
 
     await safe_answer_callback(callback_query)
