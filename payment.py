@@ -30,12 +30,21 @@ class PaymentManager:
     def tariffs(self):
         """Get current tariffs from config (hot-reloaded)."""
         return get_tariffs()
+
+    @property
+    def visible_tariffs(self):
+        """Return tariffs that should be displayed to clients."""
+        return {
+            key: data
+            for key, data in self.tariffs.items()
+            if data.get("enabled", True)
+        }
         
     def get_user_tariffs(self, user_id: int) -> Dict[str, Any]:
         """
         Return tariffs with user-specific discount/markup applied.
         """
-        base_tariffs = self.tariffs.copy()
+        base_tariffs = self.visible_tariffs.copy()
         factor = self.promo_manager.get_user_promo_factor(user_id)
         
         if factor == 1.0:
@@ -515,10 +524,12 @@ class PaymentManager:
             Dict with tariff info
         """
         # Use first tariff to display a default period
-        first_tariff = next(iter(self.tariffs.values())) if self.tariffs else None
+        first_tariff = (
+            next(iter(self.visible_tariffs.values())) if self.visible_tariffs else None
+        )
         
         return {
-            'tariffs': self.tariffs,
+            'tariffs': self.visible_tariffs,
             'yookassa_available': bool(self.yookassa_client.shop_id and self.yookassa_client.secret_key),
             'period': first_tariff['name'] if first_tariff else '30 дней',
             'stars_price': first_tariff['stars_price'] if first_tariff else 200,

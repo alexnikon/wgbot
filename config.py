@@ -61,6 +61,7 @@ def get_tariffs():
 
     return {
         "14_days": {
+            "enabled": True,
             "days": 14,
             "stars_price": tariff_14_days_stars,
             "rub_price": tariff_14_days_rub,
@@ -68,6 +69,7 @@ def get_tariffs():
             "description": "Доступ на 2 недели",
         },
         "30_days": {
+            "enabled": True,
             "days": 30,
             "stars_price": tariff_30_days_stars,
             "rub_price": tariff_30_days_rub,
@@ -75,6 +77,7 @@ def get_tariffs():
             "description": "Доступ на 1 месяц",
         },
         "90_days": {
+            "enabled": True,
             "days": 90,
             "stars_price": int(os.getenv("TARIFF_90_DAYS_STARS", 500)),
             "rub_price": int(os.getenv("TARIFF_90_DAYS_RUB", 800)),
@@ -82,6 +85,7 @@ def get_tariffs():
             "description": "Доступ на 3 месяца",
         },
         "180_days": {
+            "enabled": os.getenv("TARIFF_180_DAYS_ENABLED", "false").lower() == "true",
             "days": 180,
             "stars_price": int(os.getenv("TARIFF_180_DAYS_STARS", 900)),
             "rub_price": int(os.getenv("TARIFF_180_DAYS_RUB", 1500)),
