@@ -85,7 +85,7 @@ def get_tariffs():
             "description": "Доступ на 1 месяц",
         },
         "90_days": {
-            "enabled": True,
+            "enabled": parse_env_bool("TARIFF_90_DAYS_ENABLED", False),
             "days": 90,
             "stars_price": int(os.getenv("TARIFF_90_DAYS_STARS", 500)),
             "rub_price": int(os.getenv("TARIFF_90_DAYS_RUB", 800)),

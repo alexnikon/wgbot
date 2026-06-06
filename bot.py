@@ -1771,7 +1771,6 @@ async def cmd_connect(message: types.Message):
 async def cmd_extend(message: types.Message):
     """Handle the /extend command (access extension)."""
     user_id = message.from_user.id
-    username = message.from_user.username
 
     # Check if the user has an active peer
     existing_peer = db.get_peer_by_telegram_id(user_id)
@@ -1888,7 +1887,6 @@ async def cmd_status(message: types.Message):
 async def cmd_buy(message: types.Message):
     """Handle the /buy command (payment method selection)."""
     user_id = message.from_user.id
-    username = message.from_user.username
 
     # Send payment method selection
     await payment_manager.send_payment_selection(message.chat.id, user_id)
