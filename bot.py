@@ -10,19 +10,19 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import (
+    CASCADE_RETRY_INTERVAL_SECONDS,
     get_admin_telegram_ids,
     SUPPORT_URL,
     TELEGRAM_BOT_TOKEN,
 )
-from custom_clients import sync_custom_peers_access
+from cascade_api import CascadeCapacityError, CascadeNotFound
 from logging_setup import configure_logging
 from payment import PaymentManager
 from services import (
-    clients_manager,
+    cascade_router,
     close_shared_services,
-    custom_clients_manager,
     db,
-    wg_api,
+    set_runtime_ready,
     yookassa_client,
 )
 from utils import (
@@ -69,7 +69,12 @@ class OperationLoggingMiddleware:
 dp.message.outer_middleware(OperationLoggingMiddleware())
 dp.callback_query.outer_middleware(OperationLoggingMiddleware())
 
-payment_manager = PaymentManager(bot, yookassa_client=yookassa_client, db=db)
+payment_manager = PaymentManager(
+    bot,
+    yookassa_client=yookassa_client,
+    db=db,
+    cascade_router=cascade_router,
+)
 _last_start_sent_at: dict[int, float] = {}
 START_DEBOUNCE_SECONDS = 5.0
 ADMIN_CLIENTS_PAGE_SIZE = 8
@@ -85,12 +90,12 @@ def is_admin(user_id: int) -> bool:
 
 def get_broadcast_recipients() -> list[int]:
     """Return all unique client Telegram IDs for admin broadcasts."""
-    return clients_manager.get_client_telegram_ids()
+    return db.get_client_telegram_ids()
 
 
 def get_admin_client_options() -> list[dict[str, Any]]:
     """Return clients available for admin direct messages."""
-    return clients_manager.get_admin_client_options()
+    return db.get_admin_client_options()
 
 
 def format_admin_client_label(client: dict[str, Any]) -> str:
@@ -143,39 +148,6 @@ async def notify_admins(text: str) -> None:
             logger.warning(f"Failed to send admin notification to {admin_id}: {e}")
         except Exception as e:
             logger.warning(f"Unexpected admin notification error for {admin_id}: {e}")
-
-
-def sync_clients_json_for_user(
-    user_id: int, username: str | None, peer_id: str
-) -> bool:
-    client_id_for_json = username if username else str(user_id)
-    return clients_manager.add_update_client(
-        client_id_for_json,
-        peer_id,
-        force_write=True,
-        telegram_user_id=user_id,
-        username=username,
-    )
-
-
-def sync_bound_custom_peers_for_user(
-    user_id: int,
-    expire_date: str,
-    allow_access: bool = True,
-    primary_peer_id: str | None = None,
-) -> None:
-    result = sync_custom_peers_access(
-        wg_api=wg_api,
-        custom_clients_manager=custom_clients_manager,
-        user_id=user_id,
-        expire_date=expire_date,
-        allow_access=allow_access,
-        primary_peer_id=primary_peer_id,
-    )
-    if result["total"] > 0:
-        logger.info(
-            f"Custom peers sync user_id={user_id}: total={result['total']}, updated={result['updated']}, failed={result['failed']}"
-        )
 
 
 async def send_config_file(
@@ -267,97 +239,35 @@ async def create_or_restore_peer_for_user(
         # back to the Telegram ID.
         peer_name = generate_peer_name(username, user_id)
 
-        # Step 1. Stage the DB record first
-        stage_info = db.stage_peer_record(
-            peer_name=peer_name,
-            telegram_user_id=user_id,
-            telegram_username=username or "",
-            expire_date=target_expire_date,
-            payment_status="paid",
-            tariff_key=tariff_key,
-        )
-        if not stage_info:
-            return False, "Ошибка при сохранении клиента в БД", None
-
-        peer_id = None
         try:
-            # Step 2. Create peer in WGDashboard
-            peer_result = wg_api.add_peer(peer_name)
-            if not peer_result or "id" not in peer_result:
-                raise Exception("Ошибка при создании пира на сервере")
-            peer_id = peer_result["id"]
-
-            # Step 3. Create job in WGDashboard
-            logger.info(f"Creating new job for peer {peer_id}")
-            job_result, new_job_id, final_expire_date = wg_api.create_restrict_job(
-                peer_id, target_expire_date
-            )
-            if not job_result or (
-                isinstance(job_result, dict) and job_result.get("status") is False
-            ):
-                raise Exception("Ошибка при создании job на сервере")
-
-            # Finalize DB record with real peer_id/job_id
-            finalized = db.finalize_staged_peer(
-                telegram_user_id=user_id,
-                stage_info=stage_info,
-                peer_name=peer_name,
-                peer_id=peer_id,
-                job_id=new_job_id,
-                expire_date=final_expire_date,
-                telegram_username=username or "",
-                payment_status="paid",
-                tariff_key=tariff_key,
-            )
-            if not finalized:
-                raise Exception("Ошибка при финализации клиента в БД")
-
-            # Step 4. Update clients.json
-            client_id_for_json = username if username else str(user_id)
-            if not sync_clients_json_for_user(user_id, username, peer_id):
-                raise Exception("Ошибка при обновлении clients.json")
-
-            sync_bound_custom_peers_for_user(
+            _, config_content = await cascade_router.create_user_peer(
                 user_id=user_id,
-                expire_date=final_expire_date,
-                allow_access=True,
-                primary_peer_id=peer_id,
+                username=username,
+                peer_name=peer_name,
+                expire_date=target_expire_date,
             )
+            return True, "", config_content
+        except CascadeCapacityError:
+            return False, "Все VPN серверы временно заполнены", None
         except Exception as e:
-            # Compensation: delete created peer, then roll back staged DB record
-            if peer_id:
-                try:
-                    wg_api.delete_peer(peer_id)
-                except Exception as delete_error:
-                    logger.error(f"Failed to delete peer {peer_id} after error: {delete_error}")
-
-            rollback_ok = db.rollback_staged_peer(user_id, stage_info)
-            if not rollback_ok:
-                logger.error(f"Failed to roll back staged record for user {user_id}")
-            logger.error(f"Error during peer create/restore flow: {e}")
-            return False, "Ошибка при создании/восстановлении доступа", None
-
-        # Download config (to confirm it exists) with retries
-        config_content = None
-        # Increase wait: 10 tries * 2 seconds = 20 seconds max
-        for attempt in range(10):
-            try:
-                config_content = wg_api.download_peer_config(peer_id)
-                if config_content:
-                    break
-            except Exception as e:
-                logger.info(
-                    f"Attempt {attempt + 1}: config for {peer_id} is not ready yet (error: {e})"
-                )
-            
-            if attempt < 9:  # Do not wait after the last attempt
-                logger.info("Waiting 2 seconds before the next attempt...")
-                await asyncio.sleep(2)
-            
-        if not config_content:
-             return False, "Не удалось скачать конфигурацию (превышено время ожидания 20с)", None
-
-        return True, "", config_content
+            task_id = db.add_provisioning_task(
+                user_id,
+                "create_peer",
+                {
+                    "username": username or "",
+                    "peer_name": peer_name,
+                    "expire_date": target_expire_date,
+                    "tariff_key": tariff_key,
+                },
+                str(e),
+            )
+            logger.error(
+                "Cascade provisioning failed for user %s; queued task %s: %s",
+                user_id,
+                task_id,
+                e,
+            )
+            return False, "Доступ оплачен и будет создан автоматически после восстановления сервера", None
     except Exception as e:
         logger.error(f"Error in create_or_restore_peer_for_user: {e}")
         return False, "Ошибка при создании/восстановлении доступа", None
@@ -723,9 +633,6 @@ async def handle_already_paid_callback(callback_query: types.CallbackQuery):
 
     await safe_answer_callback(callback_query, "✅ У тебя уже есть доступ!")
 
-    # Update message with access info
-    payment_info = payment_manager.get_payment_info()
-
     already_paid_text = """
 ✅ У тебя уже есть активный доступ к VPN!
 
@@ -791,39 +698,10 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                 reply_markup=create_back_to_menu_keyboard(),
             )
 
-            # First try to check if the peer exists
-            peer_exists = False
             try:
-                peer_exists = wg_api.check_peer_exists(existing_peer["peer_id"])
-            except Exception as e:
-                logger.warning(
-                    f"Failed to check peer {existing_peer['peer_id']} existence: {e}, trying download"
-                )
-
-            # Try to download config
-            config_downloaded = False
-            peer_config = None
-            if peer_exists:
-                try:
-                    peer_config = wg_api.download_peer_config(existing_peer["peer_id"])
-                    config_downloaded = True
-                    if not sync_clients_json_for_user(
-                        user_id, username, existing_peer["peer_id"]
-                    ):
-                        logger.warning(
-                            f"Failed to update clients.json for user {user_id}"
-                        )
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to download config for existing peer: {e}, trying to create a new one"
-                    )
-                    config_downloaded = False
-
-            # If config download failed (peer missing or error), create a new peer
-            if not config_downloaded or not peer_config:
-                logger.info(
-                    f"Creating a new peer for user {user_id} because the existing one is unavailable"
-                )
+                peer_config = await cascade_router.get_primary_config(user_id)
+            except CascadeNotFound:
+                logger.warning("Primary Cascade peer is explicitly missing for user %s", user_id)
                 ok, err, new_config = await create_or_restore_peer_for_user(
                     user_id, username, existing_peer.get("tariff_key")
                 )
@@ -837,14 +715,6 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
                 
                 # Use the received config
                 peer_config = new_config
-                refreshed_peer = db.get_peer_by_telegram_id(user_id)
-                if refreshed_peer and refreshed_peer.get("peer_id"):
-                    if not sync_clients_json_for_user(
-                        user_id, username, refreshed_peer["peer_id"]
-                    ):
-                        logger.warning(
-                            f"Failed to update clients.json for user {user_id}"
-                        )
 
             sent = await send_config_with_confirmation(
                 callback_query.message.chat.id,
@@ -862,49 +732,11 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
             logger.error(
                 f"Error while fetching/restoring configuration: {e}", exc_info=True
             )
-            # On any error, try to create a new peer (only if access is paid)
-            try:
-                logger.info(
-                    f"Attempting to create a new peer after error for user {user_id}"
-                )
-                ok, err, new_config = await create_or_restore_peer_for_user(
-                    user_id, username, existing_peer.get("tariff_key")
-                )
-                if ok and new_config:
-                    refreshed_peer = db.get_peer_by_telegram_id(user_id)
-                    if refreshed_peer and refreshed_peer.get("peer_id"):
-                        if not sync_clients_json_for_user(
-                            user_id, username, refreshed_peer["peer_id"]
-                        ):
-                            logger.warning(
-                                f"Failed to update clients.json for user {user_id}"
-                            )
-                    sent = await send_config_with_confirmation(
-                        callback_query.message.chat.id,
-                        new_config,
-                        source_message=callback_query.message,
-                        caption=None,
-                    )
-                    if not sent:
-                        await safe_edit_callback_message(
-                            callback_query.message,
-                            "❌ Не удалось отправить конфигурацию.\n\nИспользуй кнопку ниже, чтобы вернуться в меню:",
-                            reply_markup=create_back_to_menu_keyboard(),
-                        )
-                    return
-
-                await safe_edit_callback_message(
-                    callback_query.message,
-                    f"❌ Ошибка при получении конфигурации: {err if not ok else 'Не удалось скачать конфиг'}.\n\nИспользуй кнопку ниже, чтобы вернуться в меню:",
-                    reply_markup=create_back_to_menu_keyboard(),
-                )
-            except Exception as e2:
-                logger.error(f"Critical error while creating new peer: {e2}")
-                await safe_edit_callback_message(
-                    callback_query.message,
-                    "❌ Ошибка при получении конфигурации. Попробуй позже или обратись в поддержку.\n\nИспользуй кнопку ниже, чтобы вернуться в меню:",
-                    reply_markup=create_back_to_menu_keyboard(),
-                )
+            await safe_edit_callback_message(
+                callback_query.message,
+                "❌ Ошибка при получении конфигурации. Попробуй позже или обратись в поддержку.\n\nИспользуй кнопку ниже, чтобы вернуться в меню:",
+                reply_markup=create_back_to_menu_keyboard(),
+            )
     else:
         # User has no peer
         error_text = """
@@ -927,8 +759,6 @@ async def handle_extend_callback(callback_query: types.CallbackQuery):
     await safe_answer_callback(callback_query)
 
     user_id = callback_query.from_user.id
-    username = callback_query.from_user.username
-
     # Check if the user has an active peer
     existing_peer = db.get_peer_by_telegram_id(user_id)
     if not existing_peer:
@@ -976,8 +806,6 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
     await safe_answer_callback(callback_query)
 
     user_id = callback_query.from_user.id
-    username = callback_query.from_user.username
-
     # Check if the user has an active peer
     existing_peer = db.get_peer_by_telegram_id(user_id)
     if not existing_peer:
@@ -1001,9 +829,11 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
         
         # Format dates for display
         expire_date_formatted = format_date_for_user(expire_date_str) if expire_date_str != "Неизвестно" else "Неизвестно"
-        custom_peer_ids = custom_clients_manager.get_peers_for_user(user_id)
+        connected_devices = db.get_peer_count(user_id)
         devices_line = (
-            f"\nПодключено устройств: {len(custom_peer_ids)}" if custom_peer_ids else ""
+            f"\nПодключено устройств: {connected_devices}"
+            if connected_devices
+            else ""
         )
 
         # Check if access has expired
@@ -1315,7 +1145,7 @@ async def handle_admin_broadcast_client_menu(callback_query: types.CallbackQuery
     if not clients:
         await show_menu_from_callback(
             callback_query,
-            "В clients.json нет клиентов с telegramId.",
+            "В базе данных пока нет клиентов.",
             create_admin_broadcast_menu_keyboard(),
         )
         return
@@ -1657,45 +1487,18 @@ async def cmd_connect(message: types.Message):
             await payment_manager.send_payment_selection(message.chat.id, user_id)
             return
 
-        # User has active access
-        # Check whether the peer exists on the server and whether we can download the config
+        # User has active access. Recreate only after an explicit Cascade 404.
         try:
-            peer_exists = False
             try:
-                peer_exists = wg_api.check_peer_exists(existing_peer["peer_id"])
-            except Exception as e:
-                logger.warning(
-                    f"Failed to check peer existence: {e}, trying to download"
+                progress_message = await message.reply("Скачиваю конфиг...")
+                config_content = await cascade_router.get_primary_config(user_id)
+                await send_config_with_confirmation(
+                    message.chat.id,
+                    config_content,
+                    source_message=progress_message,
                 )
-
-            config_downloaded = False
-            if peer_exists:
-                try:
-                    progress_message = await message.reply("Скачиваю конфиг...")
-                    config_content = wg_api.download_peer_config(
-                        existing_peer["peer_id"]
-                    )
-                    if not sync_clients_json_for_user(
-                        user_id, username, existing_peer["peer_id"]
-                    ):
-                        logger.warning(
-                            f"Failed to update clients.json for user {user_id}"
-                        )
-
-                    await send_config_with_confirmation(
-                        message.chat.id,
-                        config_content,
-                        source_message=progress_message,
-                    )
-                    return
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to download config for existing peer: {e}, trying to create a new one"
-                    )
-                    config_downloaded = False
-
-            # If config download failed, create a new peer
-            if not config_downloaded:
+                return
+            except CascadeNotFound:
                 progress_message = await message.reply("Создаю новый конфиг...")
                 ok, err, new_config = await create_or_restore_peer_for_user(
                     user_id, username, existing_peer.get("tariff_key")
@@ -1703,14 +1506,6 @@ async def cmd_connect(message: types.Message):
                 if not ok:
                     await message.reply(f"❌ {err}")
                     return
-                refreshed_peer = db.get_peer_by_telegram_id(user_id)
-                if refreshed_peer and refreshed_peer.get("peer_id"):
-                    if not sync_clients_json_for_user(
-                        user_id, username, refreshed_peer["peer_id"]
-                    ):
-                        logger.warning(
-                            f"Failed to update clients.json for user {user_id}"
-                        )
                 if not await send_config_with_confirmation(
                     message.chat.id,
                     new_config,
@@ -1722,36 +1517,9 @@ async def cmd_connect(message: types.Message):
                 return
         except Exception as e:
             logger.error(f"Error while getting config in /connect: {e}", exc_info=True)
-            # Try to create a new peer on any error
-            try:
-                progress_message = await message.reply("Попытка создать новый конфиг...")
-                ok, err, new_config = await create_or_restore_peer_for_user(
-                    user_id, username, existing_peer.get("tariff_key")
-                )
-                if not ok:
-                    await message.reply(f"❌ {err}")
-                    return
-                refreshed_peer = db.get_peer_by_telegram_id(user_id)
-                if refreshed_peer and refreshed_peer.get("peer_id"):
-                    if not sync_clients_json_for_user(
-                        user_id, username, refreshed_peer["peer_id"]
-                    ):
-                        logger.warning(
-                            f"Failed to update clients.json for user {user_id}"
-                        )
-                if not await send_config_with_confirmation(
-                    message.chat.id,
-                    new_config,
-                    source_message=progress_message,
-                ):
-                    await message.reply(
-                        "❌ Не удалось отправить конфигурацию. Используй /connect для повторной попытки."
-                    )
-            except Exception as e2:
-                logger.error(f"Critical error while creating new peer: {e2}")
-                await message.reply(
-                    "❌ Ошибка при получении конфигурации. Попробуй позже или обратись в поддержку."
-                )
+            await message.reply(
+                "❌ Ошибка при получении конфигурации. Попробуй позже или обратись в поддержку."
+            )
 
     # New user: payment required
     payment_info = payment_manager.get_payment_info()
@@ -1857,7 +1625,7 @@ async def cmd_status(message: types.Message):
         minutes_left = (time_left.seconds % 3600) // 60
 
         # Build message
-        status_text = f"📊 Статус твоего VPN доступа:\n\n"
+        status_text = "📊 Статус твоего VPN доступа:\n\n"
         status_text += (
             f"📅 Дата истечения: {expire_date.strftime('%d.%m.%Y')}\n\n"
         )
@@ -1921,6 +1689,16 @@ async def handle_pay_stars_callback(callback_query: types.CallbackQuery):
 
     await safe_answer_callback(callback_query)
 
+    try:
+        await cascade_router.ensure_reservation(user_id)
+    except CascadeCapacityError:
+        await safe_edit_callback_message(
+            callback_query.message,
+            "⚠️ Все VPN серверы временно заполнены. Оплата сейчас недоступна, попробуй позже.",
+            reply_markup=create_back_to_menu_keyboard(),
+        )
+        return
+
     # Send invoice for Stars payment
     success = await payment_manager.send_stars_payment_request(
         callback_query.message.chat.id, user_id, tariff_key, username
@@ -1965,6 +1743,16 @@ async def handle_pay_yookassa_callback(callback_query: types.CallbackQuery):
         return
 
     await safe_answer_callback(callback_query)
+
+    try:
+        await cascade_router.ensure_reservation(user_id)
+    except CascadeCapacityError:
+        await safe_edit_callback_message(
+            callback_query.message,
+            "⚠️ Все VPN серверы временно заполнены. Оплата сейчас недоступна, попробуй позже.",
+            reply_markup=create_back_to_menu_keyboard(),
+        )
+        return
 
     # Check if YooKassa is configured
     if (
@@ -2137,301 +1925,92 @@ async def process_pre_checkout_query(pre_checkout_query):
 
 @dp.message(F.successful_payment)
 async def process_successful_payment(message: types.Message):
-    """Handle successful payment."""
+    """Handle a successful Telegram Stars payment and synchronize Cascade."""
     user_id = message.from_user.id
     username = message.from_user.username
     successful_payment = message.successful_payment
-
-    # Get payload from successful payment
-    payload = successful_payment.invoice_payload
-
-    # Confirm payment
-    (
-        payment_confirmed,
-        payment_type,
-        amount_paid,
-    ) = await payment_manager.confirm_payment(successful_payment)
-    if not payment_confirmed:
+    confirmed, _, amount_paid = await payment_manager.confirm_payment(successful_payment)
+    if not confirmed or not successful_payment.invoice_payload.startswith("vpn_access_stars_"):
         await message.reply("❌ Ошибка при обработке платежа.")
         return
 
-    # Handle Stars payments only (YooKassa uses webhook)
-    if not payload.startswith("vpn_access_stars_"):
-        await message.reply("❌ Неизвестный тип платежа.")
-        return
-
-    # Extract tariff from payload
-    payload_parts = payload.split("_")
-    if len(payload_parts) >= 4:
-        tariff_key = f"{payload_parts[3]}_{payload_parts[4]}"  # 14_days, 30_days
-    else:
+    parts = successful_payment.invoice_payload.split("_")
+    tariff_key = f"{parts[3]}_{parts[4]}" if len(parts) >= 5 else ""
+    tariff_data = payment_manager.tariffs.get(tariff_key)
+    if not tariff_data:
         await message.reply("❌ Ошибка в данных платежа.")
         return
 
-    payment_method = "stars"
+    payment_id = (
+        getattr(successful_payment, "telegram_payment_charge_id", None)
+        or getattr(successful_payment, "provider_payment_charge_id", None)
+        or f"stars_{user_id}_{tariff_key}"
+    )
+    db.add_payment(
+        payment_id, user_id, amount_paid, "stars", tariff_key,
+        {"source": "telegram_stars"},
+    )
+    if not db.claim_payment_success(payment_id):
+        logger.info("Ignoring duplicate Stars payment event %s", payment_id)
+        return
 
-    # Log payment and update payment status
-    try:
-        payment_id = (
-            getattr(successful_payment, "telegram_payment_charge_id", None)
-            or getattr(successful_payment, "provider_payment_charge_id", None)
-            or f"stars_{user_id}_{tariff_key}"
-        )
-        db.add_payment(
-            payment_id=payment_id,
-            user_id=user_id,
-            amount=amount_paid,
-            payment_method="stars",
-            tariff_key=tariff_key,
-            metadata={"source": "telegram_stars"},
-        )
-        db.update_payment_status_by_id(payment_id, "succeeded")
-    except Exception as e:
-        logger.warning(f"Failed to record Stars payment in DB: {e}")
-
-    # Update payment status for the user
-    db.update_payment_status(user_id, "paid", amount_paid, payment_method, tariff_key)
-
-    # Determine access period based on tariff
-    tariff_data = payment_manager.tariffs.get(tariff_key, {})
-    access_days = tariff_data.get("days", 30)
-
-    # Check if the user already has a peer
-    existing_peer = db.get_peer_by_telegram_id(user_id)
-
-    if existing_peer:
-        # Extend access for the existing peer
-        success, new_expire_date = db.extend_access(user_id, access_days)
-
+    primary_peer = db.get_primary_client_peer(user_id)
+    if primary_peer:
+        success, expire_date = db.extend_access(user_id, tariff_data["days"])
         if not success:
-            await message.reply(
-                "❌ Ошибка при продлении доступа. Обратитесь в поддержку."
-            )
+            await message.reply("❌ Ошибка при продлении доступа. Обратитесь в поддержку.")
             return
-
-        # Check peer existence in WGDashboard
-        peer_exists = None
-        try:
-            peer_exists = wg_api.check_peer_exists(existing_peer["peer_id"])
-        except Exception as e:
-            logger.error(f"Error checking peer existence in WGDashboard: {e}")
-
-        allow_result = None
-        try:
-            allow_result = wg_api.allow_access_peer(existing_peer["peer_id"])
-            if allow_result and allow_result.get("status"):
-                logger.info(f"Restricted removed for user {user_id}")
-                peer_exists = True
-            else:
-                logger.warning(
-                    f"Failed to remove restricted for user {user_id}: {allow_result}"
-                )
-        except Exception as e:
-            logger.error(f"Error removing restricted in WGDashboard: {e}")
-
-        if peer_exists is True:
-            try:
-                job_update_result, resolved_job_id, resolved_expire_date, created_new_job = (
-                    wg_api.ensure_restrict_job(
-                        existing_peer["peer_id"],
-                        new_expire_date,
-                        existing_peer.get("job_id"),
-                    )
-                )
-
-                if job_update_result and job_update_result.get("status"):
-                    logger.info(
-                        f"Job ensured for user {user_id}, resolved_job_id={resolved_job_id}, created_new_job={created_new_job}, new date: {resolved_expire_date}"
-                    )
-                    if (
-                        resolved_job_id != existing_peer.get("job_id")
-                        or resolved_expire_date != new_expire_date
-                    ):
-                        persisted = db.update_peer_info(
-                            existing_peer["peer_name"],
-                            existing_peer["peer_id"],
-                            resolved_job_id,
-                            resolved_expire_date,
-                        )
-                        logger.info(
-                            f"Persisted ensured job for user {user_id}: persisted={persisted}, resolved_job_id={resolved_job_id}"
-                        )
-                        existing_peer["job_id"] = resolved_job_id
-                        new_expire_date = resolved_expire_date
-                else:
-                    logger.error(
-                        f"Error updating job for user {user_id}: {job_update_result}"
-                    )
-
-            except Exception as e:
-                logger.error(f"Error updating job in WGDashboard: {e}")
-
-            # Do not resend config on extension
+        db.update_payment_status(user_id, "paid", amount_paid, "stars", tariff_key)
+        sync_result = await cascade_router.sync_user_access(user_id, expire_date)
+        if sync_result["failed"]:
+            db.add_provisioning_task(
+                user_id, "sync_access", {"expire_date": expire_date},
+                f"Failed peers: {sync_result['failed']}",
+            )
+        await message.reply(
+            f"✅ Платеж успешно обработан!\n"
+            f"🎉 Продлили тебе доступ на {tariff_data['days']} дней!\n"
+            f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
+            f"Текущая конфигурация остается актуальной.",
+            reply_markup=create_home_keyboard(),
+        )
+        title = "🔁 Клиент продлил подписку"
+    else:
+        expire_date = db.activate_new_access(
+            user_id, username, tariff_data["days"], tariff_key, "stars"
+        )
+        db.update_payment_status(user_id, "paid", amount_paid, "stars", tariff_key)
+        await message.reply("🔄 Создаю VPN доступ...")
+        ok, error, config = await create_or_restore_peer_for_user(
+            user_id, username, tariff_key
+        )
+        if not ok:
             await message.reply(
-                f"✅ Платеж успешно обработан!\n"
-                f"🎉 Продлили тебе доступ на {access_days} дней!\n"
-                f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
-                f"Текущая конфигурация остается актуальной.",
+                f"⚠️ {error}. Мы повторим создание автоматически.",
                 reply_markup=create_home_keyboard(),
             )
-            sync_bound_custom_peers_for_user(
-                user_id=user_id,
-                expire_date=new_expire_date,
-                allow_access=True,
-                primary_peer_id=existing_peer["peer_id"],
-            )
             await notify_admins(
-                format_admin_payment_notification(
-                    "🔁 Клиент продлил подписку",
-                    user_id=user_id,
-                    username=username,
-                    tariff_name=tariff_data.get("name", tariff_key),
-                    amount=f"{amount_paid} Stars",
-                    payment_method="Telegram Stars",
-                    expire_date=new_expire_date,
-                )
-            )
-        elif peer_exists is False:
-            logger.warning(
-                f"Peer for user {user_id} not found in WGDashboard, creating new one"
-            )
-            await message.reply("🔄 Восстанавливаю VPN доступ...")
-            ok, err, new_config = await create_or_restore_peer_for_user(
-                user_id, username, tariff_key
-            )
-            if not ok:
-                await message.reply(
-                    "❌ Ошибка при восстановлении VPN доступа. Обратитесь в поддержку."
-                )
-                logger.error(
-                    f"Failed to recreate peer for user {user_id}: {err}"
-                )
-                return
-
-            sent = await send_config_with_confirmation(
-                message.chat.id,
-                new_config,
-                caption=None,
-            )
-            if sent:
-                logger.info(
-                    f"Config sent with delayed confirmation after peer restore for user {user_id}"
-                )
-            else:
-                await message.reply(
-                    f"✅ Платеж успешно обработан!\n"
-                    f"🎉 Продлили тебе доступ на {access_days} дней!\n"
-                    f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
-                    f"Доступ восстановлен, используй /connect для получения актуального конфига.",
-                    reply_markup=create_home_keyboard(),
-                )
-            refreshed_peer = db.get_peer_by_telegram_id(user_id)
-            if refreshed_peer and refreshed_peer.get("expire_date"):
-                sync_bound_custom_peers_for_user(
-                    user_id=user_id,
-                    expire_date=refreshed_peer["expire_date"],
-                    allow_access=True,
-                    primary_peer_id=refreshed_peer.get("peer_id"),
-                )
-                await notify_admins(
-                    format_admin_payment_notification(
-                        "🔁 Клиент продлил подписку",
-                        user_id=user_id,
-                        username=username,
-                        tariff_name=tariff_data.get("name", tariff_key),
-                        amount=f"{amount_paid} Stars",
-                        payment_method="Telegram Stars",
-                        expire_date=refreshed_peer["expire_date"],
-                    )
-                )
-        else:
-            await message.reply(
-                "❌ Не удалось проверить статус VPN на сервере. Попробуйте еще раз через минуту или обратитесь в поддержку."
-            )
-            logger.error(
-                f"Peer status for user {user_id} is unknown, recreation canceled to avoid duplicate"
+                f"⚠️ Оплата получена, provisioning отложен\n\nTelegram ID: {user_id}\nПричина: {error}"
             )
             return
-
-        # Do not send extra message after extension
-    else:
-        # Create a new peer for the user
-        try:
-            await message.reply("🔄 Создаю VPN доступ...")
-            ok, err, new_config = await create_or_restore_peer_for_user(
-                user_id, username, tariff_key
-            )
-            if not ok:
-                # Offer retry and support
-                keyboard = InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text="🔁 Повторить создание",
-                                callback_data=f"retry_peer_{tariff_key}_{user_id}",
-                            )
-                        ],
-                        [InlineKeyboardButton(text="🆘 Поддержка", url=SUPPORT_URL)],
-                    ]
-                )
-                await message.reply(
-                    "❌ Ошибка при создании VPN доступа. Ты можешь попробовать ещё раз или обратиться в поддержку.",
-                    reply_markup=keyboard,
-                )
-                return
-            sent = await send_config_with_confirmation(
-                message.chat.id,
-                new_config,
-                caption=None,
-            )
-            if sent:
-                logger.info(
-                    f"Config sent with delayed confirmation after new access activation for user {user_id}"
-                )
-            else:
-                await message.reply(
-                    f"✅ Платеж успешно обработан!\n"
-                    f"🎉 VPN доступ на {access_days} дней активирован!\n"
-                    f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
-                    f"❌ Не удалось отправить конфигурацию. Используй /connect для получения конфига.",
-                    reply_markup=create_home_keyboard(),
-                )
-            refreshed_peer = db.get_peer_by_telegram_id(user_id)
-            if refreshed_peer and refreshed_peer.get("expire_date"):
-                sync_bound_custom_peers_for_user(
-                    user_id=user_id,
-                    expire_date=refreshed_peer["expire_date"],
-                    allow_access=True,
-                    primary_peer_id=refreshed_peer.get("peer_id"),
-                )
-                await notify_admins(
-                    format_admin_payment_notification(
-                        "🆕 Новый клиент подключился",
-                        user_id=user_id,
-                        username=username,
-                        tariff_name=tariff_data.get("name", tariff_key),
-                        amount=f"{amount_paid} Stars",
-                        payment_method="Telegram Stars",
-                        expire_date=refreshed_peer["expire_date"],
-                    )
-                )
-        except Exception as e:
-            logger.error(f"Error creating peer after payment: {e}")
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="🔁 Повторить создание",
-                            callback_data=f"retry_peer_{tariff_key}_{user_id}",
-                        )
-                    ],
-                    [InlineKeyboardButton(text="🆘 Поддержка", url=SUPPORT_URL)],
-                ]
-            )
+        if not await send_config_with_confirmation(message.chat.id, config, caption=None):
             await message.reply(
-                "❌ Ошибка при создании VPN доступа. Ты можешь попробовать ещё раз или обратиться в поддержку.",
-                reply_markup=keyboard,
+                "✅ Доступ активирован, но конфиг не удалось отправить. Используй /connect.",
+                reply_markup=create_home_keyboard(),
             )
+        title = "🆕 Новый клиент подключился"
+
+    await notify_admins(
+        format_admin_payment_notification(
+            title,
+            user_id=user_id,
+            username=username,
+            tariff_name=tariff_data.get("name", tariff_key),
+            amount=f"{amount_paid} Stars",
+            payment_method="Telegram Stars",
+            expire_date=expire_date,
+        )
+    )
 
 
 # Unknown command handler
@@ -2596,13 +2175,60 @@ async def check_expired_peers():
             await asyncio.sleep(60)  # Wait a minute on error
 
 
+async def retry_provisioning_tasks() -> None:
+    """Retry paid provisioning operations that previously failed."""
+    while True:
+        for task in db.get_pending_provisioning_tasks():
+            try:
+                payload = task["payload"]
+                if task["operation"] == "create_peer":
+                    if db.get_primary_client_peer(task["telegram_user_id"]):
+                        config = await cascade_router.get_primary_config(
+                            task["telegram_user_id"]
+                        )
+                    else:
+                        _, config = await cascade_router.create_user_peer(
+                            task["telegram_user_id"],
+                            payload.get("username"),
+                            payload["peer_name"],
+                            payload["expire_date"],
+                        )
+                    config_sent = await send_config_with_confirmation(
+                        task["telegram_user_id"], config, caption=None
+                    )
+                elif task["operation"] == "sync_access":
+                    result = await cascade_router.sync_user_access(
+                        task["telegram_user_id"], payload["expire_date"]
+                    )
+                    if result["failed"]:
+                        raise RuntimeError(f"Failed peers: {result['failed']}")
+                else:
+                    raise RuntimeError(f"Unknown provisioning operation: {task['operation']}")
+                db.complete_provisioning_task(task["id"])
+                delivery_note = "" if task["operation"] != "create_peer" or config_sent else "\nКонфиг не доставлен; пользователь может запросить его повторно."
+                await notify_admins(
+                    f"✅ Отложенная операция выполнена\n\nTelegram ID: {task['telegram_user_id']}\nОперация: {task['operation']}{delivery_note}"
+                )
+            except Exception as exc:
+                db.fail_provisioning_task(task["id"], str(exc))
+                logger.error("Provisioning retry %s failed: %s", task["id"], exc)
+        await asyncio.sleep(CASCADE_RETRY_INTERVAL_SECONDS)
+
+
 async def main():
     """Main bot entry point."""
     try:
         db.sync_expired_access_statuses()
 
+        cascade_status = await cascade_router.validate()
+        logger.info("Cascade startup validation: %s", cascade_status)
+        if not any(status.startswith("ok") for status in cascade_status.values()):
+            raise RuntimeError("No healthy Cascade server is configured")
+        set_runtime_ready(True)
+
         # Start background checks for expired peers and notifications
         asyncio.create_task(check_expired_peers())
+        asyncio.create_task(retry_provisioning_tasks())
 
         # Start the bot
         logger.info("Starting Wgbot app...")
@@ -2611,6 +2237,7 @@ async def main():
     except Exception as e:
         logger.error(f"Critical error: {e}")
     finally:
+        set_runtime_ready(False)
         await close_shared_services()
 
 

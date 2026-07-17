@@ -149,6 +149,7 @@ logs/
 
 # SSL certificates (security sensitive)
 ssl/
+secrets/
 *.pem
 *.key
 *.crt
