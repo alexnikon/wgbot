@@ -1,0 +1,110 @@
+name: Deploy Dev
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - cascade-migration
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: development-deploy
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  DEPLOY_SHA: ${{ github.sha }}
+
+jobs:
+  validate:
+    name: Run CI before development deployment
+    uses: ./.github/workflows/ci.yml
+
+  build-and-deploy:
+    name: Build image and deploy to development
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push development image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev-${{ env.DEPLOY_SHA }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Prepare SSH key
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/wgbot_deploy_key
+          chmod 600 ~/.ssh/wgbot_deploy_key
+          ssh-keyscan -p "${{ vars.VPS_PORT }}" "${{ vars.VPS_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy on development VPS
+        env:
+          VPS_HOST: ${{ vars.VPS_HOST }}
+          VPS_USER: ${{ vars.VPS_USER }}
+          VPS_PORT: ${{ vars.VPS_PORT }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev-${{ env.DEPLOY_SHA }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ssh -o IdentitiesOnly=yes -i ~/.ssh/wgbot_deploy_key -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" \
+            "DEPLOY_PATH='$DEPLOY_PATH' IMAGE='$IMAGE' GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN='$GHCR_TOKEN' bash -s" <<'REMOTE'
+          set -Eeuo pipefail
+          cd "$DEPLOY_PATH"
+          mkdir -p backups
+          timestamp="$(date +%Y%m%d-%H%M%S)"
+          if [ -f DB/wgbot.db ]; then
+            cp DB/wgbot.db "backups/wgbot.db.dev.${timestamp}"
+          fi
+          git fetch --prune origin
+          git checkout cascade-migration
+          git pull --ff-only origin cascade-migration
+          printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+          docker pull "$IMAGE"
+          WGBOT_IMAGE="$IMAGE" docker compose up -d --no-build wgbot
+          for attempt in $(seq 1 12); do
+            if curl -fsS http://localhost:8001/health; then
+              break
+            fi
+            if [ "$attempt" -eq 12 ]; then
+              WGBOT_IMAGE="$IMAGE" docker compose logs --tail=150 wgbot
+              exit 1
+            fi
+            sleep 5
+          done
+          WGBOT_IMAGE="$IMAGE" docker compose ps wgbot
+          WGBOT_IMAGE="$IMAGE" docker compose logs --tail=100 wgbot
+          docker image prune -f --filter "until=168h"
+          REMOTE
+
+      - name: Deployment summary
+        run: |
+          {
+            echo "## Development deployment completed"
+            echo ""
+            echo "- Image: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev-${{ env.DEPLOY_SHA }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
