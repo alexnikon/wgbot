@@ -3,9 +3,10 @@ from typing import Optional, Dict, Any
 from aiogram import Bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
 from aiogram.exceptions import TelegramAPIError
-from config import DOMAIN, PAYMENT_RETURN_URL, WEBHOOK_URL, get_tariffs
+from config import get_tariffs, WEBHOOK_URL, DOMAIN, CLIENTS_JSON_PATH
 from yookassa_client import YooKassaClient
 from database import Database
+from utils import PromoManager
 
 logger = logging.getLogger(__name__)
 
@@ -17,14 +18,13 @@ class PaymentManager:
         bot: Bot,
         yookassa_client: YooKassaClient | None = None,
         db: Database | None = None,
-        cascade_router: Any | None = None,
     ):
         self.bot = bot
         self.yookassa_client = yookassa_client or YooKassaClient()
         self.db = db or Database()
         self.webhook_url = WEBHOOK_URL
         self.domain = DOMAIN
-        self.cascade_router = cascade_router
+        self.promo_manager = PromoManager(CLIENTS_JSON_PATH)
     
     @property
     def tariffs(self):
@@ -45,7 +45,7 @@ class PaymentManager:
         Return tariffs with user-specific discount/markup applied.
         """
         base_tariffs = self.visible_tariffs.copy()
-        factor = self.db.get_user_promo_factor(user_id)
+        factor = self.promo_manager.get_user_promo_factor(user_id)
         
         if factor == 1.0:
             return base_tariffs
@@ -149,8 +149,6 @@ class PaymentManager:
             Invoice data dict or None on error
         """
         try:
-            if self.cascade_router is not None:
-                await self.cascade_router.ensure_reservation(user_id)
             # Get user tariffs
             user_tariffs = self.get_user_tariffs(user_id)
             if tariff_key not in user_tariffs:
@@ -217,9 +215,6 @@ class PaymentManager:
             Payment URL or None on error
         """
         try:
-            reservation = None
-            if self.cascade_router is not None:
-                reservation = await self.cascade_router.ensure_reservation(user_id)
             if not self.yookassa_client.shop_id or not self.yookassa_client.secret_key:
                 logger.error("YooKassa is not configured")
                 return None
@@ -234,7 +229,7 @@ class PaymentManager:
             amount = tariff_data['rub_price'] * 100  # In kopeks
             
             # Return URL
-            return_url = PAYMENT_RETURN_URL
+            return_url = "https://t.me/nikonvpn_bot"
 
             effective_username = (username or "").strip()
             if effective_username.startswith("@"):
@@ -253,9 +248,6 @@ class PaymentManager:
                 'username': effective_username,
                 'description': f'Доступ к сервису на {tariff_data["name"]}'
             }
-            if reservation:
-                metadata["server_key"] = reservation["server_key"]
-                metadata["interface_id"] = reservation["interface_id"]
             if payment_chat_id is not None:
                 metadata["payment_chat_id"] = str(payment_chat_id)
             if payment_message_id is not None:
@@ -440,10 +432,6 @@ class PaymentManager:
         """
         try:
             payload = pre_checkout_query.invoice_payload
-            if self.cascade_router is not None:
-                await self.cascade_router.ensure_reservation(
-                    pre_checkout_query.from_user.id
-                )
             
             # Ensure it's our payment
             if not (payload.startswith('vpn_access_stars_') or payload.startswith('vpn_access_yookassa_')):

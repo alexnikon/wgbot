@@ -35,25 +35,23 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - YOOKASSA_SHOP_ID=${YOOKASSA_SHOP_ID}
       - YOOKASSA_SECRET_KEY=${YOOKASSA_SECRET_KEY}
+      - WG_DASHBOARD_URL=${WG_DASHBOARD_URL}
+      - WG_DASHBOARD_API_KEY=${WG_DASHBOARD_API_KEY}
       - DATABASE_PATH=/app/data/wgbot.db
-      - CASCADE_SERVERS_FILE=/run/secrets/cascade_servers.json
-      - CASCADE_REQUEST_TIMEOUT=${CASCADE_REQUEST_TIMEOUT:-20}
-      - CASCADE_RESERVATION_MINUTES=${CASCADE_RESERVATION_MINUTES:-30}
-      - CASCADE_RETRY_INTERVAL_SECONDS=${CASCADE_RETRY_INTERVAL_SECONDS:-60}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - WEBHOOK_URL=${WEBHOOK_URL}
       - DOMAIN=${DOMAIN}
     volumes:
       - ./DB:/app/data
       - ./logs:/app/logs
-      - ./secrets/cascade_servers.json:/run/secrets/cascade_servers.json:ro
+      - ./clients.json:/app/clients.json
     healthcheck:
       test:
         [
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=5)",
+          "import requests; response = requests.get('http://localhost:8001/health', timeout=5); exit(0 if response.ok else 1)",
         ]
       interval: 30s
       timeout: 10s

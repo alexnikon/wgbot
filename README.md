@@ -1,10 +1,8 @@
 # wgbot
 
-Telegram bot for selling and managing nikonVPN access through Cascade, Telegram Stars, and YooKassa.
+Telegram bot for selling and managing nikonVPN access through WGDashboard, Telegram Stars, and YooKassa.
 
-Cascade integration follows the documented [Cascade REST API](https://github.com/JohnnyVBut/cascade/blob/master/docs/API.en.md).
-
-## Configuration
+## Run Locally
 
 Create the environment file:
 
@@ -12,74 +10,93 @@ Create the environment file:
 cp env.docker.example .env
 ```
 
-Set the Telegram bot, YooKassa, webhook, tariff, support, and admin values in `.env`.
-Set `PAYMENT_RETURN_URL` to the matching production or development Telegram bot URL.
+Edit `.env` and set the required values:
 
-Create the protected Cascade registry:
-
-```bash
-mkdir -p secrets
-cp cascade_servers.example.json secrets/cascade_servers.json
-chmod 600 secrets/cascade_servers.json
+```env
+TELEGRAM_BOT_TOKEN=
+WG_DASHBOARD_URL=http://your-wgdashboard:10086
+WG_DASHBOARD_API_KEY=
+WG_CONFIG_NAME=awg0
+SUPPORT_URL=
+CLIENTS_JSON_PATH=clients.json
+ADMIN_TELEGRAM_IDS=123456789
 ```
 
-Each server entry requires a stable `server_key`, Cascade URL including the hidden admin path, API token, target interface UUID, priority, and `max_peers`. Servers are tried in ascending priority order. Tokens and real server data must not be committed.
+Optional YooKassa settings:
 
-Keep disabled server entries in the registry while any client is assigned to them. `enabled: false` stops new placement but still allows existing clients to download configs and synchronize expiration.
-
-## Run
-
-```bash
-docker compose up -d --build
-docker compose logs -f wgbot
-curl -fsS http://localhost:8001/health
+```env
+YOOKASSA_SHOP_ID=
+YOOKASSA_SECRET_KEY=
+WEBHOOK_URL=https://your-domain.com/webhook/yookassa
+DOMAIN=your-domain.com
 ```
 
-## Existing Client Migration
+Optional tariff overrides:
 
-Import existing peers into the designated Cascade migration interface with their original keys first. Then inspect the mapping:
-
-```bash
-docker cp ./clients.json wgbot:/tmp/clients.json
-docker compose exec wgbot python migrate_to_cascade.py \
-  --server-key cascade-1 \
-  --clients-json /tmp/clients.json
+```env
+TARIFF_14_DAYS_STARS=
+TARIFF_14_DAYS_RUB=
+TARIFF_30_DAYS_STARS=
+TARIFF_30_DAYS_RUB=
+TARIFF_90_DAYS_STARS=
+TARIFF_90_DAYS_RUB=
 ```
 
-Apply only after every missing or conflicting public key has been reviewed:
+## clients.json
 
-```bash
-docker compose exec wgbot python migrate_to_cascade.py \
-  --server-key cascade-1 \
-  --clients-json /tmp/clients.json \
-  --apply
+`clients.json` is the editable registry for clients, discounts, and additional WGDashboard peers.
+
+```json
+{
+  "version": 1,
+  "clients": [
+    {
+      "telegramId": 123456789,
+      "username": "client_username",
+      "promo": 0,
+      "peers": [
+        {
+          "role": "bot",
+          "clientId": "client_username",
+          "publicKey": "botPeerPublicKey"
+        },
+        {
+          "role": "manual",
+          "clientId": "iPhone",
+          "publicKey": "manualPeerPublicKey",
+          "jobId": "optional-created-by-bot"
+        },
+        {
+          "role": "manual",
+          "clientId": "",
+          "publicKey": ""
+        }
+      ]
+    }
+  ]
+}
 ```
 
-The migration matches by peer public key and never creates missing Cascade peers.
+Notes:
 
-## Development Validation
+- `promo: 20` means a 20% discount.
+- `promo: 150` means 150% of the base price.
+- `role: "bot"` is the peer created by the bot.
+- `role: "manual"` is an additional peer created manually in WGDashboard.
+- Empty manual peers are ignored.
 
-Check health, authentication, interfaces, and capacity without changing peers:
+## Admin
 
-```bash
-docker compose exec wgbot python cascade_smoke_test.py
+Set admin Telegram IDs in `.env`:
+
+```env
+ADMIN_TELEGRAM_IDS=123456789,987654321
 ```
 
-Exercise create, get, update, disable, enable, config, and delete on every configured dev interface:
+Admins must open the bot and press `/start` once before the bot can send them private notifications.
 
-```bash
-docker compose exec wgbot python cascade_smoke_test.py --exercise-peer
-```
+Admin features:
 
-Use `--exercise-peer` only on development interfaces. The temporary peer is deleted in a cleanup block.
-
-## CI/CD
-
-- `main`: production CI and deployment.
-- `cascade-migration`: CI and deployment through the GitHub `dev` environment.
-- Development uses an independent Telegram bot, YooKassa credentials, webhook domain, database, and VPS.
-- Rollback remains manual through the existing `Rollback` workflow.
-
-Repository variables for each GitHub Environment: `VPS_HOST`, `VPS_USER`, `VPS_PORT`, and `DEPLOY_PATH`. Store only `VPS_SSH_KEY` as an environment secret.
-
-Before the first development deployment, prepare a clean checkout on the development VPS with its own `.env`, `secrets/cascade_servers.json`, empty `DB/`, TLS files, domain, Telegram bot token, and YooKassa credentials. Create the GitHub Environment named `dev` with the deployment variables and SSH key above.
+- payment notifications;
+- broadcast to all clients;
+- direct message to a selected client.

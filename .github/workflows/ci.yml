@@ -1,14 +1,12 @@
 name: CI
 
 on:
-  workflow_call:
   push:
     branches:
       - main
   pull_request:
     branches:
       - main
-      - cascade-migration
 
 permissions:
   contents: read
@@ -36,15 +34,11 @@ jobs:
       - name: Compile Python files
         run: python -m compileall -q .
 
-      - name: Run unit tests
-        run: python -m unittest discover -s tests -v
-
       - name: Build Docker image
         run: docker build -t wgbot:ci .
 
       - name: Validate Docker Compose configuration
         run: |
-          touch .env
-          mkdir -p DB logs ssl secrets
-          cp cascade_servers.example.json secrets/cascade_servers.json
+          touch .env clients.json
+          mkdir -p DB logs ssl
           docker compose config --quiet

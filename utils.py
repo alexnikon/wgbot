@@ -1,7 +1,8 @@
 import datetime
+import json
 import logging
-from typing import Optional
-
+import os
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -9,28 +10,339 @@ logger = logging.getLogger(__name__)
 def generate_peer_name(
     telegram_username: Optional[str] = None, user_id: Optional[int] = None
 ) -> str:
-    """Use a Telegram username as the Cascade peer name, falling back to user ID."""
-    username = (telegram_username or "").strip().lstrip("@")
+    """
+    Generate a WGDashboard peer name.
+
+    Args:
+        telegram_username: Telegram username
+        user_id: Telegram user ID
+
+    Returns:
+        Telegram username when it exists, otherwise Telegram user ID
+    """
+    username = (telegram_username or "").strip()
     peer_name = username if username else str(user_id)
-    return peer_name[:50]
+
+    if len(peer_name) > 50:
+        peer_name = peer_name[:50]
+
+    return peer_name
 
 
 def parse_date_flexible(date_str: str) -> datetime.datetime:
-    """Parse the SQLite date formats used by the bot."""
+    """
+    Parse a date string, supporting multiple formats.
+
+    Args:
+        date_str: Date string in "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DD"
+
+    Returns:
+        Parsed datetime object
+
+    Raises:
+        ValueError: If the date format is not recognized
+    """
     if not date_str:
         raise ValueError("Empty date string")
-    for date_format in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-        try:
-            return datetime.datetime.strptime(date_str, date_format)
-        except ValueError:
-            continue
-    raise ValueError(f"Invalid date format: {date_str}")
+
+    try:
+        return datetime.datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        pass
+
+    try:
+        return datetime.datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError(f"Invalid date format: {date_str}") from exc
 
 
 def format_date_for_user(date_str: str) -> str:
-    """Format a stored date as DD-MM-YYYY for Telegram messages."""
+    """
+    Format a date for user display in DD-MM-YYYY.
+
+    Args:
+        date_str: Date string in "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DD"
+
+    Returns:
+        Formatted string in "DD-MM-YYYY"
+    """
     try:
-        return parse_date_flexible(date_str).strftime("%d-%m-%Y")
+        dt = parse_date_flexible(date_str)
+        return dt.strftime("%d-%m-%Y")
     except (ValueError, TypeError) as exc:
-        logger.error("Failed to format date %s: %s", date_str, exc)
+        logger.error(f"Failed to format date {date_str}: {exc}")
         return date_str
+
+
+class ClientsJsonManager:
+    def __init__(self, file_path: str):
+        self.file_path = file_path
+
+    def _empty_registry(self) -> Dict[str, Any]:
+        return {"version": 1, "clients": []}
+
+    def _read_clients(self) -> Dict[str, Any]:
+        if not os.path.exists(self.file_path):
+            return self._empty_registry()
+        try:
+            with open(self.file_path, "r", encoding="utf-8") as file:
+                data = json.load(file)
+            if isinstance(data, dict) and isinstance(data.get("clients"), list):
+                data.setdefault("version", 1)
+                return data
+            logger.error("clients.json must use the unified object format")
+            return self._empty_registry()
+        except (json.JSONDecodeError, IOError) as exc:
+            logger.error(f"Error reading clients.json: {exc}")
+            return self._empty_registry()
+
+    def _write_clients(self, clients: Dict[str, Any]) -> bool:
+        try:
+            with open(self.file_path, "w", encoding="utf-8") as file:
+                json.dump(clients, file, indent=2, ensure_ascii=False)
+            return True
+        except IOError as exc:
+            logger.error(f"Error writing clients.json: {exc}")
+            return False
+
+    def _base_client_id(self, client_id: str, username: str | None = None) -> str:
+        return (username or client_id or "").strip()
+
+    def _create_unified_client(
+        self,
+        client_id: str,
+        public_key: str,
+        telegram_user_id: int | None = None,
+        username: str | None = None,
+    ) -> Dict[str, Any]:
+        base_client_id = self._base_client_id(client_id, username)
+        return {
+            "telegramId": telegram_user_id if telegram_user_id is not None else "",
+            "username": username or "",
+            "promo": 0,
+            "peers": [
+                {
+                    "role": "bot",
+                    "clientId": base_client_id,
+                    "publicKey": public_key,
+                },
+                {"role": "manual", "clientId": "", "publicKey": ""},
+                {"role": "manual", "clientId": "", "publicKey": ""},
+            ],
+        }
+
+    def _ensure_unified_client_shape(self, client: Dict[str, Any]) -> None:
+        peers = client.get("peers")
+        if not isinstance(peers, list):
+            peers = []
+            client["peers"] = peers
+
+        if not peers:
+            peers.append({"role": "bot", "clientId": "", "publicKey": ""})
+
+        peers[0]["role"] = "bot"
+        peers[0]["clientId"] = str(peers[0].get("clientId") or "").strip()
+        peers[0]["publicKey"] = str(peers[0].get("publicKey") or "").strip()
+
+        while len(peers) < 3:
+            peers.append({"role": "manual", "clientId": "", "publicKey": ""})
+
+        for peer in peers[1:]:
+            peer["role"] = "manual"
+            peer["clientId"] = str(peer.get("clientId") or "").strip()
+            peer["publicKey"] = str(peer.get("publicKey") or "").strip()
+
+        if "promo" not in client:
+            client["promo"] = 0
+        if "username" not in client:
+            client["username"] = ""
+        if "telegramId" not in client:
+            client["telegramId"] = ""
+
+    def _find_unified_client(
+        self,
+        clients: List[Dict[str, Any]],
+        client_id: str,
+        telegram_user_id: int | None = None,
+        public_key: str | None = None,
+    ) -> Dict[str, Any] | None:
+        if telegram_user_id is not None:
+            for client in clients:
+                if str(client.get("telegramId")) == str(telegram_user_id):
+                    return client
+
+        for client in clients:
+            peers = client.get("peers") or []
+            for peer in peers:
+                if public_key and peer.get("publicKey") == public_key:
+                    return client
+                if client_id and peer.get("clientId") == client_id:
+                    return client
+
+        return None
+
+    def add_update_client(
+        self,
+        client_id: str,
+        public_key: str,
+        force_write: bool = False,
+        telegram_user_id: int | None = None,
+        username: str | None = None,
+    ) -> bool:
+        """
+        Add or update a client in the JSON file.
+
+        Args:
+            client_id: Telegram username or ID used as identifier
+            public_key: WireGuard public key
+            force_write: Force rewriting the file even when values match
+        """
+        data = self._read_clients()
+        clients = data["clients"]
+        client = self._find_unified_client(
+            clients,
+            client_id=client_id,
+            telegram_user_id=telegram_user_id,
+            public_key=public_key,
+        )
+        if client is None:
+            clients.append(
+                self._create_unified_client(
+                    client_id,
+                    public_key,
+                    telegram_user_id=telegram_user_id,
+                    username=username,
+                )
+            )
+            return self._write_clients(data)
+
+        self._ensure_unified_client_shape(client)
+        old_username = client.get("username")
+        old_telegram_id = client.get("telegramId")
+        old_client_id = client["peers"][0].get("clientId")
+        old_public_key = client["peers"][0].get("publicKey")
+
+        if telegram_user_id is not None:
+            client["telegramId"] = telegram_user_id
+        if username is not None:
+            client["username"] = username or ""
+
+        client["peers"][0]["role"] = "bot"
+        client["peers"][0]["clientId"] = self._base_client_id(client_id, username)
+        client["peers"][0]["publicKey"] = public_key
+
+        changed = (
+            old_username != client.get("username")
+            or old_telegram_id != client.get("telegramId")
+            or old_client_id != client["peers"][0].get("clientId")
+            or old_public_key != public_key
+            or force_write
+        )
+        if changed:
+            return self._write_clients(data)
+        return True
+
+    def get_client_telegram_ids(self) -> List[int]:
+        """Return unique Telegram IDs from the unified clients registry."""
+        data = self._read_clients()
+        result: List[int] = []
+        seen: set[int] = set()
+
+        for client in data["clients"]:
+            if not isinstance(client, dict):
+                continue
+
+            telegram_id = client.get("telegramId")
+            try:
+                normalized_id = int(telegram_id)
+            except (TypeError, ValueError):
+                continue
+
+            if normalized_id in seen:
+                continue
+
+            seen.add(normalized_id)
+            result.append(normalized_id)
+
+        return result
+
+    def get_admin_client_options(self) -> List[Dict[str, Any]]:
+        """Return unique clients for admin UI selection."""
+        data = self._read_clients()
+        result: List[Dict[str, Any]] = []
+        seen: set[int] = set()
+
+        for client in data["clients"]:
+            if not isinstance(client, dict):
+                continue
+
+            telegram_id = client.get("telegramId")
+            try:
+                normalized_id = int(telegram_id)
+            except (TypeError, ValueError):
+                continue
+
+            if normalized_id in seen:
+                continue
+
+            seen.add(normalized_id)
+            username = str(client.get("username") or "").strip()
+            result.append(
+                {
+                    "telegramId": normalized_id,
+                    "username": username,
+                }
+            )
+
+        return sorted(
+            result,
+            key=lambda item: (
+                (item.get("username") or "").lower(),
+                item.get("telegramId") or 0,
+            ),
+        )
+
+
+class PromoManager:
+    def __init__(self, clients_json_path: str):
+        self.clients_json_path = clients_json_path
+
+    def _get_promo(self, user_id: int) -> Optional[int]:
+        if not os.path.exists(self.clients_json_path):
+            return None
+
+        try:
+            with open(self.clients_json_path, "r", encoding="utf-8") as file:
+                data = json.load(file)
+
+            if not isinstance(data, dict) or not isinstance(data.get("clients"), list):
+                return None
+
+            for client in data["clients"]:
+                if not isinstance(client, dict):
+                    continue
+                if str(client.get("telegramId")) == str(user_id):
+                    promo = client.get("promo", 0)
+                    return int(promo or 0)
+        except Exception as exc:
+            logger.error(f"Error reading promo from clients.json: {exc}")
+
+        return None
+
+    def _promo_to_factor(self, value: int) -> float:
+        if value <= 0:
+            return 1.0
+        if value <= 100:
+            return 1.0 - (value / 100.0)
+        return value / 100.0
+
+    def get_user_promo_factor(self, user_id: int) -> float:
+        """
+        Return a user-specific price multiplier.
+
+        If value <= 100, it is a discount percent (20 -> 0.8).
+        If value > 100, it is a markup percent (150 -> 1.5).
+        Reads clients.json on each call to support hot reload.
+        """
+        promo = self._get_promo(user_id)
+        return self._promo_to_factor(promo) if promo is not None else 1.0

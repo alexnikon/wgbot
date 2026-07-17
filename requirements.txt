@@ -2,7 +2,8 @@
 # Core bot framework
 aiogram==3.22.0
 
-# HTTP client
+# HTTP requests
+requests==2.31.0
 httpx==0.25.2
 
 # Environment variables

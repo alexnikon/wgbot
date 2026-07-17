@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -10,24 +9,22 @@ load_dotenv()
 # Telegram Bot Configuration
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# Cascade server registry
-CASCADE_SERVERS_FILE = Path(
-    os.getenv("CASCADE_SERVERS_FILE", "/run/secrets/cascade_servers.json")
-)
-CASCADE_REQUEST_TIMEOUT = float(os.getenv("CASCADE_REQUEST_TIMEOUT", "20"))
-CASCADE_RESERVATION_MINUTES = int(os.getenv("CASCADE_RESERVATION_MINUTES", "30"))
-CASCADE_RETRY_INTERVAL_SECONDS = int(
-    os.getenv("CASCADE_RETRY_INTERVAL_SECONDS", "60")
-)
+# WGDashboard API Configuration
+WG_DASHBOARD_URL = os.getenv("WG_DASHBOARD_URL", "http://localhost:10086")
+WG_DASHBOARD_API_KEY = os.getenv("WG_DASHBOARD_API_KEY")
+WG_CONFIG_NAME = os.getenv("WG_CONFIG_NAME", "awg0")
 
 # Database Configuration
-DATABASE_FILE = os.getenv("DATABASE_PATH", "data/wgbot.db")
+DATABASE_FILE = "data/wgbot.db"
+CLIENTS_JSON_PATH = os.getenv("CLIENTS_JSON_PATH", "clients.json")
+
+# Peer Configuration
+PEER_EXPIRY_DAYS = 30
 
 # Payment Configuration
 # YooKassa Configuration
 YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID")
 YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY")
-PAYMENT_RETURN_URL = os.getenv("PAYMENT_RETURN_URL", "https://t.me/nikonvpn_bot")
 
 # Webhook Configuration
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
