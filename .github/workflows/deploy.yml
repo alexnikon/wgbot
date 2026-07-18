@@ -88,11 +88,9 @@ jobs:
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.DEPLOY_SHA }}
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          LEGACY_DEPLOY_PATH: ${{ vars.LEGACY_DEPLOY_PATH || '/home/alex/wgbot' }}
         run: |
           {
           printf 'DEPLOY_PATH=%q\n' "$DEPLOY_PATH"
-          printf 'LEGACY_DEPLOY_PATH=%q\n' "$LEGACY_DEPLOY_PATH"
           printf 'IMAGE=%q\n' "$IMAGE"
           printf 'DEPLOY_SHA=%q\n' "$DEPLOY_SHA"
           printf 'GHCR_USERNAME=%q\n' "$GHCR_USERNAME"
@@ -102,13 +100,9 @@ jobs:
 
           archive="$HOME/.wgbot-runtime-${DEPLOY_SHA}.tgz"
           staging="$(mktemp -d)"
-          legacy_stopped=0
           cleanup() {
             status=$?
             trap - EXIT
-            if [ "$status" -ne 0 ] && [ "$legacy_stopped" -eq 1 ]; then
-              docker start wgbot >/dev/null 2>&1 || true
-            fi
             rm -rf "$staging" "$archive"
             exit "$status"
           }
@@ -122,21 +116,6 @@ jobs:
           mkdir -p "$DEPLOY_PATH/DB" "$DEPLOY_PATH/backups" \
             "$DEPLOY_PATH/scripts" "$DEPLOY_PATH/secrets"
 
-          if [ ! -f "$DEPLOY_PATH/.env" ]; then
-            test -r "$LEGACY_DEPLOY_PATH/.env"
-            install -m 600 "$LEGACY_DEPLOY_PATH/.env" "$DEPLOY_PATH/.env"
-          fi
-          if [ ! -f "$DEPLOY_PATH/secrets/cascade_servers.json" ]; then
-            test -r "$LEGACY_DEPLOY_PATH/secrets/cascade_servers.json"
-            install -m 600 "$LEGACY_DEPLOY_PATH/secrets/cascade_servers.json" \
-              "$DEPLOY_PATH/secrets/cascade_servers.json"
-          fi
-          bootstrap_database=0
-          if [ ! -f "$DEPLOY_PATH/DB/wgbot.db" ]; then
-            test -r "$LEGACY_DEPLOY_PATH/DB/wgbot.db"
-            bootstrap_database=1
-          fi
-
           install -m 644 "$staging/docker-compose.yml" "$DEPLOY_PATH/docker-compose.yml"
           install -m 755 "$staging/scripts/backup_runtime.py" \
             "$DEPLOY_PATH/scripts/backup_runtime.py"
@@ -145,47 +124,15 @@ jobs:
 
           test -r .env
           test -r secrets/cascade_servers.json
+          test -r DB/wgbot.db
           test -w DB
-          if [ "$bootstrap_database" -eq 0 ]; then
-            python3 scripts/backup_runtime.py --root "$DEPLOY_PATH" --label production
-          fi
+          python3 scripts/backup_runtime.py --root "$DEPLOY_PATH" --label production
 
           printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
           docker pull "$IMAGE"
 
-          if [ "$bootstrap_database" -eq 1 ]; then
-            if docker inspect wgbot >/dev/null 2>&1; then
-              docker stop --time 30 wgbot >/dev/null
-              legacy_stopped=1
-            fi
-            python3 - "$LEGACY_DEPLOY_PATH/DB/wgbot.db" \
-              "$DEPLOY_PATH/DB/wgbot.db" <<'PYTHON'
-          import sqlite3
-          import sys
-          from pathlib import Path
-
-          source_path = Path(sys.argv[1]).resolve()
-          target_path = Path(sys.argv[2]).resolve()
-          temporary_path = target_path.with_suffix(".bootstrap.tmp")
-          temporary_path.unlink(missing_ok=True)
-          source = sqlite3.connect(f"file:{source_path}?mode=ro", uri=True)
-          target = sqlite3.connect(temporary_path)
-          try:
-              source.backup(target)
-              result = target.execute("PRAGMA integrity_check").fetchone()
-              if not result or result[0] != "ok":
-                  raise RuntimeError("Bootstrap database integrity check failed")
-          finally:
-              target.close()
-              source.close()
-          temporary_path.replace(target_path)
-          PYTHON
-            python3 scripts/backup_runtime.py --root "$DEPLOY_PATH" --label production
-          fi
-
           WGBOT_IMAGE="$IMAGE" docker compose --project-name wgbot \
             up -d --no-build --remove-orphans wgbot
-          legacy_stopped=0
 
           for attempt in $(seq 1 12); do
             if curl -fsS http://localhost:8001/health; then

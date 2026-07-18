@@ -25,7 +25,7 @@ Deploy workflows run the backup automatically. For daily backups between deploym
 add a host cron entry and replace the path with the runtime directory:
 
 ```cron
-15 3 * * * mkdir -p /home/alex/wgbot-runtime/backups && cd /home/alex/wgbot-runtime && /usr/bin/python3 scripts/backup_runtime.py --root /home/alex/wgbot-runtime --label scheduled >> /home/alex/wgbot-runtime/backups/backup.log 2>&1
+15 3 * * * mkdir -p /home/alex/wgbot/backups && cd /home/alex/wgbot && /usr/bin/python3 scripts/backup_runtime.py --root /home/alex/wgbot --label scheduled >> /home/alex/wgbot/backups/backup.log 2>&1
 ```
 
 Retention is applied per source file. Keep a separate encrypted off-site backup as well;
@@ -111,20 +111,17 @@ Production deployment is artifact-only: GitHub builds the image and uploads only
 checkout after the first successful runtime deployment.
 
 Repository variables for the production GitHub Environment: `VPS_HOST`, `VPS_USER`,
-`VPS_PORT`, and `DEPLOY_PATH`. Set `DEPLOY_PATH=/home/alex/wgbot-runtime`. During the
-first transition, optionally set `LEGACY_DEPLOY_PATH=/home/alex/wgbot`; the workflow
-uses SQLite's online backup API to copy the database and copies `.env` and the Cascade
-server registry only when the corresponding runtime files do not exist. Environment
-secrets: `VPS_SSH_KEY` and `VPS_KNOWN_HOSTS`. Generate the pinned host entry from a
-trusted workstation and verify its fingerprint before saving it:
+`VPS_PORT`, and `DEPLOY_PATH`. Set `DEPLOY_PATH=/home/alex/wgbot`. The runtime directory
+must contain `.env`, `DB/wgbot.db`, and `secrets/cascade_servers.json`; deployments upload
+the Compose file and backup script automatically. Environment secrets: `VPS_SSH_KEY`
+and `VPS_KNOWN_HOSTS`. Generate the pinned host entry from a trusted workstation and
+verify its fingerprint before saving it:
 
 ```bash
 ssh-keyscan -p 22 example.com
 ```
 
 Restrict the `production` GitHub Environment to the `main` branch and require a reviewer.
-After the first successful artifact-only deployment and health check, the old server-side
-Git checkout can be archived or removed.
 
 ## Dependency Updates
 
