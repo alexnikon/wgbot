@@ -20,12 +20,12 @@ Set the Telegram bot, YooKassa, webhook, tariff, support, and admin values in `.
 Set `PAYMENT_RETURN_URL` to the matching production or development Telegram bot URL.
 Deployment backups use SQLite's online backup API. `BACKUP_RETENTION_DAYS=30`
 removes older managed backups, while `BACKUP_MAX_FILES=20` keeps at most that many
-database backups and legacy registry backups. Set either value to `0` to disable that limit.
+database backups. Set either value to `0` to disable that limit.
 Deploy workflows run the backup automatically. For daily backups between deployments,
-add a host cron entry and replace the path with the deployment directory:
+add a host cron entry and replace the path with the runtime directory:
 
 ```cron
-15 3 * * * mkdir -p /home/alex/wgbot/backups && cd /home/alex/wgbot && /usr/bin/python3 scripts/backup_runtime.py --root /home/alex/wgbot --label scheduled >> /home/alex/wgbot/backups/backup.log 2>&1
+15 3 * * * mkdir -p /home/alex/wgbot-runtime/backups && cd /home/alex/wgbot-runtime && /usr/bin/python3 scripts/backup_runtime.py --root /home/alex/wgbot-runtime --label scheduled >> /home/alex/wgbot-runtime/backups/backup.log 2>&1
 ```
 
 Retention is applied per source file. Keep a separate encrypted off-site backup as well;
@@ -104,19 +104,27 @@ Use `--exercise-peer` only on development interfaces. The temporary peer is dele
 ## CI/CD
 
 - `main`: production CI and deployment.
-- `cascade-migration`: CI and deployment through the GitHub `dev` environment.
-- Development uses an independent Telegram bot, YooKassa credentials, webhook domain, database, and VPS.
 - Rollback remains manual through the existing `Rollback` workflow.
 
-Repository variables for each GitHub Environment: `VPS_HOST`, `VPS_USER`, `VPS_PORT`, and `DEPLOY_PATH`. Environment secrets: `VPS_SSH_KEY` and `VPS_KNOWN_HOSTS`. Generate the pinned host entry from a trusted workstation and verify its fingerprint before saving it:
+Production deployment is artifact-only: GitHub builds the image and uploads only
+`docker-compose.yml` and `scripts/backup_runtime.py`. The VPS does not need a Git
+checkout after the first successful runtime deployment.
+
+Repository variables for the production GitHub Environment: `VPS_HOST`, `VPS_USER`,
+`VPS_PORT`, and `DEPLOY_PATH`. Set `DEPLOY_PATH=/home/alex/wgbot-runtime`. During the
+first transition, optionally set `LEGACY_DEPLOY_PATH=/home/alex/wgbot`; the workflow
+uses SQLite's online backup API to copy the database and copies `.env` and the Cascade
+server registry only when the corresponding runtime files do not exist. Environment
+secrets: `VPS_SSH_KEY` and `VPS_KNOWN_HOSTS`. Generate the pinned host entry from a
+trusted workstation and verify its fingerprint before saving it:
 
 ```bash
 ssh-keyscan -p 22 example.com
 ```
 
-Use GitHub Environments named `production` and `dev`. Restrict `dev` deployments to `cascade-migration` and production deployments to `main`.
-
-Before the first development deployment, prepare a clean checkout on the development VPS with its own `.env`, `secrets/cascade_servers.json`, empty writable `DB/`, Caddy domain, Telegram bot token, and YooKassa credentials.
+Restrict the `production` GitHub Environment to the `main` branch and require a reviewer.
+After the first successful artifact-only deployment and health check, the old server-side
+Git checkout can be archived or removed.
 
 ## Dependency Updates
 

@@ -74,20 +74,26 @@ jobs:
           printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
           docker pull "$IMAGE"
 
-          WGBOT_IMAGE="$IMAGE" docker compose up -d --no-build --remove-orphans wgbot
+          test -r docker-compose.yml
+          test -r scripts/backup_runtime.py
+
+          WGBOT_IMAGE="$IMAGE" docker compose --project-name wgbot \
+            up -d --no-build --remove-orphans wgbot
 
           for attempt in $(seq 1 12); do
             if curl -fsS http://localhost:8001/health; then
               break
             fi
             if [ "$attempt" -eq 12 ]; then
-              WGBOT_IMAGE="$IMAGE" docker compose logs --tail=150 wgbot
+              WGBOT_IMAGE="$IMAGE" docker compose --project-name wgbot \
+                logs --tail=150 wgbot
               exit 1
             fi
             sleep 5
           done
-          WGBOT_IMAGE="$IMAGE" docker compose ps wgbot
-          WGBOT_IMAGE="$IMAGE" docker compose logs --tail=100 wgbot
+          WGBOT_IMAGE="$IMAGE" docker compose --project-name wgbot ps wgbot
+          WGBOT_IMAGE="$IMAGE" docker compose --project-name wgbot \
+            logs --tail=100 wgbot
           docker image prune -f --filter "until=168h"
           REMOTE
           } | ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \

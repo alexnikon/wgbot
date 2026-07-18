@@ -37,6 +37,20 @@ class RuntimeBackupTests(unittest.TestCase):
         self.assertEqual(value, "saved")
         self.assertEqual(list((self.root / "backups").glob("*.tmp-*")), [])
 
+    def test_ignores_legacy_client_registry(self):
+        registry = self.root / "clients.json"
+        registry.write_text("{}", encoding="utf-8")
+
+        created = backup_runtime.create_runtime_backup(
+            self.root,
+            "dev",
+            datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
+        )
+
+        self.assertEqual(len(created), 1)
+        self.assertTrue(registry.exists())
+        self.assertEqual(list((self.root / "backups").glob("clients.json.*")), [])
+
     def test_prunes_by_age_and_count_without_deleting_unmanaged_files(self):
         backup_dir = self.root / "backups"
         backup_dir.mkdir()

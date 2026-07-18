@@ -4,7 +4,6 @@
 import argparse
 import os
 import re
-import shutil
 import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
@@ -13,7 +12,7 @@ from pathlib import Path
 DEFAULT_RETENTION_DAYS = 30
 DEFAULT_MAX_FILES = 20
 MANAGED_BACKUP_RE = re.compile(
-    r"^(?P<source>wgbot\.db|clients\.json)(?:\.[A-Za-z0-9_-]+)?\.\d{8}-\d{6}$"
+    r"^(?P<source>wgbot\.db)(?:\.[A-Za-z0-9_-]+)?\.\d{8}-\d{6}$"
 )
 TEMPORARY_SIDECAR_RE = re.compile(
     r"^wgbot\.db(?:\.[A-Za-z0-9_-]+)?\.\d{8}-\d{6}\.tmp-(?:wal|shm)$"
@@ -79,7 +78,7 @@ def prune_backups(
     now: datetime,
 ) -> list[Path]:
     """Delete only managed backup files that exceed age or count limits."""
-    managed: dict[str, list[Path]] = {"wgbot.db": [], "clients.json": []}
+    managed: dict[str, list[Path]] = {"wgbot.db": []}
     removed: list[Path] = []
     for path in backup_dir.iterdir():
         if not path.is_file():
@@ -128,13 +127,6 @@ def create_runtime_backup(root: Path, label: str, now: datetime | None = None) -
     if database.is_file():
         destination = backup_dir / f"wgbot.db.{label}.{timestamp}"
         backup_sqlite(database, destination)
-        os.utime(destination, (now.timestamp(), now.timestamp()))
-        created.append(destination)
-
-    registry = root / "clients.json"
-    if registry.is_file():
-        destination = backup_dir / f"clients.json.{label}.{timestamp}"
-        shutil.copy2(registry, destination)
         os.utime(destination, (now.timestamp(), now.timestamp()))
         created.append(destination)
 
