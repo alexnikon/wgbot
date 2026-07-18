@@ -154,6 +154,19 @@ class CascadeAPI:
                     f"Cascade resource not found on {self.server.server_key}: {path}"
                 )
             if response.is_error:
+                try:
+                    error_payload = response.json()
+                    error_code = (
+                        str(error_payload.get("error") or "").casefold()
+                        if isinstance(error_payload, dict)
+                        else ""
+                    )
+                except (TypeError, ValueError):
+                    error_code = ""
+                if response.status_code == 400 and error_code == "peer not found":
+                    raise CascadeNotFound(
+                        f"Cascade peer not found on {self.server.server_key}: {path}"
+                    )
                 detail = response.text[:500]
                 raise CascadeError(
                     f"Cascade {method} {path} returned {response.status_code}: {detail}"
@@ -546,7 +559,7 @@ class CascadeRouter:
 
     async def sync_user_access(self, user_id: int, expire_date: str) -> dict[str, int]:
         peers = self.db.get_client_peers(user_id, bound_only=True)
-        result = {"total": len(peers), "updated": 0, "failed": 0}
+        result = {"total": len(peers), "updated": 0, "missing": 0, "failed": 0}
         is_future = datetime.fromisoformat(expire_date).replace(tzinfo=UTC) > datetime.now(UTC)
         for peer in peers:
             try:
@@ -558,6 +571,22 @@ class CascadeRouter:
                     await api.disable_peer(peer["cascade_peer_id"], peer["interface_id"])
                 self.db.set_client_peer_enabled(peer["cascade_peer_id"], is_future)
                 result["updated"] += 1
+            except CascadeNotFound as exc:
+                if peer["role"] != "manual":
+                    result["failed"] += 1
+                    logger.error(
+                        "Primary Cascade peer %s is missing: %s",
+                        peer["cascade_peer_id"],
+                        exc,
+                    )
+                    continue
+                self.db.set_client_peer_enabled(peer["cascade_peer_id"], False)
+                result["missing"] += 1
+                logger.warning(
+                    "Skipping missing manual Cascade peer %s for user %s",
+                    peer["cascade_peer_id"],
+                    user_id,
+                )
             except Exception as exc:
                 result["failed"] += 1
                 logger.error("Failed to sync Cascade peer %s: %s", peer["cascade_peer_id"], exc)
