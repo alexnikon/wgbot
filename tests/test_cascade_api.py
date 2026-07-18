@@ -9,6 +9,7 @@ import httpx
 from cascade_api import (
     CascadeAPI,
     CascadeError,
+    CascadeNotFound,
     CascadeRouter,
     CascadeServer,
     load_cascade_servers,
@@ -122,6 +123,30 @@ class CascadeServerRegistryTests(unittest.TestCase):
 
 
 class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
+    async def test_peer_not_found_400_is_normalized(self):
+        def handler(request):
+            return httpx.Response(400, json={"error": "peer not found"})
+
+        server = CascadeServer(
+            server_key="server-a",
+            base_url="https://vpn.example/admin",
+            api_token="token",
+            interface_id="interface-a",
+            priority=1,
+            max_peers=10,
+        )
+        api = CascadeAPI(server)
+        await api.client.aclose()
+        api.client = httpx.AsyncClient(
+            base_url=server.api_url.rstrip("/") + "/",
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            with self.assertRaises(CascadeNotFound):
+                await api.update_expiry("missing-peer", "2030-01-01 00:00:00")
+        finally:
+            await api.close()
+
     async def test_native_interface_import_uses_documented_payload(self):
         requests = []
 
@@ -275,6 +300,51 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(primary["server_key"], "server-a")
             self.assertEqual(primary["cascade_peer_id"], "new-peer")
             self.assertEqual(db.get_peer_count(10), 1)
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_sync_access_skips_missing_manual_peer(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.upsert_client(10, "alice")
+        db.save_client_peer(
+            10, "server-a", "if-a", "primary-peer", "primary-key", "alice", "primary"
+        )
+        db.save_client_peer(
+            10,
+            "server-a",
+            "if-a",
+            "missing-manual",
+            "manual-key",
+            "phone",
+            "manual",
+            enabled=False,
+        )
+
+        class AccessSyncAPI:
+            async def update_expiry(self, peer_id, expire_date, interface_id=None):
+                if peer_id == "missing-manual":
+                    raise CascadeNotFound("peer not found")
+
+            async def enable_peer(self, peer_id, interface_id=None):
+                return None
+
+        router = CascadeRouter(db, servers=[])
+        router.apis = {"server-a": AccessSyncAPI()}
+        try:
+            result = await router.sync_user_access(10, "2030-01-01 00:00:00")
+            peers = {peer["role"]: peer for peer in db.get_client_peers(10)}
+
+            self.assertEqual(
+                result, {"total": 2, "updated": 1, "missing": 1, "failed": 0}
+            )
+            self.assertEqual(peers["primary"]["enabled"], 1)
+            self.assertEqual(peers["manual"]["enabled"], 0)
         finally:
             for suffix in ("", "-wal", "-shm"):
                 try:
