@@ -1,12 +1,11 @@
 name: CI
 
 on:
-  push:
-    branches:
-      - main
+  workflow_call:
   pull_request:
     branches:
       - main
+      - cascade-migration
 
 permissions:
   contents: read
@@ -18,27 +17,56 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: '3.11'
-          cache: pip
+          python-version: '3.14'
 
-      - name: Install dependencies
+      - name: Install uv
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install --disable-pip-version-check "uv==0.11.29"
+
+      - name: Install locked dependencies
+        run: uv sync --frozen
+
+      - name: Lint Python files
+        run: uv run ruff check .
 
       - name: Compile Python files
-        run: python -m compileall -q .
+        run: uv run python -m compileall -q .
+
+      - name: Run unit tests with coverage
+        run: |
+          uv run coverage run -m unittest discover -s tests -v
+          uv run coverage report
+
+      - name: Audit Python dependencies
+        run: |
+          uv export --frozen --no-dev --output-file /tmp/requirements-audit.txt
+          uv run pip-audit --requirement /tmp/requirements-audit.txt --no-deps --disable-pip
 
       - name: Build Docker image
         run: docker build -t wgbot:ci .
 
+      - name: Smoke test runtime imports
+        run: |
+          docker run --rm --entrypoint python wgbot:ci -c \
+            "import app, bot, webhook_server; print('runtime imports ok')"
+
+      - name: Scan Docker image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: wgbot:ci
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
       - name: Validate Docker Compose configuration
         run: |
-          touch .env clients.json
-          mkdir -p DB logs ssl
+          touch .env
+          mkdir -p DB secrets
+          cp cascade_servers.example.json secrets/cascade_servers.json
           docker compose config --quiet

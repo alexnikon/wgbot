@@ -1,5 +1,6 @@
 import logging
-import os
+
+from config import LOG_LEVEL
 
 
 class HealthcheckAccessLogFilter(logging.Filter):
@@ -14,29 +15,29 @@ class HealthcheckAccessLogFilter(logging.Filter):
 
 
 def configure_logging() -> None:
-    """Configure application-wide logging once for file and docker logs."""
+    """Configure application logging for the container's stdout stream."""
     root_logger = logging.getLogger()
     if getattr(root_logger, "_wgbot_logging_configured", False):
         return
-
-    os.makedirs("logs", exist_ok=True)
 
     formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
 
-    file_handler = logging.FileHandler("logs/app.log")
-    file_handler.setFormatter(formatter)
-
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(formatter)
 
-    root_logger.setLevel(logging.INFO)
+    level = getattr(logging, LOG_LEVEL, logging.INFO)
+    root_logger.setLevel(level)
     root_logger.handlers.clear()
-    root_logger.addHandler(file_handler)
     root_logger.addHandler(stream_handler)
 
     healthcheck_filter = HealthcheckAccessLogFilter()
     logging.getLogger("uvicorn.access").addFilter(healthcheck_filter)
+
+    # HTTPX request logs include full URLs. Telegram API URLs contain the bot
+    # token, so keep transport-level logs out of normal application output.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     root_logger._wgbot_logging_configured = True

@@ -49,6 +49,7 @@ Thumbs.db
 # Project specific
 .env
 clients.json
+secrets/
 clients.migrated.json
 migration.sh
 *.db
@@ -65,11 +66,8 @@ docs/
 !requirements.txt
 *.md
 !README.md
-
-# Tests
-tests/
-test_*.py
-*_test.py
+!pyproject.toml
+!uv.lock
 
 # Temporary files
 tmp/

@@ -2,13 +2,9 @@ name: Deploy
 
 on:
   workflow_dispatch:
-  workflow_run:
-    workflows:
-      - CI
+  push:
     branches:
       - main
-    types:
-      - completed
 
 permissions:
   contents: read
@@ -21,32 +17,35 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+  DEPLOY_SHA: ${{ github.sha }}
 
 jobs:
+  validate:
+    name: Run CI before production deployment
+    uses: ./.github/workflows/ci.yml
+
   build-and-deploy:
     name: Build image and deploy to VPS
+    needs: validate
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    environment: production
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           push: true
@@ -55,6 +54,8 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
 
       - name: Prepare SSH key
         run: |
@@ -62,7 +63,8 @@ jobs:
           chmod 700 ~/.ssh
           printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/wgbot_deploy_key
           chmod 600 ~/.ssh/wgbot_deploy_key
-          ssh-keyscan -p "${{ vars.VPS_PORT }}" "${{ vars.VPS_HOST }}" >> ~/.ssh/known_hosts
+          printf '%s\n' "${{ secrets.VPS_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
 
       - name: Deploy on VPS
         env:
@@ -74,36 +76,47 @@ jobs:
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ssh -o IdentitiesOnly=yes -i ~/.ssh/wgbot_deploy_key -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" \
-            "DEPLOY_PATH='$DEPLOY_PATH' IMAGE='$IMAGE' GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN='$GHCR_TOKEN' bash -s" <<'REMOTE'
+          {
+          printf 'DEPLOY_PATH=%q\n' "$DEPLOY_PATH"
+          printf 'IMAGE=%q\n' "$IMAGE"
+          printf 'GHCR_USERNAME=%q\n' "$GHCR_USERNAME"
+          printf 'GHCR_TOKEN=%q\n' "$GHCR_TOKEN"
+          cat <<'REMOTE'
           set -Eeuo pipefail
 
           cd "$DEPLOY_PATH"
 
-          mkdir -p backups
-          backup_timestamp="$(date +%Y%m%d-%H%M%S)"
-          if [ -f DB/wgbot.db ]; then
-            cp DB/wgbot.db "backups/wgbot.db.${backup_timestamp}"
-          fi
-          if [ -f clients.json ]; then
-            cp clients.json "backups/clients.json.${backup_timestamp}"
-          fi
+          test -r .env
+          test -r secrets/cascade_servers.json
+          mkdir -p DB
+          test -w DB
 
           git fetch --prune origin
           git checkout main
           git pull --ff-only origin main
+          python3 scripts/backup_runtime.py --root "$DEPLOY_PATH" --label production
 
           printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
           docker pull "$IMAGE"
 
-          WGBOT_IMAGE="$IMAGE" docker compose up -d --no-build wgbot
+          WGBOT_IMAGE="$IMAGE" docker compose up -d --no-build --remove-orphans wgbot
 
-          sleep 10
-          curl -fsS http://localhost:8001/health
+          for attempt in $(seq 1 12); do
+            if curl -fsS http://localhost:8001/health; then
+              break
+            fi
+            if [ "$attempt" -eq 12 ]; then
+              WGBOT_IMAGE="$IMAGE" docker compose logs --tail=150 wgbot
+              exit 1
+            fi
+            sleep 5
+          done
           WGBOT_IMAGE="$IMAGE" docker compose ps wgbot
           WGBOT_IMAGE="$IMAGE" docker compose logs --tail=100 wgbot
           docker image prune -f --filter "until=168h"
           REMOTE
+          } | ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -i ~/.ssh/wgbot_deploy_key -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" bash -s
 
       - name: Deployment summary
         run: |

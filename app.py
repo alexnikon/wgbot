@@ -6,7 +6,7 @@ import uvicorn
 import bot as bot_module
 import webhook_server
 from logging_setup import configure_logging
-
+from services import AppServices, create_services
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -28,31 +28,25 @@ async def run_webhook_server() -> None:
 async def main() -> None:
     """Run the bot polling loop and webhook server in a single process."""
     logger.info("Starting combined application: bot polling + webhook server")
+    services: AppServices = create_services()
+    webhook_server.configure_runtime(services)
 
-    bot_task = asyncio.create_task(bot_module.main(), name="bot-polling")
-    webhook_task = asyncio.create_task(run_webhook_server(), name="webhook-server")
-    tasks = {bot_task, webhook_task}
+    async def require_long_running(name: str, coroutine) -> None:
+        await coroutine
+        raise RuntimeError(f"Long-running task {name} exited unexpectedly")
 
     try:
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
-
-        for task in done:
-            exc = task.exception()
-            if exc:
-                logger.error(f"Task {task.get_name()} failed: {exc}", exc_info=exc)
-                raise exc
-            logger.warning(f"Task {task.get_name()} exited unexpectedly without error")
-
-        for task in pending:
-            task.cancel()
-
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        async with asyncio.TaskGroup() as task_group:
+            task_group.create_task(
+                require_long_running("bot-polling", bot_module.main(services)),
+                name="bot-polling",
+            )
+            task_group.create_task(
+                require_long_running("webhook-server", run_webhook_server()),
+                name="webhook-server",
+            )
     finally:
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await services.close()
 
 
 if __name__ == "__main__":
