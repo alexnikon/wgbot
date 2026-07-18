@@ -1,13 +1,27 @@
-import logging
-import hashlib
-import hmac
 import json
+import logging
 import uuid
-from typing import Dict, Any, Optional
+from decimal import Decimal, InvalidOperation
+from typing import Any
+
 import httpx
-from config import YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY
+
+from config import YOOKASSA_SECRET_KEY, YOOKASSA_SHOP_ID
 
 logger = logging.getLogger(__name__)
+
+
+class YooKassaError(RuntimeError):
+    """Base error raised by the YooKassa integration."""
+
+
+class YooKassaUnavailable(YooKassaError):
+    """YooKassa could not be reached or returned a transient error."""
+
+
+class YooKassaNotFound(YooKassaError):
+    """The requested YooKassa object does not exist."""
+
 
 class YooKassaClient:
     """Client for the YooKassa API."""
@@ -46,7 +60,7 @@ class YooKassaClient:
             await self._client.aclose()
     
     async def create_payment(self, amount: int, currency: str, description: str, 
-                           return_url: str, metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                           return_url: str, metadata: dict[str, Any]) -> dict[str, Any] | None:
         """
         Create a YooKassa payment.
         
@@ -96,71 +110,46 @@ class YooKassaClient:
             logger.error(f"Payment creation error: {e}")
             return None
     
-    async def get_payment(self, payment_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get payment info.
-        
-        Args:
-            payment_id: Payment ID
-            
-        Returns:
-            Payment data or None on error
-        """
+    async def _fetch_resource(self, resource: str, object_id: str) -> dict[str, Any]:
+        """Fetch an authoritative YooKassa object and preserve failure semantics."""
         try:
             response = await self._get_client().get(
-                f"{self.base_url}/payments/{payment_id}",
+                f"{self.base_url}/{resource}/{object_id}",
                 headers=self.headers,
             )
-            
-            if response.status_code == 200:
-                return response.json()
+        except httpx.HTTPError as exc:
+            raise YooKassaUnavailable(
+                f"Failed to fetch {resource}/{object_id}: {exc}"
+            ) from exc
 
-            logger.error(f"Payment fetch error: {response.status_code} - {response.text}")
-            return None
-                    
-        except Exception as e:
-            logger.error(f"Failed to fetch payment {payment_id}: {e}")
-            return None
-    
-    def verify_webhook_signature(self, body: str, signature: str) -> bool:
-        """
-        Verify YooKassa webhook signature.
-
-        Note: YooKassa docs don't specify the exact signature algorithm.
-        This method uses standard HMAC-SHA256 validation.
-        
-        Args:
-            body: Request body
-            signature: Signature from header
-            
-        Returns:
-            True if signature is valid
-        """
+        if response.status_code == 404:
+            raise YooKassaNotFound(f"YooKassa {resource}/{object_id} was not found")
+        if response.status_code >= 500 or response.status_code in {408, 425, 429}:
+            raise YooKassaUnavailable(
+                f"YooKassa returned {response.status_code} for {resource}/{object_id}"
+            )
+        if response.status_code != 200:
+            raise YooKassaError(
+                f"YooKassa returned {response.status_code} for {resource}/{object_id}: "
+                f"{response.text[:300]}"
+            )
         try:
-            if not signature:
-                logger.warning("Missing webhook signature")
-                return False
-                
-            # Compute expected signature (HMAC-SHA256)
-            expected_signature = hmac.new(
-                self.secret_key.encode(),
-                body.encode(),
-                hashlib.sha256
-            ).hexdigest()
-            
-            # Compare signatures securely
-            is_valid = hmac.compare_digest(signature, expected_signature)
-            
-            if not is_valid:
-                logger.warning(f"Invalid webhook signature. Expected: {expected_signature[:8]}..., got: {signature[:8]}...")
-            
-            return is_valid
-            
-        except Exception as e:
-            logger.error(f"Webhook signature verification error: {e}")
-            return False
+            result = response.json()
+        except ValueError as exc:
+            raise YooKassaUnavailable("YooKassa returned invalid JSON") from exc
+        if not isinstance(result, dict):
+            raise YooKassaUnavailable("YooKassa returned an invalid object")
+        return result
+
+    async def get_payment(self, payment_id: str) -> dict[str, Any]:
+        """Fetch authoritative payment data from YooKassa."""
+        return await self._fetch_resource("payments", payment_id)
+
+    async def get_refund(self, refund_id: str) -> dict[str, Any]:
+        """Fetch authoritative refund data from YooKassa."""
+        return await self._fetch_resource("refunds", refund_id)
     
-    def parse_webhook(self, body: str) -> Optional[Dict[str, Any]]:
+    def parse_webhook(self, body: str) -> dict[str, Any] | None:
         """
         Parse YooKassa webhook.
         
@@ -182,7 +171,7 @@ class YooKassaClient:
             logger.error(f"Webhook parse error: {e}")
             return None
     
-    def validate_webhook_structure(self, data: Dict[str, Any]) -> bool:
+    def validate_webhook_structure(self, data: dict[str, Any]) -> bool:
         """
         Validate webhook structure according to YooKassa docs.
         
@@ -229,7 +218,7 @@ class YooKassaClient:
             logger.error(f"Webhook structure validation error: {e}", exc_info=True)
             return False
     
-    def get_payment_amount(self, payment_data: Dict[str, Any]) -> int:
+    def get_payment_amount(self, payment_data: dict[str, Any]) -> int:
         """
         Get payment amount in kopeks.
         
@@ -240,12 +229,12 @@ class YooKassaClient:
             Amount in kopeks
         """
         try:
-            amount_value = payment_data.get("amount", {}).get("value", "0")
-            return int(float(amount_value) * 100)
-        except (ValueError, TypeError):
+            amount_value = Decimal(str(payment_data.get("amount", {}).get("value", "0")))
+            return int(amount_value * 100)
+        except (InvalidOperation, ValueError, TypeError):
             return 0
     
-    def get_payment_metadata(self, payment_data: Dict[str, Any]) -> Dict[str, Any]:
+    def get_payment_metadata(self, payment_data: dict[str, Any]) -> dict[str, Any]:
         """
         Get payment metadata.
         

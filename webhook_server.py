@@ -1,66 +1,67 @@
 import asyncio
-import logging
+import hmac
 import json
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
+import logging
 from contextlib import asynccontextmanager
-import uvicorn
-from logging_setup import configure_logging
-from utils import format_date_for_user, generate_peer_name
-from config import get_admin_telegram_ids, TELEGRAM_BOT_TOKEN
-from custom_clients import sync_custom_peers_access
-from services import (
-    clients_manager,
-    close_shared_services,
-    custom_clients_manager,
-    db,
-    wg_api,
-    yookassa_client,
-)
+
 import httpx
+import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+from cascade_api import CascadeRouter
+from config import (
+    INTERNAL_METRICS_TOKEN,
+    TELEGRAM_BOT_TOKEN,
+    WEBHOOK_MAX_BODY_BYTES,
+    get_admin_telegram_ids,
+    get_tariffs,
+)
+from database import Database
+from logging_setup import configure_logging
+from services import AppServices
+from utils import format_date_for_user, generate_peer_name
+from yookassa_client import (
+    YooKassaClient,
+    YooKassaError,
+    YooKassaNotFound,
+    YooKassaUnavailable,
+)
 
 configure_logging()
 logger = logging.getLogger(__name__)
-
 telegram_http_client: httpx.AsyncClient | None = None
+db: Database
+cascade_router: CascadeRouter
+yookassa_client: YooKassaClient
+app_services: AppServices | None = None
 
 
-def sync_bound_custom_peers_for_user(
-    user_id: int,
-    expire_date: str,
-    allow_access: bool = True,
-    primary_peer_id: str | None = None,
-):
-    result = sync_custom_peers_access(
-        wg_api=wg_api,
-        custom_clients_manager=custom_clients_manager,
-        user_id=user_id,
-        expire_date=expire_date,
-        allow_access=allow_access,
-        primary_peer_id=primary_peer_id,
-    )
-    if result["total"] > 0:
-        logger.info(
-            f"Custom peers sync user_id={user_id}: total={result['total']}, updated={result['updated']}, failed={result['failed']}"
-        )
+def configure_runtime(services: AppServices) -> None:
+    """Inject explicitly created runtime services before serving requests."""
+    global app_services, cascade_router, db, yookassa_client
+    app_services = services
+    db = services.db
+    cascade_router = services.cascade_router
+    yookassa_client = services.yookassa_client
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifecycle management."""
+    """Manage webhook process HTTP resources."""
     global telegram_http_client
-    logger.info("Webhook server starting...")
+    logger.info("Webhook server starting")
     telegram_http_client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0))
     yield
-    if telegram_http_client is not None and not telegram_http_client.is_closed:
+    if telegram_http_client and not telegram_http_client.is_closed:
         await telegram_http_client.aclose()
-    await close_shared_services()
-    logger.info("Webhook server stopping...")
+    logger.info("Webhook server stopping")
+
 
 app = FastAPI(title="WGBot Webhook Server", lifespan=lifespan)
 
 
 def get_telegram_http_client() -> httpx.AsyncClient:
-    """Return a shared Telegram HTTP client."""
     global telegram_http_client
     if telegram_http_client is None or telegram_http_client.is_closed:
         telegram_http_client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0))
@@ -68,831 +69,379 @@ def get_telegram_http_client() -> httpx.AsyncClient:
 
 
 def create_home_reply_markup() -> dict:
-    """Create a compact inline keyboard with a main menu button."""
-    return {
-        "inline_keyboard": [
-            [{"text": "На главную", "callback_data": "main"}]
-        ]
-    }
+    return {"inline_keyboard": [[{"text": "На главную", "callback_data": "main"}]]}
 
 
-def format_admin_payment_notification(
+async def send_telegram_message(
+    chat_id: int, text: str, reply_markup: dict | None = None
+) -> bool:
+    payload: dict = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    try:
+        response = await get_telegram_http_client().post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json=payload,
+            timeout=10.0,
+        )
+        if response.is_success:
+            return True
+        logger.error("Telegram sendMessage failed: %s", response.text)
+    except Exception as exc:
+        logger.error("Telegram sendMessage error: %s", exc)
+    return False
+
+
+async def send_telegram_document(
+    chat_id: int, filename: str, content: bytes | str
+) -> bool:
+    try:
+        response = await get_telegram_http_client().post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
+            files={"document": (filename, content, "application/octet-stream")},
+            data={"chat_id": str(chat_id)},
+            timeout=30.0,
+        )
+        if response.is_success:
+            return True
+        logger.error("Telegram sendDocument failed: %s", response.text)
+    except Exception as exc:
+        logger.error("Telegram sendDocument error: %s", exc)
+    return False
+
+
+async def send_config_with_confirmation(chat_id: int, config: bytes | str) -> bool:
+    if not await send_telegram_document(chat_id, "nikonVPN.conf", config):
+        return False
+    await send_telegram_message(
+        chat_id,
+        "✅ Прислал тебе конфиг файл.\nДобавь его в приложение AmneziWG",
+        create_home_reply_markup(),
+    )
+    return True
+
+
+async def notify_admins(text: str) -> None:
+    for admin_id in get_admin_telegram_ids():
+        await send_telegram_message(admin_id, text)
+
+
+async def delete_payment_message(metadata: dict) -> None:
+    try:
+        chat_id = int(metadata.get("payment_chat_id"))
+        message_id = int(metadata.get("payment_message_id"))
+    except (TypeError, ValueError):
+        return
+    try:
+        await get_telegram_http_client().post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage",
+            json={"chat_id": chat_id, "message_id": message_id},
+            timeout=10.0,
+        )
+    except Exception as exc:
+        logger.warning("Failed to delete payment message: %s", exc)
+
+
+def admin_payment_text(
     title: str,
     user_id: int,
     username: str | None,
     tariff_name: str,
     amount: str,
-    payment_method: str,
-    expire_date: str | None = None,
+    expire_date: str,
 ) -> str:
-    user_line = f"@{username}" if username else "без username"
-    text = (
+    return (
         f"{title}\n\n"
-        f"👤 Пользователь: {user_line}\n"
+        f"👤 Пользователь: @{username if username else 'без username'}\n"
         f"🆔 Telegram ID: {user_id}\n"
         f"📋 Тариф: {tariff_name}\n"
         f"💰 Стоимость: {amount}\n"
-        f"💳 Способ оплаты: {payment_method}"
-    )
-    if expire_date:
-        text += f"\n📅 Новый срок: {format_date_for_user(expire_date)}"
-    return text
-
-
-async def send_telegram_message(chat_id: int, text: str, reply_markup: dict | None = None):
-    """Send a message to Telegram."""
-    try:
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML"
-        }
-        if reply_markup is not None:
-            payload["reply_markup"] = reply_markup
-
-        response = await get_telegram_http_client().post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json=payload,
-            timeout=10.0
-        )
-        
-        if response.status_code == 200:
-            logger.info(f"Message sent to user {chat_id}")
-        else:
-            response_data = response.json()
-            error_code = response_data.get('error_code', 'unknown')
-            error_description = response_data.get('description', 'unknown error')
-
-            if error_code == 400 and 'chat not found' in error_description:
-                logger.warning(f"User {chat_id} blocked the bot or deleted the chat")
-            else:
-                logger.error(
-                    f"Failed to send message to user {chat_id}: {error_code} - {error_description}"
-                )
-                    
-    except Exception as e:
-        logger.error(f"Error sending message to Telegram: {e}")
-
-
-async def notify_admins(text: str) -> None:
-    """Send a best-effort notification to configured admins."""
-    for admin_id in get_admin_telegram_ids():
-        try:
-            await send_telegram_message(admin_id, text)
-        except Exception as e:
-            logger.warning(f"Unexpected admin notification error for {admin_id}: {e}")
-
-
-async def delete_telegram_message(chat_id: int, message_id: int) -> bool:
-    """Delete a Telegram message sent by the bot."""
-    try:
-        response = await get_telegram_http_client().post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteMessage",
-            json={"chat_id": chat_id, "message_id": message_id},
-            timeout=10.0,
-        )
-        if response.status_code == 200:
-            logger.info(f"Deleted Telegram message {message_id} in chat {chat_id}")
-            return True
-
-        logger.warning(
-            f"Failed to delete Telegram message {message_id} in chat {chat_id}: {response.status_code} - {response.text}"
-        )
-        return False
-    except Exception as e:
-        logger.warning(
-            f"Error deleting Telegram message {message_id} in chat {chat_id}: {e}"
-        )
-        return False
-
-
-async def delete_yookassa_payment_message(metadata: dict) -> None:
-    """Delete the YooKassa payment screen when payment is completed."""
-    try:
-        chat_id_raw = metadata.get("payment_chat_id")
-        message_id_raw = metadata.get("payment_message_id")
-        if not chat_id_raw or not message_id_raw:
-            logger.info("Payment message metadata is missing; nothing to delete")
-            return
-
-        await delete_telegram_message(int(chat_id_raw), int(message_id_raw))
-    except (TypeError, ValueError) as e:
-        logger.warning(f"Invalid payment message metadata, cannot delete message: {e}")
-
-
-async def send_telegram_document(
-    chat_id: int,
-    filename: str,
-    file_content: bytes | str,
-    caption: str | None = None,
-    reply_markup: dict | None = None,
-) -> bool:
-    """Send a document to Telegram."""
-    try:
-        logger.info(f"Sending document to user {chat_id}: {filename}")
-        files = {
-            "document": (
-                filename,
-                file_content,
-                "application/octet-stream",
-            )
-        }
-        data: dict[str, str] = {"chat_id": str(chat_id)}
-        if caption is not None:
-            data["caption"] = caption
-        if reply_markup is not None:
-            data["reply_markup"] = json.dumps(reply_markup)
-
-        response = await get_telegram_http_client().post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
-            files=files,
-            data=data,
-            timeout=30.0,
-        )
-
-        if response.status_code == 200:
-            logger.info(f"Document sent to user {chat_id}")
-            return True
-
-        logger.error(
-            f"Failed to send document to user {chat_id}: {response.status_code} - {response.text}"
-        )
-        return False
-    except Exception as e:
-        logger.error(f"Error sending document to Telegram: {e}", exc_info=True)
-        return False
-
-
-async def send_config_confirmation(chat_id: int) -> None:
-    """Send delayed confirmation after config delivery."""
-    await asyncio.sleep(3)
-    await send_telegram_message(
-        chat_id,
-        "✅ Прислал тебе конфиг файл.\nДобавь его в приложение AmneziWG",
-        reply_markup=create_home_reply_markup(),
+        f"💳 Способ оплаты: Банковская карта\n"
+        f"📅 Новый срок: {format_date_for_user(expire_date)}"
     )
 
 
-async def send_config_with_confirmation(chat_id: int, config_content: bytes | str) -> bool:
-    """Send config file first, then send a delayed confirmation message."""
-    sent = await send_telegram_document(
-        chat_id=chat_id,
-        filename="nikonVPN.conf",
-        file_content=config_content,
-        caption=None,
+async def process_successful_payment(payment_data: dict) -> None:
+    """Activate or extend Cascade access after a verified YooKassa payment."""
+    payment_id = str(payment_data.get("id") or "")
+    local_payment = await asyncio.to_thread(db.get_payment_by_id, payment_id)
+    if not local_payment:
+        raise ValueError("Verified payment does not exist locally")
+    metadata = json.loads(local_payment.get("metadata") or "{}")
+    user_id = int(local_payment["user_id"])
+    tariff_key = str(local_payment.get("tariff_key") or "")
+    tariff = get_tariffs().get(tariff_key)
+    if not tariff:
+        logger.error("Unknown tariff %s in payment %s", tariff_key, payment_id)
+        return
+    username = str(metadata.get("username") or "").strip().lstrip("@") or None
+    amount_kopeks = yookassa_client.get_payment_amount(payment_data)
+    amount_text = str(payment_data.get("amount", {}).get("value", "0"))
+
+    await delete_payment_message(metadata)
+    payment_result = await asyncio.to_thread(
+        db.apply_verified_payment,
+        payment_id,
+        user_id,
+        username,
+        amount_kopeks,
+        "yookassa",
+        tariff_key,
+        int(tariff["days"]),
     )
-    if not sent:
-        return False
+    if not payment_result:
+        logger.info("Ignoring duplicate YooKassa payment event %s", payment_id)
+        return
+    expire_date = payment_result["expire_date"]
+    primary = await asyncio.to_thread(db.get_primary_client_peer, user_id)
 
-    await send_config_confirmation(chat_id)
-    return True
-
-async def process_successful_payment(payment_data: dict):
-    """Process successful payment."""
-    try:
-        # Get core payment info
-        payment_id = payment_data.get('id', '')
-        amount_info = payment_data.get('amount', {})
-        amount_value = amount_info.get('value', '0')
-        currency = amount_info.get('currency', 'RUB')
-        
-        logger.info(f"Start processing payment {payment_id}: {amount_value} {currency}")
-        
-        # Get payment method info
-        payment_method = payment_data.get('payment_method', {})
-        method_type = payment_method.get('type', 'unknown')
-        
-        # For bank cards, fetch extra details
-        card_info = ""
-        if method_type == 'bank_card':
-            card = payment_method.get('card', {})
-            if card:
-                last4 = card.get('last4', '')
-                card_type = card.get('card_type', '')
-                issuer_name = card.get('issuer_name', '')
-                card_info = f" ({card_type} *{last4}, {issuer_name})"
-        
-        # Get 3D Secure info
-        auth_details = payment_data.get('authorization_details', {})
-        three_d_secure = auth_details.get('three_d_secure', {})
-        three_d_applied = three_d_secure.get('applied', False)
-        
-        if three_d_applied:
-            logger.info(f"Payment {payment_id} passed 3D Secure authentication")
-        
-        logger.info(
-            f"Processing successful payment {payment_id}: {amount_value} {currency}, method: {method_type}{card_info}"
-        )
-        
-        metadata = yookassa_client.get_payment_metadata(payment_data)
-        logger.info(f"Payment metadata {payment_id}: {metadata}")
-        
-        user_id = int(metadata.get('user_id', 0))
-        tariff_key = metadata.get('tariff_key', '30_days')
-        metadata_username = (metadata.get('username') or '').strip()
-        if metadata_username.startswith('@'):
-            metadata_username = metadata_username[1:]
-        amount = yookassa_client.get_payment_amount(payment_data)
-        
-        if not user_id:
-            logger.error(f"user_id not found in payment {payment_id} metadata. Metadata: {metadata}")
-            return
-
-        await delete_yookassa_payment_message(metadata)
-        
-        logger.info(f"Processing payment {payment_id} for user {user_id}, tariff: {tariff_key}")
-        
-        # Fetch tariff info (dynamic)
-        from config import get_tariffs
-        tariffs = get_tariffs()
-        tariff_data = tariffs.get(tariff_key, tariffs.get('30_days', {'days': 30}))
-        access_days = tariff_data.get('days', 30)
-        
-        # Update payment status in DB
-        try:
-            db.update_payment_status_by_id(payment_id, 'succeeded')
-            logger.info(f"Payment {payment_id} status updated to 'succeeded'")
-        except Exception as e:
-            logger.warning(f"Failed to update payment status in DB: {e}")
-        
-        # Check if the user already has a peer
-        existing_peer = db.get_peer_by_telegram_id(user_id)
-        target_expire_date = None
-        effective_username = metadata_username or (
-            (existing_peer or {}).get('telegram_username', '').strip()
-        )
-        
-        if existing_peer:
-            logger.info(f"User {user_id} already has a peer, extending access")
-            # Extend access for the existing peer
-            success, new_expire_date = db.extend_access(user_id, access_days)
-            
-            if success:
-                logger.info(f"Access extended for user {user_id}, new date: {new_expire_date}")
-                # Check if the peer exists in WGDashboard
-                peer_exists = None
-                try:
-                    peer_exists = wg_api.check_peer_exists(existing_peer['peer_id'])
-                except Exception as e:
-                    logger.error(f"Error checking peer existence in WGDashboard: {e}")
-
-                allow_result = None
-                try:
-                    allow_result = wg_api.allow_access_peer(existing_peer['peer_id'])
-                    if allow_result and allow_result.get('status'):
-                        logger.info(f"Restricted removed for user {user_id}")
-                        peer_exists = True
-                    else:
-                        logger.warning(
-                            f"Failed to remove restricted for user {user_id}: {allow_result}"
-                        )
-                except Exception as e:
-                    logger.error(f"Error removing restricted in WGDashboard: {e}")
-
-                if peer_exists is True:
-                    try:
-                        job_update_result, resolved_job_id, resolved_expire_date, created_new_job = (
-                            wg_api.ensure_restrict_job(
-                                existing_peer["peer_id"],
-                                new_expire_date,
-                                existing_peer.get("job_id"),
-                            )
-                        )
-                        
-                        if job_update_result and job_update_result.get('status'):
-                            logger.info(
-                                f"Job ensured for user {user_id}, resolved_job_id={resolved_job_id}, created_new_job={created_new_job}, new date: {resolved_expire_date}"
-                            )
-                            if (
-                                resolved_job_id != existing_peer.get("job_id")
-                                or resolved_expire_date != new_expire_date
-                            ):
-                                persisted = db.update_peer_info(
-                                    existing_peer["peer_name"],
-                                    existing_peer["peer_id"],
-                                    resolved_job_id,
-                                    resolved_expire_date,
-                                )
-                                logger.info(
-                                    f"Persisted ensured job for user {user_id}: persisted={persisted}, resolved_job_id={resolved_job_id}"
-                                )
-                                existing_peer["job_id"] = resolved_job_id
-                                new_expire_date = resolved_expire_date
-                        else:
-                            logger.error(f"Error updating job for user {user_id}: {job_update_result}")
-                            
-                    except Exception as e:
-                        logger.error(f"Error updating job in WGDashboard: {e}")
-                    
-                    # Update payment status in peers table (amount in kopeks, convert to rubles)
-                    db.update_payment_status(user_id, 'paid', amount // 100, 'yookassa', tariff_key)
-                    
-                    await send_telegram_message(
-                        user_id,
-                        f"✅ Платеж успешно обработан!\n"
-                        f"🎉 Продлили тебе доступ на {access_days} дней!\n"
-                        f"💳 Способ оплаты: Банковская карта\n\n"
-                        f"Текущая конфигурация остается актуальной.",
-                        reply_markup=create_home_reply_markup(),
-                    )
-                    sync_bound_custom_peers_for_user(
-                        user_id=user_id,
-                        expire_date=new_expire_date,
-                        allow_access=True,
-                        primary_peer_id=existing_peer["peer_id"],
-                    )
-                    await notify_admins(
-                        format_admin_payment_notification(
-                            "🔁 Клиент продлил подписку",
-                            user_id=user_id,
-                            username=effective_username or None,
-                            tariff_name=tariff_data.get("name", tariff_key),
-                            amount=f"{amount_value} руб.",
-                            payment_method="Банковская карта",
-                            expire_date=new_expire_date,
-                        )
-                    )
-                elif peer_exists is False:
-                    logger.warning(
-                        f"Peer for user {user_id} not found in WGDashboard, creating a new one"
-                    )
-                    # If the peer is missing in WGDashboard, fall back to the creation flow
-                    target_expire_date = new_expire_date
-                    existing_peer = None
-                else:
-                    logger.error(
-                        f"Peer status for user {user_id} is unknown, recreation canceled to avoid duplicate"
-                    )
-                    await send_telegram_message(
-                        user_id,
-                        "❌ Не удалось проверить статус VPN на сервере. Попробуйте еще раз через минуту или обратитесь в поддержку.",
-                    )
-                    return
-            else:
-                logger.error(f"Error extending access for user {user_id}")
-                await send_telegram_message(
-                    user_id,
-                    "❌ Ошибка при продлении доступа. Обратитесь в поддержку."
-                )
-                return
-        if not existing_peer:
-            # Create a new peer for the user
-            logger.info(f"Creating a new peer for user {user_id}")
-            peer_name = generate_peer_name(effective_username or None, user_id)
-            logger.info(f"Generated peer name: {peer_name}")
-
-            from datetime import datetime, timedelta
-
-            expire_date = target_expire_date or (
-                datetime.now() + timedelta(days=access_days)
-            ).strftime("%Y-%m-%d %H:%M:%S")
-
-            # Step 1. Stage the DB record first
-            stage_info = db.stage_peer_record(
-                peer_name=peer_name,
-                telegram_user_id=user_id,
-                telegram_username=effective_username or "",
-                expire_date=expire_date,
-                payment_status="paid",
-                tariff_key=tariff_key,
-                payment_method="yookassa",
-                rub_paid=amount // 100,
-            )
-            if not stage_info:
-                logger.error(f"Failed to save staged DB record for user {user_id}")
-                await send_telegram_message(
-                    user_id,
-                    "❌ Ошибка при сохранении данных. Обратитесь в поддержку.",
-                )
-                return
-
-            peer_id = None
-            try:
-                # Step 2. Create peer in WGDashboard
-                peer_result = wg_api.add_peer(peer_name)
-                if not peer_result or "id" not in peer_result:
-                    raise Exception(f"Failed to create peer: {peer_result}")
-
-                peer_id = peer_result["id"]
-                logger.info(f"Peer created successfully: {peer_id}")
-
-                # Step 3. Create job in WGDashboard
-                logger.info(
-                    f"Creating job for peer {peer_id}, expiration date: {expire_date}"
-                )
-                job_result, job_id, final_expire_date = wg_api.create_restrict_job(
-                    peer_id, expire_date
-                )
-                if not job_result or (
-                    isinstance(job_result, dict) and job_result.get("status") is False
-                ):
-                    raise Exception(f"Failed to create job: {job_result}")
-
-                logger.info(f"Job created: {job_id}")
-
-                # Finalize DB record with real peer_id/job_id
-                success = db.finalize_staged_peer(
-                    telegram_user_id=user_id,
-                    stage_info=stage_info,
-                    peer_name=peer_name,
-                    peer_id=peer_id,
-                    job_id=job_id,
-                    expire_date=final_expire_date,
-                    telegram_username=effective_username or "",
-                    payment_status="paid",
-                    tariff_key=tariff_key,
-                    payment_method="yookassa",
-                    rub_paid=amount // 100,
-                )
-                if not success:
-                    raise Exception("Failed to finalize client data in DB")
-
-                # Step 4. Update clients.json
-                client_id_for_json = effective_username if effective_username else str(user_id)
-                if not clients_manager.add_update_client(
-                    client_id_for_json,
-                    peer_id,
-                    force_write=True,
-                    telegram_user_id=user_id,
-                    username=effective_username or "",
-                ):
-                    raise Exception("Failed to update clients.json")
-
-                logger.info(f"Peer saved in DB and clients.json for user {user_id}")
-                sync_bound_custom_peers_for_user(
-                    user_id=user_id,
-                    expire_date=final_expire_date,
-                    allow_access=True,
-                    primary_peer_id=peer_id,
-                )
-                await notify_admins(
-                    format_admin_payment_notification(
-                        "🆕 Новый клиент подключился",
-                        user_id=user_id,
-                        username=effective_username or None,
-                        tariff_name=tariff_data.get("name", tariff_key),
-                        amount=f"{amount_value} руб.",
-                        payment_method="Банковская карта",
-                        expire_date=final_expire_date,
-                    )
-                )
-
-                # Update payment status in peers table
-                db.update_payment_status(user_id, "paid", amount // 100, "yookassa", tariff_key)
-
-                # Download and send configuration
-                try:
-                    logger.info(f"Downloading config for peer {peer_id}")
-                    config_content = wg_api.download_peer_config(peer_id)
-                    logger.info(f"Sending config to user {user_id}")
-                    if not await send_config_with_confirmation(user_id, config_content):
-                        await send_telegram_message(
-                            user_id,
-                            f"✅ Платеж успешно обработан!\n💳 Способ оплаты: Банковская карта\n🎉 VPN доступ на {access_days} дней!\n\n"
-                            f"❌ Ошибка при отправке конфигурации. Используйте команду /connect для получения конфига.",
-                            reply_markup=create_home_reply_markup(),
-                        )
-
-                except Exception as e:
-                    logger.error(
-                        f"Error downloading/sending config for user {user_id}: {e}",
-                        exc_info=True,
-                    )
-                    await send_telegram_message(
-                        user_id,
-                        f"✅ Платеж успешно обработан!\n💳 Способ оплаты: Банковская карта\n🎉 VPN доступ на {access_days} дней!\n\n"
-                        f"❌ Ошибка при отправке конфигурации. Используйте команду /connect для получения конфига.",
-                        reply_markup=create_home_reply_markup(),
-                    )
-
-            except Exception as e:
-                if peer_id:
-                    try:
-                        wg_api.delete_peer(peer_id)
-                    except Exception as delete_error:
-                        logger.error(
-                            f"Failed to delete peer {peer_id} after error: {delete_error}"
-                        )
-
-                rollback_ok = db.rollback_staged_peer(user_id, stage_info)
-                if not rollback_ok:
-                    logger.error(f"Failed to roll back staged record for user {user_id}")
-
-                logger.error(
-                    f"Error creating peer after payment for user {user_id}: {e}",
-                    exc_info=True,
-                )
-                await send_telegram_message(
-                    user_id,
-                    "❌ Ошибка при создании VPN доступа. Обратитесь в поддержку.",
-                )
-        
-    except Exception as e:
-        logger.error(f"Critical error while processing successful payment: {e}", exc_info=True)
-
-async def process_canceled_payment(payment_data: dict):
-    """Process canceled payment."""
-    try:
-        metadata = yookassa_client.get_payment_metadata(payment_data)
-        user_id = int(metadata.get('user_id', 0))
-        
-        if user_id:
-            await send_telegram_message(
+    if primary:
+        result = await cascade_router.sync_user_access(user_id, expire_date)
+        if result["failed"]:
+            db.add_provisioning_task(
                 user_id,
-                "❌ Платеж был отменен или не прошел.\n\n"
-                "💡 Попробуйте оплатить снова или обратитесь в поддержку."
+                "sync_access",
+                {"expire_date": expire_date},
+                f"Failed peers: {result['failed']}",
             )
-    except Exception as e:
-        logger.error(f"Error processing canceled payment: {e}")
-
-async def process_waiting_for_capture_payment(payment_data: dict):
-    """Process payment waiting for capture."""
-    try:
-        metadata = yookassa_client.get_payment_metadata(payment_data)
-        user_id = int(metadata.get('user_id', 0))
-        
-        if user_id:
-            await send_telegram_message(
-                user_id,
-                "⏳ Платеж получен и ожидает подтверждения.\n\n"
-                "💳 Обычно подтверждение происходит автоматически в течение нескольких минут.\n"
-                "📧 Вы получите уведомление о результате."
-            )
-    except Exception as e:
-        logger.error(f"Error processing waiting_for_capture payment: {e}")
-
-async def process_refund_succeeded(refund_data: dict):
-    """Process successful refund."""
-    try:
-        # Refunds require the original payment
-        payment_id = refund_data.get('payment_id')
-        if not payment_id:
-            logger.error("payment_id not found in refund data")
-            return
-        
-        # Fetch payment info from the database
-        payment_info = db.get_payment_by_id(payment_id)
-        if not payment_info:
-            logger.error(f"Payment {payment_id} not found in database")
-            return
-        
-        user_id = payment_info['user_id']
-        tariff_key = payment_info.get('tariff_key', '30_days')
-        amount = refund_data.get('amount', {}).get('value', '0')
-        
-        # Determine number of days to reduce
-        from config import get_tariffs
-        tariffs = get_tariffs()
-        tariff_data = tariffs.get(tariff_key, tariffs.get('30_days', {'days': 30}))
-        days_to_reduce = tariff_data.get('days', 30)
-        
-        logger.info(
-            f"Processing refund for user {user_id}: reducing access by {days_to_reduce} days (tariff {tariff_key})"
-        )
-        
-        # Reduce access period in the database
-        success, new_expire_date = db.decrease_access(user_id, days_to_reduce)
-        
-        if success:
-            logger.info(f"Access reduced for user {user_id}, new date: {new_expire_date}")
-            
-            # Fetch peer info to update job
-            peer_info = db.get_peer_by_telegram_id(user_id)
-            if peer_info:
-                # Update job in WGDashboard
-                try:
-                    job_update_result, resolved_job_id, resolved_expire_date, created_new_job = (
-                        wg_api.ensure_restrict_job(
-                            peer_info["peer_id"],
-                            new_expire_date,
-                            peer_info.get("job_id"),
-                        )
-                    )
-                    
-                    if job_update_result and job_update_result.get('status'):
-                        logger.info(
-                            f"Job ensured for user {user_id} after refund, resolved_job_id={resolved_job_id}, created_new_job={created_new_job}, new date: {resolved_expire_date}"
-                        )
-                        if (
-                            resolved_job_id != peer_info.get("job_id")
-                            or resolved_expire_date != new_expire_date
-                        ):
-                            persisted = db.update_peer_info(
-                                peer_info["peer_name"],
-                                peer_info["peer_id"],
-                                resolved_job_id,
-                                resolved_expire_date,
-                            )
-                            logger.info(
-                                f"Persisted ensured refund job for user {user_id}: persisted={persisted}, resolved_job_id={resolved_job_id}"
-                            )
-                            peer_info["job_id"] = resolved_job_id
-                            new_expire_date = resolved_expire_date
-                    else:
-                        logger.error(
-                            f"Error updating job for user {user_id} after refund: {job_update_result}"
-                        )
-                        
-                except Exception as e:
-                    logger.error(f"Error updating job in WGDashboard after refund: {e}")
-
-                sync_bound_custom_peers_for_user(
-                    user_id=user_id,
-                    expire_date=new_expire_date,
-                    allow_access=False,
-                    primary_peer_id=peer_info["peer_id"],
-                )
-            else:
-                logger.warning(f"Peer not found for user {user_id} during refund processing")
-        else:
-            logger.error(f"Failed to reduce access for user {user_id} during refund processing")
-        
         await send_telegram_message(
             user_id,
-            f"💰 Возврат успешно обработан!\n\n"
-            f"💳 Сумма возврата: {amount} руб.\n"
-            f"📉 Ваш оплаченный период был уменьшен на {days_to_reduce} дней в связи с возвратом.\n"
-            f"📅 Срок действия доступа обновлен.\n\n"
-            f"📧 Деньги будут возвращены на карту в течение 1-3 рабочих дней.",
-            reply_markup=create_home_reply_markup(),
+            f"✅ Платеж успешно обработан!\n"
+            f"🎉 Продлили тебе доступ на {tariff['days']} дней!\n"
+            f"💳 Способ оплаты: Банковская карта\n\n"
+            f"Текущая конфигурация остается актуальной.",
+            create_home_reply_markup(),
         )
-        
-        # Update payment status in the database
-        db.update_payment_status_by_id(payment_id, 'refunded')
-        
-    except Exception as e:
-        logger.error(f"Error processing refund: {e}", exc_info=True)
+        title = "🔁 Клиент продлил подписку"
+    else:
+        peer_name = generate_peer_name(username, user_id)
+        try:
+            _, config = await cascade_router.create_user_peer(
+                user_id, username, peer_name, expire_date
+            )
+            if not await send_config_with_confirmation(user_id, config):
+                await send_telegram_message(
+                    user_id,
+                    "✅ Доступ активирован, но конфиг не удалось отправить. Используй /connect.",
+                    create_home_reply_markup(),
+                )
+        except Exception as exc:
+            task_id = db.add_provisioning_task(
+                user_id,
+                "create_peer",
+                {
+                    "username": username or "",
+                    "peer_name": peer_name,
+                    "expire_date": expire_date,
+                    "tariff_key": tariff_key,
+                },
+                str(exc),
+            )
+            logger.error("Queued provisioning task %s after YooKassa payment: %s", task_id, exc)
+            await send_telegram_message(
+                user_id,
+                "⚠️ Платеж получен. Доступ будет создан автоматически после восстановления VPN сервера.",
+                create_home_reply_markup(),
+            )
+            await notify_admins(
+                f"⚠️ Оплата получена, provisioning отложен\n\nTelegram ID: {user_id}\nTask: {task_id}"
+            )
+            return
+        title = "🆕 Новый клиент подключился"
+
+    await notify_admins(
+        admin_payment_text(
+            title,
+            user_id,
+            username,
+            tariff.get("name", tariff_key),
+            f"{amount_text} руб.",
+            expire_date,
+        )
+    )
+
+
+async def process_canceled_payment(payment_data: dict) -> None:
+    payment_id = str(payment_data.get("id") or "")
+    local_payment = await asyncio.to_thread(db.get_payment_by_id, payment_id)
+    if not local_payment:
+        return
+    user_id = int(local_payment["user_id"])
+    canceled = await asyncio.to_thread(db.cancel_pending_payment, payment_id)
+    if not canceled:
+        logger.info("Ignoring late or duplicate cancellation for payment %s", payment_id)
+        return
+    await asyncio.to_thread(db.release_reservation, user_id)
+    await send_telegram_message(
+        user_id,
+        "❌ Платеж был отменен или не прошел.\n\nПопробуйте оплатить снова или обратитесь в поддержку.",
+    )
+
+
+async def process_waiting_for_capture_payment(payment_data: dict) -> None:
+    local_payment = await asyncio.to_thread(
+        db.get_payment_by_id, str(payment_data.get("id") or "")
+    )
+    if not local_payment:
+        return
+    user_id = int(local_payment["user_id"])
+    await send_telegram_message(
+        user_id,
+        "⏳ Платеж получен и ожидает подтверждения. Обычно это занимает несколько минут.",
+    )
+
+
+async def process_refund_succeeded(refund_data: dict) -> None:
+    payment_id = str(refund_data.get("payment_id") or "")
+    payment = await asyncio.to_thread(db.get_payment_by_id, payment_id)
+    if not payment:
+        logger.error("Original payment %s was not found for refund", payment_id)
+        return
+    if payment.get("status") == "refunded":
+        logger.info("Ignoring duplicate refund event for payment %s", payment_id)
+        return
+    refund_amount = yookassa_client.get_payment_amount(refund_data)
+    if refund_amount != int(payment["amount"]):
+        logger.warning("Partial refund for payment %s requires manual adjustment", payment_id)
+        await notify_admins(
+            "⚠️ Частичный возврат требует ручной корректировки\n\n"
+            f"Payment ID: {payment_id}\n"
+            f"Telegram ID: {payment['user_id']}\n"
+            f"Сумма возврата: {refund_data.get('amount', {}).get('value', '0')} руб."
+        )
+        return
+    tariff = get_tariffs().get(payment.get("tariff_key"))
+    if not tariff:
+        raise ValueError("Refund references an unknown tariff")
+    applied = await asyncio.to_thread(db.apply_refund, payment_id, tariff["days"])
+    if not applied:
+        raise RuntimeError(f"Failed to reduce access for user {payment['user_id']}")
+    user_id, expire_date = applied
+    result = await cascade_router.sync_user_access(user_id, expire_date)
+    if result["failed"]:
+        db.add_provisioning_task(
+            user_id,
+            "sync_access",
+            {"expire_date": expire_date},
+            f"Failed peers: {result['failed']}",
+        )
+    amount = refund_data.get("amount", {}).get("value", "0")
+    await send_telegram_message(
+        user_id,
+        f"💰 Возврат успешно обработан!\n\n"
+        f"💳 Сумма возврата: {amount} руб.\n"
+        f"📉 Оплаченный период уменьшен на {tariff['days']} дней.\n"
+        f"📅 Срок действия доступа обновлен.",
+        create_home_reply_markup(),
+    )
+
 
 @app.get("/health")
 async def health_check():
-    """Service health check."""
+    if app_services is None or not app_services.runtime_ready:
+        return JSONResponse({"status": "starting"}, status_code=503)
     return {"status": "healthy"}
+
+
+@app.get("/internal/metrics")
+async def runtime_metrics(request: Request):
+    """Return protected in-process metrics and queue gauges."""
+    if not INTERNAL_METRICS_TOKEN:
+        return JSONResponse({"status": "not_found"}, status_code=404)
+    authorization = request.headers.get("authorization", "")
+    expected = f"Bearer {INTERNAL_METRICS_TOKEN}"
+    if not hmac.compare_digest(authorization, expected):
+        return JSONResponse({"status": "unauthorized"}, status_code=401)
+    if app_services is None:
+        return JSONResponse({"status": "starting"}, status_code=503)
+    snapshot = app_services.metrics.snapshot()
+    snapshot["database"] = await asyncio.to_thread(db.get_runtime_stats)
+    snapshot["ready"] = app_services.runtime_ready
+    return snapshot
+
 
 @app.get("/webhook/yookassa/health")
 async def webhook_health_check():
-    """Webhook endpoint health check."""
     return {"status": "webhook_healthy", "endpoint": "/webhook/yookassa"}
 
-@app.get("/webhook/yookassa/test")
-async def webhook_test():
-    """Test endpoint for webhook verification."""
-    return {
-        "status": "ok",
-        "message": "Webhook endpoint is available",
-        "endpoint": "/webhook/yookassa",
-        "method": "POST",
-        "expected_events": ["payment.succeeded", "payment.canceled", "payment.waiting_for_capture", "refund.succeeded"]
-    }
 
 @app.post("/webhook/yookassa")
 async def yookassa_webhook(request: Request):
-    """Handle YooKassa webhook."""
+    """Verify YooKassa payment state through its API and dispatch the event."""
     try:
-        # Log all headers for debugging
-        logger.info(
-            f"Received webhook request from {request.client.host if request.client else 'unknown'}"
-        )
-        logger.debug(f"Headers: {dict(request.headers)}")
-        
-        # Read request body
-        body = await request.body()
-        body_str = body.decode('utf-8')
-        logger.info(f"Webhook body (first 500 chars): {body_str[:500]}")
-        
-        # Get signature from headers (YooKassa may use different headers)
-        signature = (request.headers.get('X-YooMoney-Signature', '') or 
-                    request.headers.get('Authorization', '').replace('Bearer ', '') or
-                    request.headers.get('X-Signature', ''))
-        
-        # Verify signature (if present and configured)
-        # IMPORTANT: with HTTP Basic Auth YooKassa may not send a signature
-        # In that case we rely on HTTPS and API-based payment verification
-        if signature:
-            if not yookassa_client.verify_webhook_signature(body_str, signature):
-                logger.warning("Invalid webhook signature from YooKassa")
-                # DO NOT reject: signature may be absent with HTTP Basic Auth
-                # Log a warning and continue processing
-                logger.warning("Continuing webhook processing without signature verification")
-            else:
-                logger.info("Webhook signature verified successfully")
-        else:
-            logger.info("Webhook signature missing (possibly using HTTP Basic Auth)")
-        
-        # Parse data
-        webhook_data = yookassa_client.parse_webhook(body_str)
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > WEBHOOK_MAX_BODY_BYTES:
+                return JSONResponse({"status": "error", "message": "Payload too large"}, 413)
+        body_text = bytes(body).decode("utf-8")
+        webhook_data = yookassa_client.parse_webhook(body_text)
         if not webhook_data:
-            logger.error(f"Webhook parse error. Body: {body_str[:200]}")
-            # Return 200 so YooKassa does not retry
-            return JSONResponse(content={"status": "error", "message": "Invalid JSON"}, status_code=200)
-        
-        logger.info(f"Webhook parsed successfully: keys={list(webhook_data.keys())}")
-        
-        # Get event data
-        event_type = webhook_data.get('event', '')
-        event_data = webhook_data.get('object', {})
-        
-        # If structure differs, try alternative extraction
+            return JSONResponse({"status": "error", "message": "Invalid JSON"}, 400)
+        event_type = webhook_data.get("event") or webhook_data.get("event_type") or ""
+        event_data = webhook_data.get("object") or webhook_data.get("payment") or webhook_data
+        if not isinstance(event_data, dict):
+            return JSONResponse({"status": "error", "message": "Invalid object"}, 400)
         if not event_type:
-            # Event may be in a different field
-            event_type = webhook_data.get('event_type', '')
-        
-        # If no event but payment status exists, infer event type
-        if not event_type:
-            payment_status = webhook_data.get('status', '')
-            if payment_status:
-                if payment_status == 'succeeded':
-                    event_type = 'payment.succeeded'
-                elif payment_status == 'canceled':
-                    event_type = 'payment.canceled'
-                elif payment_status == 'waiting_for_capture':
-                    event_type = 'payment.waiting_for_capture'
-                logger.info(f"Inferred event_type from payment status: {event_type}")
-        
-        if not event_data:
-            # Payment data may be at the root or in the payment field
-            event_data = webhook_data.get('payment', webhook_data)
-        
-        # If still no event_data but webhook_data contains payment data
-        if not event_data or not isinstance(event_data, dict):
-            if 'id' in webhook_data and 'status' in webhook_data:
-                event_data = webhook_data
-                logger.info("Using webhook_data as event_data (direct payment object)")
-            else:
-                logger.error(
-                    f"Missing or invalid 'object' in webhook. Type: {type(event_data)}, webhook_data keys: {list(webhook_data.keys())}"
+            status = event_data.get("status")
+            event_type = f"payment.{status}" if status else ""
+
+        object_id = str(event_data.get("id") or "")
+        if not object_id:
+            return JSONResponse({"status": "error", "message": "Missing object ID"}, 400)
+
+        if event_type.startswith("payment."):
+            event_data = await yookassa_client.get_payment(object_id)
+            expected_status = event_type.removeprefix("payment.")
+            if event_data.get("status") != expected_status:
+                logger.warning(
+                    "Ignoring payment event with status mismatch: event=%s actual=%s",
+                    expected_status,
+                    event_data.get("status"),
                 )
-                # Return 200 so YooKassa does not retry
-                return JSONResponse(content={"status": "error", "message": "Missing or invalid object parameter"}, status_code=200)
-        
-        # If still no event_type but status exists in event_data
-        if not event_type and isinstance(event_data, dict):
-            payment_status = event_data.get('status', '')
-            if payment_status == 'succeeded':
-                event_type = 'payment.succeeded'
-            elif payment_status == 'canceled':
-                event_type = 'payment.canceled'
-            elif payment_status == 'waiting_for_capture':
-                event_type = 'payment.waiting_for_capture'
-            logger.info(f"Inferred event_type from status in event_data: {event_type}")
-        
-        # Validate required parameters
-        if not event_type:
-            logger.error(
-                f"Failed to determine event_type. webhook_data keys: {list(webhook_data.keys())}, event_data: {list(event_data.keys()) if isinstance(event_data, dict) else 'not a dict'}"
+                return JSONResponse({"status": "ignored"})
+            local_payment = await asyncio.to_thread(db.get_payment_by_id, object_id)
+            if not local_payment:
+                logger.warning("Ignoring unknown YooKassa payment %s", object_id)
+                return JSONResponse({"status": "ignored"})
+            metadata = yookassa_client.get_payment_metadata(event_data)
+            matches_local = (
+                yookassa_client.get_payment_amount(event_data) == int(local_payment["amount"])
+                and event_data.get("amount", {}).get("currency") == local_payment.get("currency", "RUB")
+                and str(metadata.get("user_id") or "") == str(local_payment["user_id"])
+                and str(metadata.get("tariff_key") or "") == str(local_payment["tariff_key"])
             )
-            # Return 200 so YooKassa does not retry, but log the error
-            return JSONResponse(content={"status": "error", "message": "Cannot determine event type"}, status_code=200)
-        
-        # Log webhook details
-        object_id = event_data.get('id', 'unknown')
-        object_status = event_data.get('status', 'unknown')
-        logger.info(f"Webhook received: event={event_type}, ID={object_id}, status={object_status}")
-        
-        # For payments, also verify status via API (extra check)
-        if event_type.startswith('payment.'):
-            payment_id = event_data.get('id')
-            if payment_id:
-                logger.info(f"Checking payment status via API for {payment_id}")
-                payment_info = await yookassa_client.get_payment(payment_id)
-                if payment_info:
-                    api_status = payment_info.get('status', 'unknown')
-                    logger.info(f"Payment {payment_id} status via API: {api_status}")
-                    # Refresh data from API for accuracy
-                    if api_status == 'succeeded' and event_type == 'payment.succeeded':
-                        event_data = payment_info
-        
-        # Process by event type
-        if event_type == 'payment.succeeded':
-            logger.info(f"Processing successful payment {object_id}")
+            if not matches_local:
+                logger.error("Rejected mismatched YooKassa payment %s", object_id)
+                return JSONResponse({"status": "ignored"})
+        elif event_type == "refund.succeeded":
+            event_data = await yookassa_client.get_refund(object_id)
+            if event_data.get("status") != "succeeded":
+                return JSONResponse({"status": "ignored"})
+
+        if event_type == "payment.succeeded":
             await process_successful_payment(event_data)
-        elif event_type == 'payment.canceled':
-            logger.info(f"Processing canceled payment {object_id}")
+        elif event_type == "payment.canceled":
             await process_canceled_payment(event_data)
-        elif event_type == 'payment.waiting_for_capture':
-            logger.info(f"Processing payment waiting for capture {object_id}")
+        elif event_type == "payment.waiting_for_capture":
             await process_waiting_for_capture_payment(event_data)
-        elif event_type == 'refund.succeeded':
-            logger.info(f"Processing successful refund for payment {object_id}")
+        elif event_type == "refund.succeeded":
             await process_refund_succeeded(event_data)
         else:
-            logger.warning(f"Unknown event: {event_type}")
-        
-        logger.info(f"Webhook processed successfully: {event_type}, {object_id}")
-        return JSONResponse(content={"status": "ok"})
-        
-    except HTTPException as e:
-        logger.error(f"HTTP error while processing webhook: {e.status_code} - {e.detail}")
-        raise
-    except Exception as e:
-        logger.error(f"Webhook processing error: {e}", exc_info=True)
-        # Return 200 so YooKassa does not retry forever
-        # But log the error for investigation
-        return JSONResponse(content={"status": "error", "message": str(e)}, status_code=200)
+            logger.warning("Unknown YooKassa event: %s", event_type)
+        return JSONResponse({"status": "ok"})
+    except YooKassaUnavailable as exc:
+        logger.warning("YooKassa verification is temporarily unavailable: %s", exc)
+        return JSONResponse({"status": "retry"}, 503)
+    except YooKassaNotFound:
+        return JSONResponse({"status": "ignored"})
+    except (UnicodeDecodeError, YooKassaError, ValueError) as exc:
+        logger.warning("Rejected YooKassa webhook: %s", exc)
+        return JSONResponse({"status": "error", "message": "Invalid event"}, 400)
+    except Exception as exc:
+        logger.error("Webhook processing error: %s", exc, exc_info=True)
+        return JSONResponse({"status": "error", "message": "Internal error"}, 500)
+
 
 if __name__ == "__main__":
-    uvicorn.run(
-        "webhook_server:app",
-        host="0.0.0.0",
-        port=8001,
-        log_level="info"
-    )
+    uvicorn.run("webhook_server:app", host="0.0.0.0", port=8001, log_level="info")

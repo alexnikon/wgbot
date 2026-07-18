@@ -1,12 +1,14 @@
 import logging
-from typing import Optional, Dict, Any
+import uuid
+from typing import Any
+
 from aiogram import Bot
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
 from aiogram.exceptions import TelegramAPIError
-from config import get_tariffs, WEBHOOK_URL, DOMAIN, CLIENTS_JSON_PATH
-from yookassa_client import YooKassaClient
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
+
+from config import DOMAIN, PAYMENT_RETURN_URL, WEBHOOK_URL, get_tariffs
 from database import Database
-from utils import PromoManager
+from yookassa_client import YooKassaClient
 
 logger = logging.getLogger(__name__)
 
@@ -18,13 +20,14 @@ class PaymentManager:
         bot: Bot,
         yookassa_client: YooKassaClient | None = None,
         db: Database | None = None,
+        cascade_router: Any | None = None,
     ):
         self.bot = bot
         self.yookassa_client = yookassa_client or YooKassaClient()
         self.db = db or Database()
         self.webhook_url = WEBHOOK_URL
         self.domain = DOMAIN
-        self.promo_manager = PromoManager(CLIENTS_JSON_PATH)
+        self.cascade_router = cascade_router
     
     @property
     def tariffs(self):
@@ -39,13 +42,31 @@ class PaymentManager:
     def is_tariff_enabled(self, tariff_key: str) -> bool:
         """Return whether a tariff exists for client-facing actions."""
         return tariff_key in self.tariffs
+
+    @staticmethod
+    def parse_invoice_payload(payload: str) -> tuple[str, str, int] | None:
+        """Parse and validate a bot invoice payload."""
+        for payment_type in ("stars", "yookassa"):
+            prefix = f"vpn_access_{payment_type}_"
+            if not payload.startswith(prefix):
+                continue
+            remainder = payload[len(prefix):]
+            try:
+                tariff_key, raw_user_id = remainder.rsplit("_", 1)
+                user_id = int(raw_user_id)
+            except (ValueError, TypeError):
+                return None
+            if tariff_key not in {"14_days", "30_days", "90_days"} or user_id <= 0:
+                return None
+            return payment_type, tariff_key, user_id
+        return None
         
-    def get_user_tariffs(self, user_id: int) -> Dict[str, Any]:
+    def get_user_tariffs(self, user_id: int) -> dict[str, Any]:
         """
         Return tariffs with user-specific discount/markup applied.
         """
         base_tariffs = self.visible_tariffs.copy()
-        factor = self.promo_manager.get_user_promo_factor(user_id)
+        factor = self.db.get_user_promo_factor(user_id)
         
         if factor == 1.0:
             return base_tariffs
@@ -136,7 +157,7 @@ class PaymentManager:
         """
         return payment_text, keyboard
     
-    async def create_stars_invoice(self, user_id: int, tariff_key: str, username: str = None) -> Optional[Dict[str, Any]]:
+    async def create_stars_invoice(self, user_id: int, tariff_key: str, username: str = None) -> dict[str, Any] | None:
         """
         Create an invoice for Telegram Stars payment.
         
@@ -149,6 +170,8 @@ class PaymentManager:
             Invoice data dict or None on error
         """
         try:
+            if self.cascade_router is not None:
+                await self.cascade_router.ensure_reservation(user_id)
             # Get user tariffs
             user_tariffs = self.get_user_tariffs(user_id)
             if tariff_key not in user_tariffs:
@@ -183,6 +206,7 @@ class PaymentManager:
                     f'Пользователь: @{username}'
                 ) if username else f'Доступ к сервису на {tariff_data["name"]}',
                 'payload': f'vpn_access_stars_{tariff_key}_{user_id}',
+                'start_parameter': f'vpn-{user_id}-{uuid.uuid4().hex[:16]}',
                 'provider_token': '',  # Not required for Telegram Stars
                 'currency': 'XTR',  # Currency code for Telegram Stars
                 'prices': [LabeledPrice(label=f'Доступ к сервису {tariff_data["name"]}', amount=tariff_data['stars_price'])],
@@ -202,7 +226,7 @@ class PaymentManager:
         username: str = None,
         payment_chat_id: int | None = None,
         payment_message_id: int | None = None,
-    ) -> Optional[str]:
+    ) -> str | None:
         """
         Create a YooKassa payment and return the checkout URL.
         
@@ -215,6 +239,9 @@ class PaymentManager:
             Payment URL or None on error
         """
         try:
+            reservation = None
+            if self.cascade_router is not None:
+                reservation = await self.cascade_router.ensure_reservation(user_id)
             if not self.yookassa_client.shop_id or not self.yookassa_client.secret_key:
                 logger.error("YooKassa is not configured")
                 return None
@@ -229,7 +256,7 @@ class PaymentManager:
             amount = tariff_data['rub_price'] * 100  # In kopeks
             
             # Return URL
-            return_url = "https://t.me/nikonvpn_bot"
+            return_url = PAYMENT_RETURN_URL
 
             effective_username = (username or "").strip()
             if effective_username.startswith("@"):
@@ -248,6 +275,9 @@ class PaymentManager:
                 'username': effective_username,
                 'description': f'Доступ к сервису на {tariff_data["name"]}'
             }
+            if reservation:
+                metadata["server_key"] = reservation["server_key"]
+                metadata["interface_id"] = reservation["interface_id"]
             if payment_chat_id is not None:
                 metadata["payment_chat_id"] = str(payment_chat_id)
             if payment_message_id is not None:
@@ -370,7 +400,7 @@ class PaymentManager:
         username: str = None,
         payment_chat_id: int | None = None,
         payment_message_id: int | None = None,
-    ) -> Optional[tuple[str, InlineKeyboardMarkup]]:
+    ) -> tuple[str, InlineKeyboardMarkup] | None:
         """
         Build text and keyboard for the YooKassa payment screen inside the current message.
         """
@@ -432,37 +462,36 @@ class PaymentManager:
         """
         try:
             payload = pre_checkout_query.invoice_payload
-            
-            # Ensure it's our payment
-            if not (payload.startswith('vpn_access_stars_') or payload.startswith('vpn_access_yookassa_')):
+            parsed = self.parse_invoice_payload(payload)
+            if not parsed:
                 await pre_checkout_query.answer(ok=False, error_message="Неверный тип платежа")
                 return False
-            
-            # Validate amount based on payment type
-            if payload.startswith('vpn_access_stars_'):
-                # Stars payment: extract tariff from payload
-                payload_parts = payload.split('_')
-                if len(payload_parts) >= 4:
-                    tariff_key = f"{payload_parts[3]}_{payload_parts[4]}" # type: ignore
-                    user_id = int(payload_parts[-1]) # type: ignore
-                    user_tariffs = self.get_user_tariffs(user_id)
-                    tariff_data = user_tariffs.get(tariff_key, {})
-                    expected_amount = tariff_data.get('stars_price', 1)
-                    if pre_checkout_query.total_amount != expected_amount:
-                        await pre_checkout_query.answer(ok=False, error_message="Неверная сумма платежа")
-                        return False
-            elif payload.startswith('vpn_access_yookassa_'):
-                # YooKassa payment: extract tariff from payload
-                payload_parts = payload.split('_')
-                if len(payload_parts) >= 4:
-                    tariff_key = f"{payload_parts[3]}_{payload_parts[4]}" # type: ignore
-                    user_id = int(payload_parts[-1]) # type: ignore
-                    user_tariffs = self.get_user_tariffs(user_id)
-                    tariff_data = user_tariffs.get(tariff_key, {})
-                    expected_amount = tariff_data.get('rub_price', 0) * 100  # In kopeks
-                    if pre_checkout_query.total_amount != expected_amount:
-                        await pre_checkout_query.answer(ok=False, error_message="Неверная сумма платежа")
-                        return False
+            payment_type, tariff_key, user_id = parsed
+            if pre_checkout_query.from_user.id != user_id:
+                logger.warning(
+                    "Rejected forwarded invoice: payer=%s owner=%s",
+                    pre_checkout_query.from_user.id,
+                    user_id,
+                )
+                await pre_checkout_query.answer(
+                    ok=False, error_message="Этот счет создан для другого пользователя"
+                )
+                return False
+            if self.cascade_router is not None:
+                await self.cascade_router.ensure_reservation(user_id)
+
+            tariff_data = self.get_user_tariffs(user_id).get(tariff_key)
+            if not tariff_data:
+                await pre_checkout_query.answer(ok=False, error_message="Тариф недоступен")
+                return False
+            expected_amount = (
+                tariff_data["stars_price"]
+                if payment_type == "stars"
+                else tariff_data["rub_price"] * 100
+            )
+            if pre_checkout_query.total_amount != expected_amount:
+                await pre_checkout_query.answer(ok=False, error_message="Неверная сумма платежа")
+                return False
             
             # Confirm payment
             await pre_checkout_query.answer(ok=True)
@@ -474,7 +503,9 @@ class PaymentManager:
             await pre_checkout_query.answer(ok=False, error_message="Ошибка обработки платежа")
             return False
     
-    async def confirm_payment(self, successful_payment) -> tuple[bool, str, int]:
+    async def confirm_payment(
+        self, successful_payment, payer_user_id: int | None = None
+    ) -> tuple[bool, str, int]:
         """
         Confirm a successful payment.
         
@@ -485,38 +516,33 @@ class PaymentManager:
             Tuple (success, payment_type, amount_paid)
         """
         try:
-            # Extract user_id and payment type from payload
             payload = successful_payment.invoice_payload
-            
-            if payload.startswith('vpn_access_stars_'):
-                # Extract user_id from payload (format: vpn_access_stars_7_days_123456789)
-                payload_parts = payload.split('_')
-                user_id = int(payload_parts[-1])  # Last part is user_id
-                payment_type = 'stars'
-                amount_paid = successful_payment.total_amount
-                logger.info(f"Stars payment confirmed: user {user_id}, stars: {amount_paid}")
-                
-            elif payload.startswith('vpn_access_yookassa_'):
-                # Extract user_id from payload (format: vpn_access_yookassa_7_days_123456789)
-                payload_parts = payload.split('_')
-                user_id = int(payload_parts[-1])  # Last part is user_id
-                payment_type = 'yookassa'
-                amount_paid = successful_payment.total_amount
-                logger.info(f"YooKassa payment confirmed: user {user_id}, kopeks: {amount_paid}")
-                
-            else:
+            parsed = self.parse_invoice_payload(payload)
+            if not parsed:
                 logger.error(f"Invalid payment payload: {payload}")
                 return False, '', 0
-            
-            # Additional post-payment logic can be added here (admin notify, extra logging, etc.)
-            
+            payment_type, _, user_id = parsed
+            if payer_user_id is not None and payer_user_id != user_id:
+                logger.error(
+                    "Successful payment payer mismatch: payer=%s owner=%s",
+                    payer_user_id,
+                    user_id,
+                )
+                return False, "", 0
+            amount_paid = successful_payment.total_amount
+            logger.info(
+                "%s payment confirmed: user %s, amount %s",
+                payment_type,
+                user_id,
+                amount_paid,
+            )
             return True, payment_type, amount_paid
             
         except Exception as e:
             logger.error(f"Payment confirmation error: {e}")
             return False, '', 0
     
-    def get_payment_info(self) -> Dict[str, Any]:
+    def get_payment_info(self) -> dict[str, Any]:
         """
         Return available tariff info.
         

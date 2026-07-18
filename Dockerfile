@@ -1,35 +1,35 @@
-FROM python:3.11-slim AS builder
+FROM python:3.14.6-slim-bookworm@sha256:86f975aca15cf04a40b399eebede9aea7c82eae084d1f1a0a6ef6bcaae871a30 AS builder
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
 
 WORKDIR /build
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
+RUN python -m pip install "uv==0.11.29"
 
-COPY requirements.txt .
-RUN pip wheel --wheel-dir /wheels -r requirements.txt
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
 
 
-FROM python:3.11-slim
+FROM python:3.14.6-slim-bookworm@sha256:86f975aca15cf04a40b399eebede9aea7c82eae084d1f1a0a6ef6bcaae871a30 AS runtime
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PYTHONFAULTHANDLER=1
 
 WORKDIR /app
 
-COPY requirements.txt .
-COPY --from=builder /wheels /wheels
-RUN pip install --no-index --find-links=/wheels -r requirements.txt \
-    && rm -rf /wheels
+RUN groupadd --gid 1000 app \
+    && useradd --uid 1000 --gid app --no-create-home --shell /usr/sbin/nologin app \
+    && python -m pip uninstall --yes pip setuptools wheel
 
-COPY . .
+COPY --from=builder /build/.venv /app/.venv
+COPY --chown=app:app *.py ./
+COPY --chown=app:app handlers ./handlers
 
-RUN mkdir -p logs data
+USER app
 
 CMD ["python", "app.py"]

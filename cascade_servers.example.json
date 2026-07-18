@@ -1,0 +1,15 @@
+{
+  "servers": [
+    {
+      "server_key": "cascade-1",
+      "base_url": "https://cascade.example.com/hidden-admin-path",
+      "api_token": "ws_replace_with_api_token",
+      "interface_id": "replace-with-interface-uuid",
+      "priority": 10,
+      "max_peers": 250,
+      "client_group": "Basic",
+      "enabled": true,
+      "verify_tls": true
+    }
+  ]
+}

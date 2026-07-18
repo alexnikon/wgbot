@@ -1,40 +1,59 @@
-name: Rollback
+name: Deploy Dev
 
 on:
   workflow_dispatch:
-    inputs:
-      image_tag:
-        description: 'Image tag to deploy, for example: 19b916807b938fd9e533027b0265ca485ad64209'
-        required: true
-        type: string
+  push:
+    branches:
+      - cascade-migration
 
 permissions:
   contents: read
-  packages: read
+  packages: write
 
 concurrency:
-  group: production-deploy
+  group: development-deploy
   cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  DEPLOY_SHA: ${{ github.sha }}
 
 jobs:
-  rollback:
-    name: Roll back VPS to selected image tag
+  validate:
+    name: Run CI before development deployment
+    uses: ./.github/workflows/ci.yml
+
+  build-and-deploy:
+    name: Build image and deploy to development
+    needs: validate
     runs-on: ubuntu-latest
-    environment: production
+    environment: dev
 
     steps:
-      - name: Validate image tag
-        env:
-          IMAGE_TAG: ${{ inputs.image_tag }}
-        run: |
-          if [[ ! "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "image_tag must be a full 40-character lowercase commit SHA" >&2
-            exit 1
-          fi
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push development image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev-${{ env.DEPLOY_SHA }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
 
       - name: Prepare SSH key
         run: |
@@ -45,13 +64,13 @@ jobs:
           printf '%s\n' "${{ secrets.VPS_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
-      - name: Roll back on VPS
+      - name: Deploy on development VPS
         env:
           VPS_HOST: ${{ vars.VPS_HOST }}
           VPS_USER: ${{ vars.VPS_USER }}
           VPS_PORT: ${{ vars.VPS_PORT }}
           DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
-          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev-${{ env.DEPLOY_SHA }}
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -62,20 +81,18 @@ jobs:
           printf 'GHCR_TOKEN=%q\n' "$GHCR_TOKEN"
           cat <<'REMOTE'
           set -Eeuo pipefail
-
           cd "$DEPLOY_PATH"
-
           test -r .env
           test -r secrets/cascade_servers.json
           mkdir -p DB
           test -w DB
-          python3 scripts/backup_runtime.py --root "$DEPLOY_PATH" --label rollback
-
+          git fetch --prune origin
+          git checkout cascade-migration
+          git pull --ff-only origin cascade-migration
+          python3 scripts/backup_runtime.py --root "$DEPLOY_PATH" --label dev
           printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
           docker pull "$IMAGE"
-
           WGBOT_IMAGE="$IMAGE" docker compose up -d --no-build --remove-orphans wgbot
-
           for attempt in $(seq 1 12); do
             if curl -fsS http://localhost:8001/health; then
               break
@@ -93,10 +110,10 @@ jobs:
           } | ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
             -i ~/.ssh/wgbot_deploy_key -p "$VPS_PORT" "$VPS_USER@$VPS_HOST" bash -s
 
-      - name: Rollback summary
+      - name: Deployment summary
         run: |
           {
-            echo "## Rollback completed"
+            echo "## Development deployment completed"
             echo ""
-            echo "- Image: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.image_tag }}\`"
+            echo "- Image: \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev-${{ env.DEPLOY_SHA }}\`"
           } >> "$GITHUB_STEP_SUMMARY"

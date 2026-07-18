@@ -2,8 +2,10 @@ import json
 import logging
 import sqlite3
 import uuid
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import datetime, timedelta
+from typing import Any
 
 from config import DATABASE_FILE
 
@@ -11,61 +13,104 @@ logger = logging.getLogger(__name__)
 
 
 class Database:
+    """SQLite persistence for clients, subscriptions, Cascade peers, and payments."""
+
     def __init__(self, db_file: str = DATABASE_FILE):
         self.db_file = db_file
         self.connection_timeout = 30.0
         self.busy_timeout_ms = 30000
         self.init_database()
 
-    def _connect(self) -> sqlite3.Connection:
-        """Create a SQLite connection with settings tuned for concurrent access."""
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.db_file, timeout=self.connection_timeout)
         conn.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
-        return conn
+        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
-    def init_database(self):
-        """Initialize the database and create required tables."""
+    def init_database(self) -> None:
         with self._connect() as conn:
-            cursor = conn.cursor()
-            cursor.execute("PRAGMA journal_mode = WAL")
-            cursor.execute("PRAGMA synchronous = NORMAL")
-            cursor.execute("PRAGMA foreign_keys = ON")
-            cursor.execute("PRAGMA temp_store = MEMORY")
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
+            conn.execute("PRAGMA temp_store = MEMORY")
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS clients (
+                    telegram_user_id INTEGER PRIMARY KEY,
+                    telegram_username TEXT NOT NULL DEFAULT '',
+                    promo INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
 
-            # Table for peer records
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS peers (
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    telegram_user_id INTEGER PRIMARY KEY REFERENCES clients(telegram_user_id) ON DELETE CASCADE,
+                    expire_date TEXT,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    payment_status TEXT NOT NULL DEFAULT 'unpaid',
+                    stars_paid INTEGER NOT NULL DEFAULT 0,
+                    rub_paid INTEGER NOT NULL DEFAULT 0,
+                    last_payment_date TEXT,
+                    tariff_key TEXT,
+                    payment_method TEXT,
+                    notification_sent INTEGER NOT NULL DEFAULT 0,
+                    hour_notification_sent INTEGER NOT NULL DEFAULT 0,
+                    expired_notification_sent INTEGER NOT NULL DEFAULT 0,
+                    legacy_peer_name TEXT,
+                    legacy_public_key TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS client_peers (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    peer_name TEXT UNIQUE NOT NULL,
-                    peer_id TEXT UNIQUE NOT NULL,
-                    job_id TEXT UNIQUE NOT NULL,
-                    telegram_user_id INTEGER,
-                    telegram_username TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    expire_date TIMESTAMP,
-                    is_active BOOLEAN DEFAULT 1,
-                    payment_status TEXT DEFAULT 'unpaid',
-                    stars_paid INTEGER DEFAULT 0,
-                    last_payment_date TIMESTAMP,
-                    notification_sent BOOLEAN DEFAULT 0,
-                    hour_notification_sent BOOLEAN DEFAULT 0,
-                    expired_notification_sent BOOLEAN DEFAULT 0
-                )
-            """)
+                    telegram_user_id INTEGER NOT NULL REFERENCES clients(telegram_user_id) ON DELETE CASCADE,
+                    server_key TEXT,
+                    interface_id TEXT,
+                    cascade_peer_id TEXT,
+                    public_key TEXT NOT NULL DEFAULT '',
+                    peer_name TEXT NOT NULL DEFAULT '',
+                    role TEXT NOT NULL DEFAULT 'manual',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(server_key, interface_id, cascade_peer_id),
+                    UNIQUE(telegram_user_id, public_key)
+                );
 
-            # Table for operation logs
-            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS server_reservations (
+                    telegram_user_id INTEGER PRIMARY KEY,
+                    server_key TEXT NOT NULL,
+                    interface_id TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS provisioning_tasks (
+                    id TEXT PRIMARY KEY,
+                    telegram_user_id INTEGER NOT NULL,
+                    operation TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    lease_owner TEXT,
+                    lease_until TEXT,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
                 CREATE TABLE IF NOT EXISTS operation_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     peer_name TEXT,
                     operation TEXT,
                     details TEXT,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
+                    timestamp TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
 
-            # Table for payments
-            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS payments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     payment_id TEXT UNIQUE NOT NULL,
@@ -75,815 +120,927 @@ class Database:
                     status TEXT DEFAULT 'pending',
                     payment_method TEXT,
                     tariff_key TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     metadata TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_subscriptions_expiry
+                    ON subscriptions(is_active, payment_status, expire_date);
+                CREATE INDEX IF NOT EXISTS idx_client_peers_user_role
+                    ON client_peers(telegram_user_id, role);
+                CREATE INDEX IF NOT EXISTS idx_client_peers_public_key
+                    ON client_peers(public_key);
+                CREATE INDEX IF NOT EXISTS idx_reservations_server_expiry
+                    ON server_reservations(server_key, expires_at);
+                CREATE INDEX IF NOT EXISTS idx_provisioning_pending
+                    ON provisioning_tasks(status, next_attempt_at);
+                """
+            )
+            self._ensure_column(conn, "provisioning_tasks", "lease_owner", "TEXT")
+            self._ensure_column(conn, "provisioning_tasks", "lease_until", "TEXT")
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_provisioning_claim
+                ON provisioning_tasks(status, next_attempt_at, lease_until)
+                """
+            )
+            legacy_migration = conn.execute(
+                "SELECT 1 FROM schema_migrations WHERE version=1"
+            ).fetchone()
+            if not legacy_migration:
+                self._migrate_legacy_peers(conn)
+                conn.execute(
+                    "INSERT INTO schema_migrations(version, name) VALUES (1, ?)",
+                    ("legacy_business_data",),
                 )
-            """)
-
-            # Migration: add new columns if missing
-            self._migrate_database(cursor)
-
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_peers_telegram_user_active
-                ON peers (telegram_user_id, is_active)
-            """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_peers_active_expire_date
-                ON peers (is_active, expire_date)
-            """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_peers_active_notification
-                ON peers (is_active, notification_sent, expire_date)
-            """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_peers_active_expired_notification
-                ON peers (is_active, expired_notification_sent, expire_date)
-            """)
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_peers_active_hour_notification
-                ON peers (is_active, hour_notification_sent, expire_date)
-            """)
-
             conn.commit()
-            logger.info("Database initialized")
+        logger.info("Cascade database schema initialized")
 
-    def _migrate_database(self, cursor):
-        """Run database migrations to add new columns."""
-        try:
-            # Check if payment_status column exists
-            cursor.execute("PRAGMA table_info(peers)")
-            columns = [column[1] for column in cursor.fetchall()]
+    @staticmethod
+    def _ensure_column(
+        conn: sqlite3.Connection, table: str, column: str, definition: str
+    ) -> None:
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
-            if "payment_status" not in columns:
-                cursor.execute(
-                    "ALTER TABLE peers ADD COLUMN payment_status TEXT DEFAULT 'unpaid'"
-                )
-                logger.info("Added column: payment_status")
+    def _migrate_legacy_peers(self, conn: sqlite3.Connection) -> None:
+        """Copy legacy business data without mutating the old table."""
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='peers'"
+        ).fetchone()
+        if not table:
+            return
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM peers WHERE telegram_user_id IS NOT NULL ORDER BY id"
+        ).fetchall()
+        for row in rows:
+            item = dict(row)
+            user_id = int(item["telegram_user_id"])
+            conn.execute(
+                """
+                INSERT INTO clients(telegram_user_id, telegram_username, created_at, updated_at)
+                VALUES (?, ?, COALESCE(?, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP)
+                ON CONFLICT(telegram_user_id) DO UPDATE SET
+                    telegram_username=CASE
+                        WHEN clients.telegram_username='' THEN excluded.telegram_username
+                        ELSE clients.telegram_username END,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (user_id, item.get("telegram_username") or "", item.get("created_at")),
+            )
+            conn.execute(
+                """
+                INSERT INTO subscriptions(
+                    telegram_user_id, expire_date, is_active, payment_status,
+                    stars_paid, rub_paid, last_payment_date, tariff_key, payment_method,
+                    notification_sent, hour_notification_sent, expired_notification_sent,
+                    legacy_peer_name, legacy_public_key
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(telegram_user_id) DO NOTHING
+                """,
+                (
+                    user_id,
+                    item.get("expire_date"),
+                    int(bool(item.get("is_active", 1))),
+                    item.get("payment_status") or "unpaid",
+                    int(item.get("stars_paid") or 0),
+                    int(item.get("rub_paid") or 0),
+                    item.get("last_payment_date"),
+                    item.get("tariff_key"),
+                    item.get("payment_method"),
+                    int(bool(item.get("notification_sent", 0))),
+                    int(bool(item.get("hour_notification_sent", 0))),
+                    int(bool(item.get("expired_notification_sent", 0))),
+                    item.get("peer_name"),
+                    item.get("peer_id"),
+                ),
+            )
 
-            if "stars_paid" not in columns:
-                cursor.execute(
-                    "ALTER TABLE peers ADD COLUMN stars_paid INTEGER DEFAULT 0"
-                )
-                logger.info("Added column: stars_paid")
+    def upsert_client(self, user_id: int, username: str | None = None) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO clients(telegram_user_id, telegram_username)
+                VALUES (?, ?)
+                ON CONFLICT(telegram_user_id) DO UPDATE SET
+                    telegram_username=CASE
+                        WHEN excluded.telegram_username != '' THEN excluded.telegram_username
+                        ELSE clients.telegram_username END,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (user_id, (username or "").strip().lstrip("@")),
+            )
+            conn.commit()
 
-            if "last_payment_date" not in columns:
-                cursor.execute(
-                    "ALTER TABLE peers ADD COLUMN last_payment_date TIMESTAMP"
-                )
-                logger.info("Added column: last_payment_date")
-
-            if "notification_sent" not in columns:
-                cursor.execute(
-                    "ALTER TABLE peers ADD COLUMN notification_sent BOOLEAN DEFAULT 0"
-                )
-                logger.info("Added column: notification_sent")
-
-            if "hour_notification_sent" not in columns:
-                cursor.execute(
-                    "ALTER TABLE peers ADD COLUMN hour_notification_sent BOOLEAN DEFAULT 0"
-                )
-                logger.info("Added column: hour_notification_sent")
-
-            if "expired_notification_sent" not in columns:
-                cursor.execute(
-                    "ALTER TABLE peers ADD COLUMN expired_notification_sent BOOLEAN DEFAULT 0"
-                )
-                logger.info("Added column: expired_notification_sent")
-
-            # Add columns for the new tariff system
-            if "tariff_key" not in columns:
-                cursor.execute("ALTER TABLE peers ADD COLUMN tariff_key TEXT")
-                logger.info("Added column: tariff_key")
-
-            if "payment_method" not in columns:
-                cursor.execute("ALTER TABLE peers ADD COLUMN payment_method TEXT")
-                logger.info("Added column: payment_method")
-
-            if "rub_paid" not in columns:
-                cursor.execute(
-                    "ALTER TABLE peers ADD COLUMN rub_paid INTEGER DEFAULT 0"
-                )
-                logger.info("Added column: rub_paid")
-
-        except Exception as e:
-            logger.error(f"Database migration error: {e}")
-
-    def stage_peer_record(
+    def ensure_subscription(
         self,
-        peer_name: str,
-        telegram_user_id: int,
-        telegram_username: str,
-        expire_date: str,
-        payment_status: str = "paid",
-        tariff_key: str = None,
-        payment_method: str = None,
-        rub_paid: int = None,
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Create/update a peer record in a temporary pending state.
-        This enforces ordering: DB -> WG peer -> WG job -> clients.json.
-        """
-        pending_peer_id = f"pending_peer_{uuid.uuid4()}"
-        pending_job_id = f"pending_job_{uuid.uuid4()}"
+        user_id: int,
+        username: str | None = None,
+        expire_date: str | None = None,
+        payment_status: str = "unpaid",
+        tariff_key: str | None = None,
+        payment_method: str | None = None,
+    ) -> None:
+        self.upsert_client(user_id, username)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO subscriptions(
+                    telegram_user_id, expire_date, payment_status, tariff_key, payment_method
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(telegram_user_id) DO UPDATE SET
+                    expire_date=COALESCE(excluded.expire_date, subscriptions.expire_date),
+                    payment_status=excluded.payment_status,
+                    tariff_key=COALESCE(excluded.tariff_key, subscriptions.tariff_key),
+                    payment_method=COALESCE(excluded.payment_method, subscriptions.payment_method)
+                """,
+                (user_id, expire_date, payment_status, tariff_key, payment_method),
+            )
+            conn.commit()
 
-        try:
-            with self._connect() as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT * FROM peers WHERE telegram_user_id = ? AND is_active = 1",
-                    (telegram_user_id,),
-                )
-                existing = cursor.fetchone()
-
-                if existing:
-                    existing_dict = dict(existing)
-                    cursor.execute(
-                        """
-                        UPDATE peers
-                        SET peer_name = ?,
-                            peer_id = ?,
-                            job_id = ?,
-                            telegram_username = ?,
-                            expire_date = ?,
-                            payment_status = ?,
-                            tariff_key = COALESCE(?, tariff_key),
-                            payment_method = COALESCE(?, payment_method),
-                            rub_paid = CASE WHEN ? IS NULL THEN rub_paid ELSE ? END
-                        WHERE id = ?
-                        """,
-                        (
-                            peer_name,
-                            pending_peer_id,
-                            pending_job_id,
-                            telegram_username,
-                            expire_date,
-                            payment_status,
-                            tariff_key,
-                            payment_method,
-                            rub_paid,
-                            rub_paid,
-                            existing_dict["id"],
-                        ),
-                    )
-                    conn.commit()
-                    return {
-                        "mode": "update",
-                        "pending_peer_id": pending_peer_id,
-                        "pending_job_id": pending_job_id,
-                        "previous": {
-                            "peer_name": existing_dict.get("peer_name"),
-                            "peer_id": existing_dict.get("peer_id"),
-                            "job_id": existing_dict.get("job_id"),
-                            "telegram_username": existing_dict.get("telegram_username"),
-                            "expire_date": existing_dict.get("expire_date"),
-                            "payment_status": existing_dict.get("payment_status"),
-                            "tariff_key": existing_dict.get("tariff_key"),
-                            "payment_method": existing_dict.get("payment_method"),
-                            "rub_paid": existing_dict.get("rub_paid"),
-                        },
-                    }
-
-                cursor.execute(
-                    """
-                    INSERT INTO peers (peer_name, peer_id, job_id, telegram_user_id,
-                                     telegram_username, created_at, expire_date, is_active,
-                                     payment_status, stars_paid, last_payment_date,
-                                     notification_sent, tariff_key, payment_method, rub_paid)
-                    VALUES (?, ?, ?, ?, ?, datetime('now'), ?, 1, ?, 0, NULL, 0, ?, ?, ?)
-                    """,
-                    (
-                        peer_name,
-                        pending_peer_id,
-                        pending_job_id,
-                        telegram_user_id,
-                        telegram_username,
-                        expire_date,
-                        payment_status,
-                        tariff_key,
-                        payment_method,
-                        0 if rub_paid is None else rub_paid,
-                    ),
-                )
-                conn.commit()
-                return {
-                    "mode": "create",
-                    "pending_peer_id": pending_peer_id,
-                    "pending_job_id": pending_job_id,
-                }
-
-        except sqlite3.IntegrityError as e:
-            logger.error(f"Failed to stage peer {peer_name}: {e}")
-            return None
-
-    def finalize_staged_peer(
+    def save_client_peer(
         self,
-        telegram_user_id: int,
-        stage_info: Dict[str, Any],
+        user_id: int,
+        server_key: str,
+        interface_id: str,
+        cascade_peer_id: str,
+        public_key: str,
         peer_name: str,
-        peer_id: str,
-        job_id: str,
-        expire_date: str,
-        telegram_username: str,
-        payment_status: str = "paid",
-        tariff_key: str = None,
-        payment_method: str = None,
-        rub_paid: int = None,
+        role: str = "primary",
+        enabled: bool = True,
     ) -> bool:
-        """Finalize a pending record by writing real peer_id/job_id."""
-        if not stage_info:
-            return False
-
-        pending_peer_id = stage_info.get("pending_peer_id")
-        pending_job_id = stage_info.get("pending_job_id")
-        mode = stage_info.get("mode", "update")
-
+        self.upsert_client(user_id)
         try:
             with self._connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
+                other_assignment = conn.execute(
                     """
-                    UPDATE peers
-                    SET peer_name = ?,
-                        peer_id = ?,
-                        job_id = ?,
-                        telegram_username = ?,
-                        expire_date = ?,
-                        payment_status = ?,
-                        tariff_key = COALESCE(?, tariff_key),
-                        payment_method = COALESCE(?, payment_method),
-                        rub_paid = CASE WHEN ? IS NULL THEN rub_paid ELSE ? END
-                    WHERE telegram_user_id = ?
-                      AND peer_id = ?
-                      AND job_id = ?
-                      AND is_active = 1
+                    SELECT server_key, interface_id FROM client_peers
+                    WHERE telegram_user_id=? AND server_key IS NOT NULL
+                      AND (server_key != ? OR interface_id != ?) LIMIT 1
+                    """,
+                    (user_id, server_key, interface_id),
+                ).fetchone()
+                if other_assignment:
+                    logger.error(
+                        "User %s is already assigned to Cascade server %s interface %s",
+                        user_id,
+                        other_assignment[0],
+                        other_assignment[1],
+                    )
+                    return False
+                if role == "primary":
+                    conn.execute(
+                        "DELETE FROM client_peers WHERE telegram_user_id=? AND role='primary'",
+                        (user_id,),
+                    )
+                conn.execute(
+                    """
+                    INSERT INTO client_peers(
+                        telegram_user_id, server_key, interface_id, cascade_peer_id,
+                        public_key, peer_name, role, enabled
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(telegram_user_id, public_key) DO UPDATE SET
+                        server_key=excluded.server_key,
+                        interface_id=excluded.interface_id,
+                        cascade_peer_id=excluded.cascade_peer_id,
+                        peer_name=excluded.peer_name,
+                        role=excluded.role,
+                        enabled=excluded.enabled,
+                        updated_at=CURRENT_TIMESTAMP
                     """,
                     (
+                        user_id,
+                        server_key,
+                        interface_id,
+                        cascade_peer_id,
+                        public_key,
                         peer_name,
-                        peer_id,
-                        job_id,
-                        telegram_username,
-                        expire_date,
-                        payment_status,
-                        tariff_key,
-                        payment_method,
-                        rub_paid,
-                        rub_paid,
-                        telegram_user_id,
-                        pending_peer_id,
-                        pending_job_id,
+                        role,
+                        int(enabled),
                     ),
                 )
                 conn.commit()
-                if cursor.rowcount <= 0:
-                    return False
-
-                operation = "CREATE_PEER" if mode == "create" else "UPDATE_PEER"
-                details = (
-                    f"Created peer {peer_name}, tariff {tariff_key}"
-                    if mode == "create"
-                    else f"Updated peer {peer_name} with new ID"
-                )
-                self.log_operation(peer_name, operation, details)
-                return True
-
-        except Exception as e:
-            logger.error(f"Failed to finalize peer {peer_name}: {e}")
+            return True
+        except sqlite3.IntegrityError as exc:
+            logger.error("Failed to save Cascade peer for user %s: %s", user_id, exc)
             return False
 
-    def rollback_staged_peer(self, telegram_user_id: int, stage_info: Dict[str, Any]) -> bool:
-        """Rollback a pending record on create/update errors."""
-        if not stage_info:
-            return False
-
-        pending_peer_id = stage_info.get("pending_peer_id")
-        pending_job_id = stage_info.get("pending_job_id")
-        mode = stage_info.get("mode")
-
-        try:
-            with self._connect() as conn:
-                cursor = conn.cursor()
-
-                if mode == "create":
-                    cursor.execute(
-                        """
-                        DELETE FROM peers
-                        WHERE telegram_user_id = ?
-                          AND peer_id = ?
-                          AND job_id = ?
-                          AND is_active = 1
-                        """,
-                        (telegram_user_id, pending_peer_id, pending_job_id),
-                    )
-                else:
-                    previous = stage_info.get("previous") or {}
-                    cursor.execute(
-                        """
-                        UPDATE peers
-                        SET peer_name = ?,
-                            peer_id = ?,
-                            job_id = ?,
-                            telegram_username = ?,
-                            expire_date = ?,
-                            payment_status = ?,
-                            tariff_key = ?,
-                            payment_method = ?,
-                            rub_paid = ?
-                        WHERE telegram_user_id = ?
-                          AND peer_id = ?
-                          AND job_id = ?
-                          AND is_active = 1
-                        """,
-                        (
-                            previous.get("peer_name"),
-                            previous.get("peer_id"),
-                            previous.get("job_id"),
-                            previous.get("telegram_username"),
-                            previous.get("expire_date"),
-                            previous.get("payment_status"),
-                            previous.get("tariff_key"),
-                            previous.get("payment_method"),
-                            previous.get("rub_paid"),
-                            telegram_user_id,
-                            pending_peer_id,
-                            pending_job_id,
-                        ),
-                    )
-
-                conn.commit()
-                return cursor.rowcount > 0
-
-        except Exception as e:
-            logger.error(f"Failed to rollback staged peer for user {telegram_user_id}: {e}")
-            return False
-
-    def get_peer_by_telegram_id(
-        self, telegram_user_id: int
-    ) -> Optional[Dict[str, Any]]:
-        """Get peer info by Telegram user ID."""
+    def get_client_peers(self, user_id: int, bound_only: bool = False) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM client_peers WHERE telegram_user_id=?"
+        if bound_only:
+            sql += " AND server_key IS NOT NULL AND interface_id IS NOT NULL AND cascade_peer_id IS NOT NULL"
+        sql += " ORDER BY CASE role WHEN 'primary' THEN 0 ELSE 1 END, id"
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT * FROM peers WHERE telegram_user_id = ? AND is_active = 1",
-                (telegram_user_id,),
-            )
-            row = cursor.fetchone()
+            return [dict(row) for row in conn.execute(sql, (user_id,)).fetchall()]
+
+    def get_primary_client_peer(self, user_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT * FROM client_peers
+                WHERE telegram_user_id=? AND role='primary'
+                  AND server_key IS NOT NULL AND interface_id IS NOT NULL
+                  AND cascade_peer_id IS NOT NULL
+                LIMIT 1
+                """,
+                (user_id,),
+            ).fetchone()
             return dict(row) if row else None
 
-    def log_operation(self, peer_name: str, operation: str, details: str):
-        """Log an operation to the database."""
-        try:
-            with self._connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    INSERT INTO operation_logs (peer_name, operation, details)
-                    VALUES (?, ?, ?)
-                """,
-                    (peer_name, operation, details),
-                )
-                conn.commit()
-        except Exception as e:
-            logger.error(f"Failed to log operation: {e}")
+    def set_client_peer_enabled(self, cascade_peer_id: str, enabled: bool) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE client_peers SET enabled=?, updated_at=CURRENT_TIMESTAMP WHERE cascade_peer_id=?",
+                (int(enabled), cascade_peer_id),
+            )
+            conn.commit()
 
-    def get_expired_peers(self) -> List[Dict[str, Any]]:
-        """Get expired peers that have not been notified yet."""
+    def get_peer_by_telegram_id(self, telegram_user_id: int) -> dict[str, Any] | None:
+        """Return a compatibility view consumed by existing bot UI handlers."""
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT * FROM peers
-                WHERE is_active = 1 AND expire_date < datetime('now') AND expired_notification_sent = 0
-                ORDER BY expire_date ASC
-            """)
-            return [dict(row) for row in cursor.fetchall()]
-
-    def sync_expired_access_statuses(self) -> int:
-        """Mark expired paid peers as expired while keeping their records active."""
-        try:
-            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            with self._connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    UPDATE peers
-                    SET payment_status = 'expired'
-                    WHERE is_active = 1
-                    AND payment_status = 'paid'
-                    AND expire_date IS NOT NULL
-                    AND expire_date < ?
+            row = conn.execute(
+                """
+                SELECT c.telegram_user_id, c.telegram_username, c.promo,
+                       s.*, cp.peer_name, cp.public_key, cp.cascade_peer_id,
+                       cp.server_key, cp.interface_id, cp.role, cp.enabled
+                FROM clients c
+                LEFT JOIN subscriptions s USING(telegram_user_id)
+                LEFT JOIN client_peers cp
+                  ON cp.telegram_user_id=c.telegram_user_id AND cp.role='primary'
+                WHERE c.telegram_user_id=?
+                LIMIT 1
                 """,
-                    (current_time,),
-                )
-                conn.commit()
-                updated_count = cursor.rowcount
+                (telegram_user_id,),
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["peer_id"] = result.get("cascade_peer_id")
+        result["is_active"] = int(result.get("is_active") or 0)
+        return result
 
-            if updated_count:
-                logger.info(
-                    f"Marked {updated_count} expired peer records with payment_status=expired"
-                )
-            return updated_count
+    def get_peer_count(self, user_id: int) -> int:
+        with self._connect() as conn:
+            return int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM client_peers WHERE telegram_user_id=?",
+                    (user_id,),
+                ).fetchone()[0]
+            )
 
-        except Exception as e:
-            logger.error(f"Failed to sync expired access statuses: {e}")
-            return 0
+    def get_client_telegram_ids(self) -> list[int]:
+        with self._connect() as conn:
+            return [int(row[0]) for row in conn.execute("SELECT telegram_user_id FROM clients ORDER BY telegram_user_id")]
 
-    def update_peer_info(
+    def get_admin_client_options(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT telegram_user_id, telegram_username FROM clients ORDER BY lower(telegram_username), telegram_user_id"
+            ).fetchall()
+        return [{"telegramId": int(row[0]), "username": row[1] or ""} for row in rows]
+
+    def get_runtime_stats(self) -> dict[str, int]:
+        """Return non-sensitive gauges for protected operational diagnostics."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM clients),
+                    (SELECT COUNT(*) FROM subscriptions
+                     WHERE is_active=1 AND payment_status='paid'),
+                    (SELECT COUNT(*) FROM provisioning_tasks
+                     WHERE status='pending'),
+                    (SELECT COUNT(*) FROM provisioning_tasks
+                     WHERE status='running'),
+                    (SELECT COUNT(*) FROM provisioning_tasks
+                     WHERE status='failed'),
+                    (SELECT COUNT(*) FROM server_reservations
+                     WHERE datetime(expires_at) > datetime('now'))
+                """
+            ).fetchone()
+        return {
+            "clients": int(row[0]),
+            "active_subscriptions": int(row[1]),
+            "provisioning_pending": int(row[2]),
+            "provisioning_running": int(row[3]),
+            "provisioning_failed": int(row[4]),
+            "active_reservations": int(row[5]),
+        }
+
+    def get_admin_clients_page(
+        self, page: int, page_size: int, query: str = ""
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return a filtered admin client page with subscription and server data."""
+        page = max(0, int(page))
+        page_size = max(1, min(int(page_size), 50))
+        normalized = query.strip().lstrip("@").lower()
+        where = ""
+        params: list[Any] = []
+        if normalized:
+            where = (
+                "WHERE CAST(c.telegram_user_id AS TEXT)=? "
+                "OR lower(c.telegram_username) LIKE ?"
+            )
+            params.extend((normalized, f"%{normalized}%"))
+
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            total = int(
+                conn.execute(
+                    f"SELECT COUNT(*) FROM clients c {where}", params
+                ).fetchone()[0]
+            )
+            total_pages = max(1, (total + page_size - 1) // page_size)
+            page = min(page, total_pages - 1)
+            rows = conn.execute(
+                f"""
+                SELECT c.telegram_user_id, c.telegram_username, c.promo,
+                       s.expire_date, s.is_active, s.payment_status,
+                       cp.server_key, cp.interface_id, cp.peer_name,
+                       cp.cascade_peer_id,
+                       (SELECT COUNT(*) FROM client_peers devices
+                        WHERE devices.telegram_user_id=c.telegram_user_id) AS device_count
+                FROM clients c
+                LEFT JOIN subscriptions s USING(telegram_user_id)
+                LEFT JOIN client_peers cp
+                  ON cp.telegram_user_id=c.telegram_user_id AND cp.role='primary'
+                {where}
+                ORDER BY CASE WHEN c.telegram_username='' THEN 1 ELSE 0 END,
+                         lower(c.telegram_username), c.telegram_user_id
+                LIMIT ? OFFSET ?
+                """,
+                (*params, page_size, page * page_size),
+            ).fetchall()
+        return [dict(row) for row in rows], total
+
+    def get_admin_client_details(self, user_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT c.telegram_user_id, c.telegram_username, c.promo,
+                       s.expire_date, s.is_active, s.payment_status,
+                       cp.server_key, cp.interface_id, cp.peer_name,
+                       cp.cascade_peer_id,
+                       (SELECT COUNT(*) FROM client_peers devices
+                        WHERE devices.telegram_user_id=c.telegram_user_id) AS device_count
+                FROM clients c
+                LEFT JOIN subscriptions s USING(telegram_user_id)
+                LEFT JOIN client_peers cp
+                  ON cp.telegram_user_id=c.telegram_user_id AND cp.role='primary'
+                WHERE c.telegram_user_id=?
+                LIMIT 1
+                """,
+                (user_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_client_promo(self, user_id: int, promo: int) -> bool:
+        if isinstance(promo, bool) or not isinstance(promo, int) or not 0 <= promo <= 90:
+            return False
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE clients SET promo=?, updated_at=CURRENT_TIMESTAMP WHERE telegram_user_id=?",
+                (promo, user_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def log_admin_promo_change(
         self,
-        peer_name: str,
-        new_peer_id: str,
-        new_job_id: str,
-        new_expire_date: str = None,
-    ) -> bool:
-        """
-        Update peer info (ID, job_id, and expiration date).
+        admin_id: int,
+        user_id: int,
+        server_key: str | None,
+        old_promo: int,
+        new_promo: int,
+    ) -> None:
+        details = json.dumps(
+            {
+                "admin_id": admin_id,
+                "client_id": user_id,
+                "server_key": server_key,
+                "old_promo": old_promo,
+                "new_promo": new_promo,
+            },
+            sort_keys=True,
+        )
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                (f"telegram:{user_id}", "admin_set_discount", details),
+            )
+            conn.commit()
 
-        Args:
-            peer_name: Peer name
-            new_peer_id: New peer ID
-            new_job_id: New job ID
-            new_expire_date: New expiration date (optional)
+    def get_user_promo_factor(self, user_id: int) -> float:
+        with self._connect() as conn:
+            row = conn.execute("SELECT promo FROM clients WHERE telegram_user_id=?", (user_id,)).fetchone()
+        value = int(row[0] or 0) if row else 0
+        if value <= 0:
+            return 1.0
+        return 1.0 - value / 100.0 if value <= 100 else value / 100.0
 
-        Returns:
-            True if successfully updated
-        """
-        try:
-            with self._connect() as conn:
-                cursor = conn.cursor()
+    def create_reservation(
+        self, user_id: int, server_key: str, interface_id: str, minutes: int
+    ) -> None:
+        expires_at = (datetime.now() + timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO server_reservations(telegram_user_id, server_key, interface_id, expires_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(telegram_user_id) DO UPDATE SET
+                    server_key=excluded.server_key,
+                    interface_id=excluded.interface_id,
+                    expires_at=excluded.expires_at,
+                    created_at=CURRENT_TIMESTAMP
+                """,
+                (user_id, server_key, interface_id, expires_at),
+            )
+            conn.commit()
 
-                if new_expire_date:
-                    cursor.execute(
+    def get_active_reservation(self, user_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM server_reservations WHERE telegram_user_id=? AND expires_at > datetime('now')",
+                (user_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def count_active_reservations(self, server_key: str) -> int:
+        with self._connect() as conn:
+            return int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM server_reservations WHERE server_key=? AND expires_at > datetime('now')",
+                    (server_key,),
+                ).fetchone()[0]
+            )
+
+    def release_reservation(self, user_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM server_reservations WHERE telegram_user_id=?", (user_id,))
+            conn.commit()
+
+    def cleanup_expired_reservations(self) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM server_reservations WHERE expires_at <= datetime('now')")
+            conn.commit()
+            return cursor.rowcount
+
+    def add_provisioning_task(
+        self, user_id: int, operation: str, payload: dict[str, Any], error: str
+    ) -> str:
+        encoded_payload = json.dumps(payload, sort_keys=True)
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                """
+                SELECT id, status FROM provisioning_tasks
+                WHERE telegram_user_id=? AND operation=? AND status IN ('pending', 'running')
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (user_id, operation),
+            ).fetchone()
+            if existing:
+                if existing["status"] == "running":
+                    conn.execute(
                         """
-                        UPDATE peers
-                        SET peer_id = ?, job_id = ?, expire_date = ?
-                        WHERE peer_name = ? AND is_active = 1
-                    """,
-                        (new_peer_id, new_job_id, new_expire_date, peer_name),
+                        UPDATE provisioning_tasks SET payload=?, last_error=?,
+                            updated_at=CURRENT_TIMESTAMP WHERE id=?
+                        """,
+                        (encoded_payload, error[:1000], existing["id"]),
                     )
                 else:
-                    cursor.execute(
+                    conn.execute(
                         """
-                        UPDATE peers
-                        SET peer_id = ?, job_id = ?
-                        WHERE peer_name = ? AND is_active = 1
-                    """,
-                        (new_peer_id, new_job_id, peer_name),
+                        UPDATE provisioning_tasks SET payload=?, last_error=?,
+                            next_attempt_at=CURRENT_TIMESTAMP,
+                            updated_at=CURRENT_TIMESTAMP WHERE id=?
+                        """,
+                        (encoded_payload, error[:1000], existing["id"]),
                     )
-
                 conn.commit()
+                return str(existing["id"])
+            task_id = str(uuid.uuid4())
+            conn.execute(
+                """
+                INSERT INTO provisioning_tasks(id, telegram_user_id, operation, payload, last_error)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (task_id, user_id, operation, encoded_payload, error[:1000]),
+            )
+            conn.commit()
+        return task_id
 
-                # Log operation
-                self.log_operation(
-                    peer_name, "UPDATE_PEER", f"Updated peer {peer_name} with new ID"
+    def claim_provisioning_tasks(
+        self, worker_id: str, lease_seconds: int, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Atomically lease due provisioning tasks to one worker."""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                """
+                SELECT * FROM provisioning_tasks
+                WHERE next_attempt_at <= datetime('now')
+                  AND (
+                    status='pending'
+                    OR (status='running' AND lease_until <= datetime('now'))
+                  )
+                ORDER BY created_at LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            task_ids = [row["id"] for row in rows]
+            if task_ids:
+                placeholders = ",".join("?" for _ in task_ids)
+                conn.execute(
+                    f"""
+                    UPDATE provisioning_tasks
+                    SET status='running', lease_owner=?,
+                        lease_until=datetime('now', ?), updated_at=CURRENT_TIMESTAMP
+                    WHERE id IN ({placeholders})
+                    """,
+                    (worker_id, f"+{int(lease_seconds)} seconds", *task_ids),
                 )
-                return cursor.rowcount > 0
+            conn.commit()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item["payload"])
+            item["lease_owner"] = worker_id
+            result.append(item)
+        return result
 
-        except Exception as e:
-            logger.error(f"Failed to update peer {peer_name}: {e}")
-            return False
+    def get_pending_provisioning_tasks(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT * FROM provisioning_tasks
+                WHERE status='pending' AND next_attempt_at <= datetime('now')
+                ORDER BY created_at LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item["payload"])
+            result.append(item)
+        return result
+
+    def renew_provisioning_lease(
+        self, task_id: str, worker_id: str, lease_seconds: int
+    ) -> bool:
+        """Extend an active task lease owned by the current worker."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE provisioning_tasks
+                SET lease_until=datetime('now', ?), updated_at=CURRENT_TIMESTAMP
+                WHERE id=? AND status='running' AND lease_owner=?
+                """,
+                (f"+{int(lease_seconds)} seconds", task_id, worker_id),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+
+    def complete_provisioning_task(
+        self, task_id: str, worker_id: str | None = None
+    ) -> bool:
+        with self._connect() as conn:
+            if worker_id:
+                cursor = conn.execute(
+                    """
+                    UPDATE provisioning_tasks SET status='completed', lease_owner=NULL,
+                        lease_until=NULL, updated_at=CURRENT_TIMESTAMP
+                    WHERE id=? AND status='running' AND lease_owner=?
+                    """,
+                    (task_id, worker_id),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE provisioning_tasks SET status='completed', lease_owner=NULL,
+                        lease_until=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?
+                    """,
+                    (task_id,),
+                )
+            conn.commit()
+            return cursor.rowcount == 1
+
+    def fail_provisioning_task(
+        self, task_id: str, error: str, worker_id: str | None = None
+    ) -> None:
+        with self._connect() as conn:
+            owner_clause = " AND lease_owner=?" if worker_id else ""
+            parameters: tuple[Any, ...] = (
+                (error[:1000], task_id, worker_id)
+                if worker_id
+                else (error[:1000], task_id)
+            )
+            conn.execute(
+                f"""
+                UPDATE provisioning_tasks
+                SET status='pending', attempts=attempts+1, last_error=?,
+                    lease_owner=NULL, lease_until=NULL,
+                    next_attempt_at=datetime('now', '+' || MIN(3600, 60 * (attempts + 1)) || ' seconds'),
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=?{owner_clause}
+                """,
+                parameters,
+            )
+            conn.commit()
+
+    def apply_verified_payment(
+        self,
+        payment_id: str,
+        user_id: int,
+        username: str | None,
+        amount: int,
+        payment_method: str,
+        tariff_key: str,
+        days: int,
+    ) -> dict[str, Any] | None:
+        """Atomically claim a verified payment and update its subscription."""
+        if payment_method not in {"stars", "yookassa"} or days <= 0:
+            raise ValueError("Invalid payment method or subscription duration")
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            payment = conn.execute(
+                "SELECT * FROM payments WHERE payment_id=?", (payment_id,)
+            ).fetchone()
+            if not payment:
+                conn.rollback()
+                raise ValueError("Payment does not exist in the local database")
+            if payment["status"] != "pending":
+                conn.rollback()
+                return None
+            expected = (
+                int(payment["user_id"]) == int(user_id)
+                and int(payment["amount"]) == int(amount)
+                and payment["payment_method"] == payment_method
+                and payment["tariff_key"] == tariff_key
+            )
+            if not expected:
+                conn.rollback()
+                raise ValueError("Verified payment does not match the local payment record")
+
+            normalized_username = (username or "").strip().lstrip("@")
+            conn.execute(
+                """
+                INSERT INTO clients(telegram_user_id, telegram_username)
+                VALUES (?, ?)
+                ON CONFLICT(telegram_user_id) DO UPDATE SET
+                    telegram_username=CASE WHEN excluded.telegram_username != ''
+                        THEN excluded.telegram_username ELSE clients.telegram_username END,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (user_id, normalized_username),
+            )
+            subscription = conn.execute(
+                "SELECT expire_date, payment_status FROM subscriptions WHERE telegram_user_id=?",
+                (user_id,),
+            ).fetchone()
+            now = datetime.now()
+            current_expiry = now
+            if subscription and subscription["expire_date"]:
+                try:
+                    current_expiry = datetime.fromisoformat(subscription["expire_date"])
+                except ValueError:
+                    current_expiry = now
+            is_extension = bool(
+                subscription
+                and subscription["payment_status"] == "paid"
+                and current_expiry > now
+            )
+            new_expiry = max(current_expiry, now) + timedelta(days=days)
+            expire_date = new_expiry.strftime("%Y-%m-%d %H:%M:%S")
+            stars_paid = amount if payment_method == "stars" else 0
+            rub_paid = amount // 100 if payment_method == "yookassa" else 0
+            conn.execute(
+                """
+                INSERT INTO subscriptions(
+                    telegram_user_id, expire_date, is_active, payment_status,
+                    stars_paid, rub_paid, last_payment_date, tariff_key,
+                    payment_method, notification_sent, hour_notification_sent,
+                    expired_notification_sent
+                ) VALUES (?, ?, 1, 'paid', ?, ?, CURRENT_TIMESTAMP, ?, ?, 0, 0, 0)
+                ON CONFLICT(telegram_user_id) DO UPDATE SET
+                    expire_date=excluded.expire_date, is_active=1,
+                    payment_status='paid', stars_paid=excluded.stars_paid,
+                    rub_paid=excluded.rub_paid, last_payment_date=CURRENT_TIMESTAMP,
+                    tariff_key=excluded.tariff_key, payment_method=excluded.payment_method,
+                    notification_sent=0, hour_notification_sent=0,
+                    expired_notification_sent=0
+                """,
+                (
+                    user_id,
+                    expire_date,
+                    stars_paid,
+                    rub_paid,
+                    tariff_key,
+                    payment_method,
+                ),
+            )
+            updated = conn.execute(
+                """
+                UPDATE payments SET status='succeeded', updated_at=CURRENT_TIMESTAMP
+                WHERE payment_id=? AND status='pending'
+                """,
+                (payment_id,),
+            )
+            if updated.rowcount != 1:
+                conn.rollback()
+                return None
+            conn.commit()
+            return {"expire_date": expire_date, "is_extension": is_extension}
 
     def update_payment_status(
         self,
         telegram_user_id: int,
         payment_status: str,
         amount_paid: int = 0,
-        payment_method: str = None,
-        tariff_key: str = None,
+        payment_method: str | None = None,
+        tariff_key: str | None = None,
     ) -> bool:
-        """
-        Update payment status for a user.
-
-        Args:
-            telegram_user_id: Telegram user ID
-            payment_status: Payment status ('paid', 'unpaid')
-            amount_paid: Amount paid (stars or rubles)
-            payment_method: Payment method ('stars', 'yookassa')
-            tariff_key: Tariff key (7_days, 30_days)
-
-        Returns:
-            True if successfully updated
-        """
-        try:
-            with self._connect() as conn:
-                cursor = conn.cursor()
-
-                # Update fields depending on payment method
-                if payment_method == "stars":
-                    cursor.execute(
-                        """
-                        UPDATE peers
-                        SET payment_status = ?, stars_paid = ?, last_payment_date = datetime('now'),
-                            payment_method = ?, tariff_key = ?
-                        WHERE telegram_user_id = ? AND is_active = 1
-                    """,
-                        (
-                            payment_status,
-                            amount_paid,
-                            payment_method,
-                            tariff_key,
-                            telegram_user_id,
-                        ),
-                    )
-                elif payment_method == "yookassa":
-                    cursor.execute(
-                        """
-                        UPDATE peers
-                        SET payment_status = ?, rub_paid = ?, last_payment_date = datetime('now'),
-                            payment_method = ?, tariff_key = ?
-                        WHERE telegram_user_id = ? AND is_active = 1
-                    """,
-                        (
-                            payment_status,
-                            amount_paid,
-                            payment_method,
-                            tariff_key,
-                            telegram_user_id,
-                        ),
-                    )
-                else:
-                    # Backward compatibility
-                    cursor.execute(
-                        """
-                        UPDATE peers
-                        SET payment_status = ?, stars_paid = ?, last_payment_date = datetime('now')
-                        WHERE telegram_user_id = ? AND is_active = 1
-                    """,
-                        (payment_status, amount_paid, telegram_user_id),
-                    )
-
-                conn.commit()
-
-                # Log operation
-                self.log_operation(
-                    f"telegram:{telegram_user_id}",
-                    "PAYMENT_UPDATE",
-                    f"Payment status updated: {payment_status}, {payment_method}: {amount_paid}, tariff: {tariff_key}",
-                )
-                return cursor.rowcount > 0
-
-        except Exception as e:
-            logger.error(
-                f"Failed to update payment status for user {telegram_user_id}: {e}"
+        self.ensure_subscription(
+            telegram_user_id,
+            payment_status=payment_status,
+            tariff_key=tariff_key,
+            payment_method=payment_method,
+        )
+        field = "rub_paid" if payment_method == "yookassa" else "stars_paid"
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE subscriptions SET payment_status=?, {field}=?,
+                    last_payment_date=CURRENT_TIMESTAMP,
+                    payment_method=COALESCE(?, payment_method),
+                    tariff_key=COALESCE(?, tariff_key)
+                WHERE telegram_user_id=?
+                """,
+                (payment_status, amount_paid, payment_method, tariff_key, telegram_user_id),
             )
-            return False
+            conn.commit()
+            return cursor.rowcount > 0
 
     def extend_access(self, telegram_user_id: int, days: int = 30) -> tuple[bool, str]:
-        """
-        Extend user access by the specified number of days.
-
-        Args:
-            telegram_user_id: Telegram user ID
-            days: Number of days to extend
-
-        Returns:
-            Tuple (success: bool, new_expire_date: str)
-        """
-        try:
-            with self._connect() as conn:
-                cursor = conn.cursor()
-
-                # Fetch current expiration date
-                cursor.execute(
-                    """
-                    SELECT expire_date FROM peers
-                    WHERE telegram_user_id = ? AND is_active = 1
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT expire_date FROM subscriptions WHERE telegram_user_id=?",
+                (telegram_user_id,),
+            ).fetchone()
+            if not row:
+                return False, ""
+            try:
+                current = datetime.fromisoformat(row[0]) if row[0] else datetime.now()
+            except ValueError:
+                current = datetime.now()
+            new_expiry = max(current, datetime.now()) + timedelta(days=days)
+            value = new_expiry.strftime("%Y-%m-%d %H:%M:%S")
+            cursor = conn.execute(
+                """
+                UPDATE subscriptions SET expire_date=?, is_active=1, payment_status='paid',
+                    notification_sent=0, hour_notification_sent=0,
+                    expired_notification_sent=0 WHERE telegram_user_id=?
                 """,
-                    (telegram_user_id,),
-                )
-                result = cursor.fetchone()
+                (value, telegram_user_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0, value
 
-                if not result:
-                    return False, ""
+    def activate_new_access(
+        self,
+        user_id: int,
+        username: str | None,
+        days: int,
+        tariff_key: str,
+        payment_method: str,
+    ) -> str:
+        expiry = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        self.ensure_subscription(
+            user_id,
+            username,
+            expiry,
+            "paid",
+            tariff_key,
+            payment_method,
+        )
+        return expiry
 
-                current_expire_date_str = result[0]
-
-                # If expired, start from now; otherwise extend current expiration
-                cursor.execute(
-                    """
-                    SELECT
-                        CASE
-                            WHEN datetime(?) < datetime('now') THEN datetime('now', '+{} days')
-                            ELSE datetime(?, '+{} days')
-                        END
-                """.format(days, days),
-                    (current_expire_date_str, current_expire_date_str),
-                )
-                new_expire_date = cursor.fetchone()[0]
-
-                # Update expiration date
-                cursor.execute(
-                    """
-                    UPDATE peers
-                    SET expire_date = ?,
-                        notification_sent = 0,
-                        hour_notification_sent = 0,
-                        expired_notification_sent = 0
-                    WHERE telegram_user_id = ? AND is_active = 1
+    def apply_refund(self, payment_id: str, days: int) -> tuple[int, str] | None:
+        """Atomically mark a payment refunded and reduce its subscription."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            payment = conn.execute(
+                "SELECT user_id FROM payments WHERE payment_id=? AND status='succeeded'",
+                (payment_id,),
+            ).fetchone()
+            if not payment:
+                conn.rollback()
+                return None
+            user_id = int(payment[0])
+            subscription = conn.execute(
+                "SELECT expire_date FROM subscriptions WHERE telegram_user_id=?",
+                (user_id,),
+            ).fetchone()
+            if not subscription or not subscription[0]:
+                conn.rollback()
+                return None
+            new_expiry = datetime.fromisoformat(subscription[0]) - timedelta(days=days)
+            value = new_expiry.strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute(
+                """
+                UPDATE subscriptions SET expire_date=?, notification_sent=0,
+                    hour_notification_sent=0, expired_notification_sent=0
+                WHERE telegram_user_id=?
                 """,
-                    (new_expire_date, telegram_user_id),
-                )
-                conn.commit()
-
-                # Log operation
-                self.log_operation(
-                    f"telegram:{telegram_user_id}",
-                    "EXTEND_ACCESS",
-                    f"Extended access by {days} days. New date: {new_expire_date}",
-                )
-                return cursor.rowcount > 0, new_expire_date
-
-        except Exception as e:
-            logger.error(
-                f"Failed to extend access for user {telegram_user_id}: {e}"
+                (value, user_id),
             )
-            return False, ""
-
-    def decrease_access(self, telegram_user_id: int, days: int) -> tuple[bool, str]:
-        """
-        Decrease user access by the specified number of days.
-        
-        Args:
-            telegram_user_id: Telegram user ID
-            days: Number of days to decrease
-            
-        Returns:
-            Tuple (success: bool, new_expire_date: str)
-        """
-        try:
-            with self._connect() as conn:
-                cursor = conn.cursor()
-                
-                # Fetch current expiration date
-                cursor.execute(
-                    """
-                    SELECT expire_date FROM peers 
-                    WHERE telegram_user_id = ? AND is_active = 1
-                    """,
-                    (telegram_user_id,),
-                )
-                result = cursor.fetchone()
-                
-                if not result:
-                    return False, ""
-                
-                current_expire_date_str = result[0]
-                
-                # Subtract days
-                cursor.execute(
-                    """
-                    SELECT datetime(?, '-{} days')
-                    """.format(days),
-                    (current_expire_date_str,),
-                )
-                new_expire_date = cursor.fetchone()[0]
-                
-                # Update expiration date
-                cursor.execute(
-                    """
-                    UPDATE peers 
-                    SET expire_date = ?,
-                        hour_notification_sent = 0
-                    WHERE telegram_user_id = ? AND is_active = 1
-                    """,
-                    (new_expire_date, telegram_user_id),
-                )
-                conn.commit()
-                
-                # Log operation
-                self.log_operation(
-                    f"telegram:{telegram_user_id}", 
-                    "DECREASE_ACCESS", 
-                    f"Decreased access by {days} days. New date: {new_expire_date}"
-                )
-                return cursor.rowcount > 0, new_expire_date
-                
-        except Exception as e:
-            logger.error(
-                f"Failed to decrease access for user {telegram_user_id}: {e}"
+            conn.execute(
+                "UPDATE payments SET status='refunded', updated_at=CURRENT_TIMESTAMP WHERE payment_id=?",
+                (payment_id,),
             )
-            return False, ""
+            conn.commit()
+            return user_id, value
 
-    def get_users_for_notification(self, days_before: int = 3) -> List[Dict[str, Any]]:
-        """
-        Get users who should receive upcoming expiration notifications.
+    def get_expired_peers(self) -> list[dict[str, Any]]:
+        return self._subscription_query(
+            "s.is_active=1 AND s.expire_date < datetime('now') AND s.expired_notification_sent=0"
+        )
 
-        Args:
-            days_before: How many days before expiration to notify
+    def sync_expired_access_statuses(self) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE subscriptions SET payment_status='expired'
+                WHERE is_active=1 AND payment_status='paid'
+                  AND expire_date IS NOT NULL AND expire_date < datetime('now')
+                """
+            )
+            conn.commit()
+            return cursor.rowcount
 
-        Returns:
-            List of users to notify
-        """
+    def get_users_for_notification(self, days_before: int = 3) -> list[dict[str, Any]]:
+        return self._subscription_query(
+            f"s.is_active=1 AND s.payment_status='paid' AND s.notification_sent=0 "
+            f"AND s.expire_date <= datetime('now', '+{int(days_before)} days') "
+            "AND s.expire_date > datetime('now', '+1 hour')"
+        )
+
+    def get_users_for_hour_notification(self) -> list[dict[str, Any]]:
+        return self._subscription_query(
+            "s.is_active=1 AND s.payment_status='paid' AND s.hour_notification_sent=0 "
+            "AND s.expire_date <= datetime('now', '+1 hour') AND s.expire_date > datetime('now')"
+        )
+
+    def _subscription_query(self, where: str) -> list[dict[str, Any]]:
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute(
+            rows = conn.execute(
+                f"""
+                SELECT c.telegram_user_id, c.telegram_username, s.*
+                FROM subscriptions s JOIN clients c USING(telegram_user_id)
+                WHERE {where} ORDER BY s.expire_date
                 """
-                SELECT * FROM peers
-                WHERE is_active = 1
-                AND payment_status = 'paid'
-                AND notification_sent = 0
-                AND expire_date <= datetime('now', '+{} days')
-                AND expire_date > datetime('now', '+1 hour')
-                AND expire_date > datetime('now')
-                ORDER BY expire_date ASC
-            """.format(days_before)
-            )
-            return [dict(row) for row in cursor.fetchall()]
+            ).fetchall()
+            return [dict(row) for row in rows]
 
-    def get_users_for_hour_notification(self) -> List[Dict[str, Any]]:
-        """Get paid users whose access expires within the next hour."""
+    def _mark_notification(self, user_id: int, column: str) -> bool:
+        if column not in {"notification_sent", "hour_notification_sent", "expired_notification_sent"}:
+            return False
         with self._connect() as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT * FROM peers
-                WHERE is_active = 1
-                AND payment_status = 'paid'
-                AND hour_notification_sent = 0
-                AND expire_date <= datetime('now', '+1 hour')
-                AND expire_date > datetime('now')
-                ORDER BY expire_date ASC
-            """
+            cursor = conn.execute(
+                f"UPDATE subscriptions SET {column}=1 WHERE telegram_user_id=?",
+                (user_id,),
             )
-            return [dict(row) for row in cursor.fetchall()]
+            conn.commit()
+            return cursor.rowcount > 0
 
-    def mark_hour_notification_sent(self, telegram_user_id: int) -> bool:
-        """Mark that the one-hour expiration reminder was sent."""
-        try:
-            with self._connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    UPDATE peers
-                    SET hour_notification_sent = 1
-                    WHERE telegram_user_id = ? AND is_active = 1
-                """,
-                    (telegram_user_id,),
-                )
-                conn.commit()
-                return cursor.rowcount > 0
+    def mark_notification_sent(self, user_id: int) -> bool:
+        return self._mark_notification(user_id, "notification_sent")
 
-        except Exception as e:
-            logger.error(
-                f"Failed to mark one-hour notification for user {telegram_user_id}: {e}"
-            )
-            return False
+    def mark_hour_notification_sent(self, user_id: int) -> bool:
+        return self._mark_notification(user_id, "hour_notification_sent")
 
-    def mark_notification_sent(self, telegram_user_id: int) -> bool:
-        """
-        Mark that a notification was sent to the user.
-
-        Args:
-            telegram_user_id: Telegram user ID
-
-        Returns:
-            True if successfully marked
-        """
-        try:
-            with self._connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    UPDATE peers
-                    SET notification_sent = 1
-                    WHERE telegram_user_id = ? AND is_active = 1
-                """,
-                    (telegram_user_id,),
-                )
-                conn.commit()
-                return cursor.rowcount > 0
-
-        except Exception as e:
-            logger.error(
-                f"Failed to mark notification for user {telegram_user_id}: {e}"
-            )
-            return False
-
-    def mark_expired_notification_sent(self, telegram_user_id: int) -> bool:
-        """
-        Mark that the expiration notification was sent (one-time).
-        """
-        try:
-            with self._connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    UPDATE peers
-                    SET expired_notification_sent = 1
-                    WHERE telegram_user_id = ? AND is_active = 1
-                """,
-                    (telegram_user_id,),
-                )
-                conn.commit()
-                return cursor.rowcount > 0
-        except Exception as e:
-            logger.error(
-                f"Failed to mark expired notification for user {telegram_user_id}: {e}"
-            )
-            return False
+    def mark_expired_notification_sent(self, user_id: int) -> bool:
+        return self._mark_notification(user_id, "expired_notification_sent")
 
     def add_payment(
         self,
@@ -892,109 +1049,104 @@ class Database:
         amount: int,
         payment_method: str,
         tariff_key: str,
-        metadata: dict = None,
+        metadata: dict | None = None,
     ) -> bool:
-        """
-        Add a new payment record.
-
-        Args:
-            payment_id: YooKassa payment ID
-            user_id: Telegram user ID
-            amount: Amount in kopeks
-            payment_method: Payment method
-            tariff_key: Tariff key
-            metadata: Extra metadata
-
-        Returns:
-            True if successfully added
-        """
         try:
             with self._connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
+                conn.execute(
                     """
-                    INSERT INTO payments (payment_id, user_id, amount, payment_method,
-                                         tariff_key, metadata)
+                    INSERT INTO payments(payment_id, user_id, amount, payment_method, tariff_key, metadata)
                     VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                    (
-                        payment_id,
-                        user_id,
-                        amount,
-                        payment_method,
-                        tariff_key,
-                        json.dumps(metadata) if metadata else None,
-                    ),
+                    """,
+                    (payment_id, user_id, amount, payment_method, tariff_key, json.dumps(metadata or {})),
                 )
                 conn.commit()
-
-                # Log operation
-                self.log_operation(
-                    f"telegram:{user_id}",
-                    "CREATE_PAYMENT",
-                    f"Created payment {payment_id}, amount: {amount}",
-                )
-                return True
-
-        except sqlite3.IntegrityError as e:
-            logger.error(f"Failed to add payment {payment_id}: {e}")
+            return True
+        except sqlite3.IntegrityError:
             return False
 
     def update_payment_status_by_id(self, payment_id: str, status: str) -> bool:
-        """
-        Update payment status by ID.
-
-        Args:
-            payment_id: Payment ID
-            status: New status (pending, succeeded, canceled, refunded)
-
-        Returns:
-            True if successfully updated
-        """
-        try:
-            # Validate status
-            valid_statuses = ["pending", "succeeded", "canceled", "refunded"]
-            if status not in valid_statuses:
-                logger.error(f"Invalid payment status: {status}")
-                return False
-
-            with self._connect() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    UPDATE payments
-                    SET status = ?, updated_at = datetime('now')
-                    WHERE payment_id = ?
-                """,
-                    (status, payment_id),
-                )
-                conn.commit()
-
-                # Log operation
-                self.log_operation(
-                    f"payment_{payment_id}",
-                    "UPDATE_PAYMENT_STATUS",
-                    f"Payment status updated to: {status}",
-                )
-                return cursor.rowcount > 0
-
-        except Exception as e:
-            logger.error(f"Failed to update payment status {payment_id}: {e}")
+        if status not in {"pending", "succeeded", "canceled", "refunded"}:
             return False
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE payments SET status=?, updated_at=CURRENT_TIMESTAMP WHERE payment_id=?",
+                (status, payment_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
-    def get_payment_by_id(self, payment_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get payment info by ID.
+    def cancel_pending_payment(self, payment_id: str) -> bool:
+        """Cancel a payment only while it is still pending locally."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE payments SET status='canceled', updated_at=CURRENT_TIMESTAMP
+                WHERE payment_id=? AND status='pending'
+                """,
+                (payment_id,),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
 
-        Args:
-            payment_id: Payment ID
+    def claim_payment_success(self, payment_id: str) -> bool:
+        """Atomically claim a successful payment event exactly once."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE payments SET status='succeeded', updated_at=CURRENT_TIMESTAMP
+                WHERE payment_id=? AND status='pending'
+                """,
+                (payment_id,),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
 
-        Returns:
-            Payment data or None
-        """
+    def get_payment_by_id(self, payment_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute("SELECT * FROM payments WHERE payment_id = ?", (payment_id,))
-            row = cursor.fetchone()
+            row = conn.execute("SELECT * FROM payments WHERE payment_id=?", (payment_id,)).fetchone()
             return dict(row) if row else None
+
+    def get_legacy_migration_candidates(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT c.telegram_user_id, c.telegram_username,
+                       s.legacy_peer_name, s.legacy_public_key
+                FROM clients c JOIN subscriptions s USING(telegram_user_id)
+                WHERE s.legacy_public_key IS NOT NULL AND s.legacy_public_key != ''
+                ORDER BY c.telegram_user_id
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def import_unbound_peer(
+        self, user_id: int, public_key: str, peer_name: str, role: str = "manual"
+    ) -> bool:
+        self.upsert_client(user_id)
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO client_peers(telegram_user_id, public_key, peer_name, role)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(telegram_user_id, public_key) DO UPDATE SET
+                        peer_name=excluded.peer_name, role=excluded.role,
+                        updated_at=CURRENT_TIMESTAMP
+                    """,
+                    (user_id, public_key, peer_name, role),
+                )
+                conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def log_operation(self, peer_name: str, operation: str, details: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                (peer_name, operation, details),
+            )
+            conn.commit()
