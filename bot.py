@@ -94,6 +94,7 @@ def configure_runtime(services: AppServices) -> None:
         cascade_router=cascade_router,
     )
     user_action_locks = UserActionLocks()
+    services.metrics.set_telegram_gauge_provider(user_action_locks.snapshot)
     telegram_sender = TelegramSender(bot, db)
     ui_renderer = TelegramUIRenderer(bot)
     admin_workflows = AdminWorkflowService(db)
@@ -174,8 +175,26 @@ class OperationLoggingMiddleware:
         return await handler(event, data)
 
 
+class ConcurrencyMetricsMiddleware:
+    """Track active Telegram handlers and concurrency-limit saturation."""
+
+    async def __call__(
+        self,
+        handler: Callable[[Any, dict[str, Any]], Awaitable[Any]],
+        event: types.TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        metrics = data["runtime_metrics"]
+        metrics.telegram_handler_started(TELEGRAM_TASKS_CONCURRENCY_LIMIT)
+        try:
+            return await handler(event, data)
+        finally:
+            metrics.telegram_handler_finished()
+
+
 dp.message.outer_middleware(OperationLoggingMiddleware())
 dp.callback_query.outer_middleware(OperationLoggingMiddleware())
+dp.update.outer_middleware(ConcurrencyMetricsMiddleware())
 
 def format_admin_payment_notification(
     title: str,

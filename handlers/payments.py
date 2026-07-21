@@ -11,6 +11,7 @@ from callbacks import (
     PaymentMethod,
     PaymentMethodCallback,
     RefundConfirmationCallback,
+    StarApprovalCallback,
 )
 from cascade_api import CascadeCapacityError, CascadeRouter
 from database import Database
@@ -581,7 +582,58 @@ async def cmd_payments(message: types.Message, db: Database, is_admin):
             "\nПоследняя сверка: "
             f"{latest['status']}, расхождений: {latest['discrepancy_count']}"
         )
-    await message.answer("\n".join(lines))
+    discrepancies = await asyncio.to_thread(db.list_star_discrepancies, 5)
+    keyboard = None
+    if discrepancies:
+        lines.append("\n⚠️ Требуют ручной проверки:")
+        buttons = []
+        for item in discrepancies:
+            short_review_id = item["review_id"][:8]
+            lines.append(
+                f"#{short_review_id} | {item['direction']} | "
+                f"{item['amount']} Stars | user {item['user_id'] or 'unknown'}"
+            )
+            buttons.append(
+                [
+                    types.InlineKeyboardButton(
+                        text=f"Подтвердить #{short_review_id}",
+                        callback_data=StarApprovalCallback(
+                            review_id=item["review_id"]
+                        ).pack(),
+                    )
+                ]
+            )
+        keyboard = types.InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.answer("\n".join(lines), reply_markup=keyboard)
+
+
+@router.callback_query(StarApprovalCallback.filter())
+async def approve_star_discrepancy(
+    callback_query: types.CallbackQuery,
+    callback_data: StarApprovalCallback,
+    db: Database,
+    safe_answer_callback,
+    is_admin,
+):
+    """Approve one reviewed historical Stars entry without granting access."""
+    if not is_admin(callback_query.from_user.id):
+        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
+        return
+    await safe_answer_callback(callback_query)
+    approved = await asyncio.to_thread(
+        db.approve_star_discrepancy,
+        callback_data.review_id,
+        callback_query.from_user.id,
+    )
+    if not approved:
+        await callback_query.message.edit_text(
+            "Эта Stars-транзакция уже обработана или больше не существует."
+        )
+        return
+    await callback_query.message.edit_text(
+        "✅ Историческая Stars-транзакция подтверждена. "
+        "VPN-доступ автоматически не изменялся."
+    )
 
 
 @router.message(Command("stars_reconcile"))

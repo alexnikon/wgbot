@@ -53,6 +53,14 @@ class UserActionLocks:
     def active_keys(self) -> int:
         return len(self._entries)
 
+    def snapshot(self) -> dict[str, int]:
+        """Return non-sensitive lock gauges for operational metrics."""
+        return {
+            "locked_users": sum(int(entry.lock.locked()) for entry in self._entries.values()),
+            "lock_participants": sum(entry.users for entry in self._entries.values()),
+            "tracked_lock_users": len(self._entries),
+        }
+
 
 def serialized_user_action(handler):
     """Serialize one aiogram handler by the originating Telegram user."""

@@ -1,13 +1,17 @@
+import logging
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 from time import monotonic
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class RuntimeMetrics:
     """Small in-process metrics registry for operational diagnostics."""
 
-    def __init__(self) -> None:
+    def __init__(self, database: Any | None = None) -> None:
         self.started_at = datetime.now(UTC)
         self._lock = threading.Lock()
         self._cascade: dict[str, dict[str, float | int]] = {}
@@ -15,7 +19,12 @@ class RuntimeMetrics:
         self._telegram = {
             "legacy_callbacks": 0,
             "unhandled_errors": 0,
+            "active_handlers": 0,
+            "peak_handlers": 0,
+            "saturation_events": 0,
         }
+        self._database = database
+        self._telegram_gauge_provider: Callable[[], dict[str, int]] | None = None
         self._last_provisioning_error: dict[str, Any] | None = None
 
     @staticmethod
@@ -55,6 +64,38 @@ class RuntimeMetrics:
             if name not in self._telegram:
                 self._telegram[name] = 0
             self._telegram[name] += 1
+        if self._database is not None and name in {
+            "legacy_callbacks",
+            "unhandled_errors",
+        }:
+            try:
+                self._database.record_telegram_daily_metric(name)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to persist Telegram metric %s: %s",
+                    name,
+                    type(exc).__name__,
+                )
+
+    def telegram_handler_started(self, concurrency_limit: int) -> None:
+        with self._lock:
+            self._telegram["active_handlers"] += 1
+            self._telegram["peak_handlers"] = max(
+                self._telegram["peak_handlers"], self._telegram["active_handlers"]
+            )
+            if self._telegram["active_handlers"] >= concurrency_limit:
+                self._telegram["saturation_events"] += 1
+
+    def telegram_handler_finished(self) -> None:
+        with self._lock:
+            self._telegram["active_handlers"] = max(
+                0, self._telegram["active_handlers"] - 1
+            )
+
+    def set_telegram_gauge_provider(
+        self, provider: Callable[[], dict[str, int]]
+    ) -> None:
+        self._telegram_gauge_provider = provider
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -69,7 +110,7 @@ class RuntimeMetrics:
                     if requests
                     else 0.0,
                 }
-            return {
+            result = {
                 "started_at": self.started_at.isoformat(),
                 "cascade": cascade,
                 "provisioning": dict(self._provisioning),
@@ -78,3 +119,6 @@ class RuntimeMetrics:
                 if self._last_provisioning_error
                 else None,
             }
+        if self._telegram_gauge_provider is not None:
+            result["telegram"].update(self._telegram_gauge_provider())
+        return result

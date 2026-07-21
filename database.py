@@ -4,7 +4,7 @@ import sqlite3
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from config import DATABASE_FILE
@@ -145,6 +145,7 @@ class Database:
                     invoice_payload TEXT,
                     matched_payment_id TEXT,
                     status TEXT NOT NULL DEFAULT 'observed',
+                    review_token TEXT,
                     observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY(transaction_id, direction)
                 );
@@ -158,6 +159,13 @@ class Database:
                     applied_count INTEGER NOT NULL DEFAULT 0,
                     discrepancy_count INTEGER NOT NULL DEFAULT 0,
                     error_type TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS telegram_daily_metrics (
+                    day TEXT PRIMARY KEY,
+                    legacy_callbacks INTEGER NOT NULL DEFAULT 0,
+                    unhandled_errors INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
                 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -185,6 +193,19 @@ class Database:
             self._ensure_column(conn, "clients", "last_telegram_error", "TEXT")
             self._ensure_column(
                 conn, "clients", "telegram_reachability_updated_at", "TEXT"
+            )
+            self._ensure_column(conn, "star_transactions", "review_token", "TEXT")
+            conn.execute(
+                """
+                UPDATE star_transactions SET review_token=lower(hex(randomblob(8)))
+                WHERE review_token IS NULL
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_star_transactions_review_token
+                ON star_transactions(review_token) WHERE review_token IS NOT NULL
+                """
             )
             for column, definition in {
                 "telegram_payment_charge_id": "TEXT",
@@ -585,7 +606,7 @@ class Database:
             ).fetchall()
         return [{"telegramId": int(row[0]), "username": row[1] or ""} for row in rows]
 
-    def get_runtime_stats(self) -> dict[str, int]:
+    def get_runtime_stats(self) -> dict[str, int | None]:
         """Return non-sensitive gauges for protected operational diagnostics."""
         with self._connect() as conn:
             row = conn.execute(
@@ -601,7 +622,16 @@ class Database:
                     (SELECT COUNT(*) FROM provisioning_tasks
                      WHERE status='failed'),
                     (SELECT COUNT(*) FROM server_reservations
-                     WHERE datetime(expires_at) > datetime('now'))
+                     WHERE datetime(expires_at) > datetime('now')),
+                    (SELECT COUNT(*) FROM clients WHERE telegram_reachable=1),
+                    (SELECT COUNT(*) FROM clients WHERE telegram_reachable=0),
+                    (SELECT COUNT(*) FROM clients WHERE telegram_reachable IS NULL),
+                    (SELECT COUNT(*) FROM star_transactions WHERE status='discrepancy'),
+                    (SELECT CAST(strftime('%s', 'now') - strftime('%s', completed_at) AS INTEGER)
+                     FROM star_reconciliation_runs WHERE status='completed'
+                     ORDER BY id DESC LIMIT 1),
+                    (SELECT legacy_callbacks FROM telegram_daily_metrics
+                     WHERE day=date('now'))
                 """
             ).fetchone()
         return {
@@ -611,7 +641,66 @@ class Database:
             "provisioning_running": int(row[3]),
             "provisioning_failed": int(row[4]),
             "active_reservations": int(row[5]),
+            "telegram_reachable": int(row[6]),
+            "telegram_blocked": int(row[7]),
+            "telegram_reachability_unknown": int(row[8]),
+            "stars_discrepancies": int(row[9]),
+            "stars_last_success_age_seconds": int(row[10])
+            if row[10] is not None
+            else None,
+            "legacy_callbacks_today": int(row[11] or 0),
         }
+
+    def record_telegram_daily_metric(self, name: str) -> None:
+        """Persist a low-volume Telegram counter for rollout decisions."""
+        if name not in {"legacy_callbacks", "unhandled_errors"}:
+            raise ValueError("Unsupported Telegram metric")
+        with self._connect() as conn:
+            conn.execute(
+                f"""
+                INSERT INTO telegram_daily_metrics(day, {name})
+                VALUES (date('now'), 1)
+                ON CONFLICT(day) DO UPDATE SET
+                    {name}={name}+1, updated_at=CURRENT_TIMESTAMP
+                """
+            )
+            conn.commit()
+
+    def ensure_telegram_daily_metrics_day(self) -> None:
+        """Create today's zero-valued row for a continuous rollout history."""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO telegram_daily_metrics(day) VALUES (date('now'))"
+            )
+            conn.commit()
+
+    def get_legacy_callback_zero_streak(self, maximum_days: int = 30) -> int:
+        history = {
+            item["day"]: int(item["legacy_callbacks"])
+            for item in self.get_telegram_daily_metrics(maximum_days)
+        }
+        streak = 0
+        current = datetime.now(UTC).date()
+        for offset in range(maximum_days):
+            day = (current - timedelta(days=offset)).isoformat()
+            if history.get(day) != 0:
+                break
+            streak += 1
+        return streak
+
+    def get_telegram_daily_metrics(self, days: int = 30) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT day, legacy_callbacks, unhandled_errors
+                FROM telegram_daily_metrics
+                WHERE day >= date('now', ?)
+                ORDER BY day DESC
+                """,
+                (f"-{max(1, min(int(days), 365)) - 1} days",),
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     def get_admin_clients_page(
         self, page: int, page_size: int, query: str = ""
@@ -1436,8 +1525,8 @@ class Database:
                 INSERT OR IGNORE INTO star_transactions(
                     transaction_id, direction, amount, occurred_at,
                     transaction_type, user_id, invoice_payload,
-                    matched_payment_id, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    matched_payment_id, status, review_token
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     transaction_id,
@@ -1449,6 +1538,7 @@ class Database:
                     invoice_payload,
                     matched_payment_id,
                     status,
+                    uuid.uuid4().hex[:16],
                 ),
             )
             conn.commit()
@@ -1578,6 +1668,66 @@ class Database:
                     "SELECT COUNT(*) FROM star_transactions WHERE status='discrepancy'"
                 ).fetchone()[0]
             )
+
+    def list_star_discrepancies(self, limit: int = 10) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT review_token AS review_id, direction, amount, occurred_at,
+                       transaction_type, user_id, status
+                FROM star_transactions
+                WHERE status='discrepancy'
+                ORDER BY occurred_at DESC
+                LIMIT ?
+                """,
+                (max(1, min(int(limit), 20)),),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def approve_star_discrepancy(self, review_id: str, admin_id: int) -> bool:
+        """Approve one reviewed ledger entry without modifying VPN access."""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            transaction = conn.execute(
+                """
+                SELECT review_token AS review_id, transaction_id, direction, user_id
+                FROM star_transactions
+                WHERE review_token=? AND status='discrepancy'
+                """,
+                (review_id,),
+            ).fetchone()
+            if not transaction:
+                conn.rollback()
+                return False
+            conn.execute(
+                """
+                UPDATE star_transactions SET status='approved_historical'
+                WHERE review_token=? AND status='discrepancy'
+                """,
+                (review_id,),
+            )
+            conn.execute(
+                """
+                INSERT INTO operation_logs(peer_name, operation, details)
+                VALUES (?, 'stars_historical_transaction_approved', ?)
+                """,
+                (
+                    f"telegram:{transaction['user_id'] or 'unknown'}",
+                    json.dumps(
+                        {
+                            "admin_id": int(admin_id),
+                            "direction": transaction["direction"],
+                            "review_id": review_id,
+                            "transaction_id": transaction["transaction_id"],
+                        },
+                        sort_keys=True,
+                    ),
+                ),
+            )
+            conn.commit()
+            return True
 
     def get_star_daily_summary(self) -> dict[str, int]:
         with self._connect() as conn:
