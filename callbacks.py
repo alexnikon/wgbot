@@ -44,3 +44,7 @@ class AdminDiscountCallback(CallbackData, prefix="adiscount"):
 
 class RefundConfirmationCallback(CallbackData, prefix="refund"):
     payment_id: str
+
+
+class StarApprovalCallback(CallbackData, prefix="stapprove"):
+    review_id: str

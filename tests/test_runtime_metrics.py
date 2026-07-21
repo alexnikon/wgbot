@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from provisioning import ProvisioningWorker
@@ -26,6 +27,29 @@ class RuntimeMetricsTests(unittest.TestCase):
         self.assertEqual(snapshot["provisioning"]["failed"], 1)
         self.assertEqual(snapshot["last_provisioning_error"]["error_type"], "ValueError")
         self.assertNotIn("secret details", str(snapshot))
+
+    def test_telegram_concurrency_and_lock_gauges(self):
+        metrics = RuntimeMetrics()
+        metrics.set_telegram_gauge_provider(
+            lambda: {"locked_users": 2, "lock_participants": 3}
+        )
+        metrics.telegram_handler_started(2)
+        metrics.telegram_handler_started(2)
+        metrics.telegram_handler_finished()
+
+        telegram = metrics.snapshot()["telegram"]
+        self.assertEqual(telegram["active_handlers"], 1)
+        self.assertEqual(telegram["peak_handlers"], 2)
+        self.assertEqual(telegram["saturation_events"], 1)
+        self.assertEqual(telegram["locked_users"], 2)
+
+    def test_persisted_telegram_events_are_recorded(self):
+        database = SimpleNamespace(record_telegram_daily_metric=unittest.mock.Mock())
+        metrics = RuntimeMetrics(database)
+        metrics.telegram_event("legacy_callbacks")
+        database.record_telegram_daily_metric.assert_called_once_with(
+            "legacy_callbacks"
+        )
 
 
 class _ProvisioningDatabase:

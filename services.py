@@ -31,8 +31,9 @@ class AppServices:
 
 def create_services() -> AppServices:
     """Create services explicitly during application startup."""
-    metrics = RuntimeMetrics()
     db = Database()
+    db.ensure_telegram_daily_metrics_day()
+    metrics = RuntimeMetrics(db)
     cascade_router = CascadeRouter(db, metrics=metrics)
     return AppServices(
         db=db,

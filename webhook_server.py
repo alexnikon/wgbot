@@ -391,6 +391,9 @@ async def runtime_metrics(request: Request):
         return JSONResponse({"status": "starting"}, status_code=503)
     snapshot = app_services.metrics.snapshot()
     snapshot["database"] = await asyncio.to_thread(db.get_runtime_stats)
+    snapshot["database"]["legacy_callback_zero_streak_days"] = await asyncio.to_thread(
+        db.get_legacy_callback_zero_streak
+    )
     snapshot["ready"] = app_services.runtime_ready
     return snapshot
 

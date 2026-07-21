@@ -153,5 +153,14 @@ payments use a local intent before an invoice is sent, and the hourly reconcilia
 worker compares these intents with `getStarTransactions`. Refund events are recorded
 for manual access review; they never shorten VPN access automatically.
 
+The protected metrics endpoint includes handler concurrency, per-user lock gauges,
+Telegram reachability counts, reconciliation age, current discrepancies, and a
+persistent daily legacy-callback counter. Zero-valued daily rows make the required
+legacy compatibility observation window auditable across process restarts.
+
+`/payments` shows unresolved Stars ledger entries to administrators. Each entry can
+be explicitly approved with a typed confirmation button; approval is audited and
+never grants or extends VPN access.
+
 Admin command aliases are `/clients`, `/broadcast`, `/payments`, `/stars_reconcile`,
 and `/refund_stars <telegram_charge_id>`.

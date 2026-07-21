@@ -65,6 +65,7 @@ class StarsReconciler:
             run_id = await asyncio.to_thread(self.db.start_star_reconciliation_run)
             result = ReconciliationResult()
             try:
+                await asyncio.to_thread(self.db.ensure_telegram_daily_metrics_day)
                 repaired = await asyncio.to_thread(
                     self.db.repair_legacy_star_payment_matches
                 )
