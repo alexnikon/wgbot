@@ -65,6 +65,13 @@ class StarsReconciler:
             run_id = await asyncio.to_thread(self.db.start_star_reconciliation_run)
             result = ReconciliationResult()
             try:
+                repaired = await asyncio.to_thread(
+                    self.db.repair_legacy_star_payment_matches
+                )
+                if repaired:
+                    logger.info(
+                        "Backfilled %s exact legacy Stars payment matches", repaired
+                    )
                 offset = 0
                 while True:
                     page = await self.bot.get_star_transactions(offset=offset, limit=100)
