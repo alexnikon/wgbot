@@ -1471,6 +1471,64 @@ class Database:
             )
             conn.commit()
 
+    def repair_legacy_star_payment_matches(self) -> int:
+        """Backfill charge IDs for exact pre-journal Stars payment matches.
+
+        Older releases stored Telegram's charge ID in ``payment_id``. Exact ID,
+        user, and amount matches are journal repairs only; access is not applied
+        again.
+        """
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            candidates = conn.execute(
+                """
+                SELECT p.id, p.payment_id, p.user_id, t.invoice_payload
+                FROM payments p
+                JOIN star_transactions t
+                  ON t.transaction_id=p.payment_id AND t.direction='incoming'
+                WHERE p.payment_method='stars' AND p.status='succeeded'
+                  AND p.telegram_payment_charge_id IS NULL
+                  AND t.status='discrepancy'
+                  AND t.user_id=p.user_id AND t.amount=p.amount
+                """
+            ).fetchall()
+            repaired = 0
+            for candidate in candidates:
+                payment_update = conn.execute(
+                    """
+                    UPDATE payments
+                    SET telegram_payment_charge_id=payment_id,
+                        invoice_payload=COALESCE(invoice_payload, ?),
+                        currency='XTR', updated_at=CURRENT_TIMESTAMP
+                    WHERE id=? AND telegram_payment_charge_id IS NULL
+                    """,
+                    (candidate["invoice_payload"], candidate["id"]),
+                )
+                if payment_update.rowcount != 1:
+                    continue
+                conn.execute(
+                    """
+                    UPDATE star_transactions
+                    SET matched_payment_id=?, status='matched_historical'
+                    WHERE transaction_id=? AND direction='incoming'
+                    """,
+                    (candidate["payment_id"], candidate["payment_id"]),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO operation_logs(peer_name, operation, details)
+                    VALUES (?, 'stars_legacy_charge_backfilled', ?)
+                    """,
+                    (
+                        f"telegram:{candidate['user_id']}",
+                        f"payment_id={candidate['payment_id']}",
+                    ),
+                )
+                repaired += 1
+            conn.commit()
+            return repaired
+
     def start_star_reconciliation_run(self) -> int:
         with self._connect() as conn:
             cursor = conn.execute("INSERT INTO star_reconciliation_runs DEFAULT VALUES")

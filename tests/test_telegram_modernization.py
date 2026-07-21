@@ -240,6 +240,38 @@ class TelegramDatabaseTests(unittest.TestCase):
         self.assertEqual(row["telegram_payment_charge_id"], "tg-charge")
         self.assertEqual(row["provider_payment_charge_id"], "provider-charge")
 
+    def test_exact_legacy_star_id_match_is_backfilled_without_reapplying_access(self):
+        charge_id = "legacy-charge-id"
+        payload = "vpn_access_stars_14_days_19"
+        self.db.add_payment(
+            charge_id,
+            19,
+            100,
+            "stars",
+            "14_days",
+            currency="RUB",
+        )
+        self.db.update_payment_status_by_id(charge_id, "succeeded")
+        self.db.record_star_transaction(
+            charge_id,
+            "incoming",
+            100,
+            1,
+            transaction_type="invoice_payment",
+            user_id=19,
+            invoice_payload=payload,
+            status="discrepancy",
+        )
+
+        self.assertEqual(self.db.repair_legacy_star_payment_matches(), 1)
+        self.assertEqual(self.db.repair_legacy_star_payment_matches(), 0)
+        payment = self.db.get_payment_by_id(charge_id)
+        self.assertEqual(payment["telegram_payment_charge_id"], charge_id)
+        self.assertEqual(payment["invoice_payload"], payload)
+        self.assertEqual(payment["currency"], "XTR")
+        self.assertIsNone(self.db.get_peer_by_telegram_id(19))
+        self.assertEqual(self.db.count_star_discrepancies(), 0)
+
 
 class TelegramSenderTests(unittest.IsolatedAsyncioTestCase):
     async def test_forbidden_marks_user_unreachable(self):
