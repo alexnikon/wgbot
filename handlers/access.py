@@ -1,13 +1,10 @@
 import logging
 
 from aiogram import F, Router, types
-from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from cascade_api import CascadeNotFound, CascadeRouter
 from database import Database
 from payment import PaymentManager
-from telegram_runtime import serialized_user_action
 from utils import format_date_for_user, parse_date_flexible
 
 logger = logging.getLogger(__name__)
@@ -137,6 +134,13 @@ async def _handle_get_config_locked(
                     callback_query.message,
                     "❌ Не удалось отправить конфигурацию.\n\nИспользуй кнопку ниже, чтобы вернуться в меню:",
                     reply_markup=create_back_to_menu_keyboard(),
+                )
+            else:
+                await safe_edit_callback_message(
+                    callback_query.message,
+                    "✅ Конфигурация отправлена отдельным файлом.\n\n"
+                    "Открой её через AmneziaWG и добавь новый туннель.",
+                    reply_markup=create_main_menu_keyboard(user_id),
                 )
         except Exception as e:
             logger.error(f"Error while fetching/restoring configuration: {e}", exc_info=True)
@@ -344,224 +348,3 @@ async def handle_status_callback(
             error_text,
             create_main_menu_keyboard(user_id),
         )
-
-
-@router.message(Command("connect"))
-@serialized_user_action
-async def cmd_connect(
-    message: types.Message,
-    db: Database,
-    cascade_router: CascadeRouter,
-    payment_manager: PaymentManager,
-    create_or_restore_peer_for_user,
-    send_config_with_confirmation,
-    is_access_active,
-    user_action_locks,
-):
-    """Handle the /connect command."""
-    user_id = message.from_user.id
-    username = message.from_user.username
-
-    # Check if the user already has an active peer
-    existing_peer = db.get_peer_by_telegram_id(user_id)
-    if existing_peer:
-        # Check if access is active (paid and not expired)
-        if not is_access_active(existing_peer):
-            # Access expired or not paid
-            payment_info = payment_manager.get_payment_info()
-            if existing_peer.get("payment_status") == "paid":
-                # Access was paid but expired
-                expire_date_str = existing_peer.get("expire_date", "Неизвестно")
-                expire_date_formatted = (
-                    format_date_for_user(expire_date_str)
-                    if expire_date_str != "Неизвестно"
-                    else "Неизвестно"
-                )
-                await message.reply(
-                    f"⚠️ Твой VPN доступ истек!\n\n"
-                    f"📅 Дата истечения: {expire_date_formatted}\n\n"
-                    f"💎 Для получения конфигурации необходимо продлить доступ.\n\n"
-                    f"Стоимость за {payment_info['period']}:\n"
-                    f"⭐ Telegram Stars: {payment_info['stars_price']} Stars\n"
-                    f"💳 Банковская карта: {payment_info['rub_price']} руб."
-                )
-            else:
-                # Access not paid
-                await message.reply(
-                    f"❌ Доступ не оплачен!\n\n"
-                    f"💎 Стоимость за {payment_info['period']}:\n"
-                    f"⭐ Telegram Stars: {payment_info['stars_price']} Stars\n"
-                    f"💳 Банковская карта: {payment_info['rub_price']} руб.\n\n"
-                    f"Для получения конфигурации необходимо оплатить доступ."
-                )
-
-            # Send payment method selection
-            await payment_manager.send_payment_selection(message.chat.id, user_id)
-            return
-
-        # User has active access. Recreate only after an explicit Cascade 404.
-        try:
-            try:
-                progress_message = await message.reply("Скачиваю конфиг...")
-                config_content = await cascade_router.get_primary_config(user_id)
-                await send_config_with_confirmation(
-                    message.chat.id,
-                    config_content,
-                    source_message=progress_message,
-                )
-                return
-            except CascadeNotFound:
-                progress_message = await message.reply("Создаю новый конфиг...")
-                ok, err, new_config = await create_or_restore_peer_for_user(
-                    user_id, username, existing_peer.get("tariff_key")
-                )
-                if not ok:
-                    await message.reply(f"❌ {err}")
-                    return
-                if not await send_config_with_confirmation(
-                    message.chat.id,
-                    new_config,
-                    source_message=progress_message,
-                ):
-                    await message.reply(
-                        "❌ Не удалось отправить конфигурацию. Используй /connect для повторной попытки."
-                    )
-                return
-        except Exception as e:
-            logger.error(f"Error while getting config in /connect: {e}", exc_info=True)
-            await message.reply(
-                "❌ Ошибка при получении конфигурации. Попробуй позже или обратись в поддержку."
-            )
-
-    # New user: payment required
-    payment_info = payment_manager.get_payment_info()
-    await message.reply(
-        f"💎 Для получения VPN конфигурации необходимо оплатить доступ!\n\n"
-        f"Стоимость за {payment_info['period']}:\n"
-        f"⭐ Telegram Stars: {payment_info['stars_price']} Stars\n"
-        f"💳 Картой (Юmoney): {payment_info['rub_price']} руб.\n\n"
-        f"После оплаты предоставим тебе конфигурацию и доступ на {payment_info['period']}."
-    )
-
-    # Send payment method selection
-    await payment_manager.send_payment_selection(message.chat.id, user_id)
-
-
-@router.message(Command("extend"))
-async def cmd_extend(message: types.Message, db: Database, payment_manager: PaymentManager):
-    """Handle the /extend command (access extension)."""
-    user_id = message.from_user.id
-
-    # Check if the user has an active peer
-    existing_peer = db.get_peer_by_telegram_id(user_id)
-    if not existing_peer:
-        await message.reply(
-            "❌ У тебя нет активного VPN доступа.\nИспользуй /connect для создания нового."
-        )
-        return
-
-    # Check if current access is paid
-    if existing_peer.get("payment_status") != "paid":
-        await message.reply("❌ Доступ не оплачен.\nИспользуй /connect для оплаты.")
-        return
-
-    payment_info = payment_manager.get_payment_info()
-    await message.reply(
-        f"💎 Продление доступа на {payment_info['period']}\n\n"
-        f"Стоимость:\n"
-        f"⭐ Telegram Stars: {payment_info['stars_price']} Stars\n"
-        f"💳 Банковская карта: {payment_info['rub_price']} руб.\n\n"
-        f"После оплаты доступ будет продлен на {payment_info['period']}."
-    )
-
-    # Send payment method selection for extension
-    await payment_manager.send_payment_selection(message.chat.id, user_id)
-
-
-@router.message(Command("status"))
-async def cmd_status(message: types.Message, db: Database, ui_renderer):
-    """Handle the /status command (remaining access time)."""
-    user_id = message.from_user.id
-
-    # Check if the user has an active peer
-    existing_peer = db.get_peer_by_telegram_id(user_id)
-    if not existing_peer:
-        await message.reply(
-            "❌ Нет активного VPN доступа.\nИспользуй /connect для создания нового."
-        )
-        return
-
-    # Check if access is paid
-    if existing_peer.get("payment_status") != "paid":
-        await message.reply("❌ Доступ не оплачен.\nИспользуй /connect для оплаты.")
-        return
-
-    # Get expiration date
-    expire_date_str = existing_peer.get("expire_date")
-    if not expire_date_str:
-        await message.reply("❌ Не удалось получить информацию о сроке доступа.")
-        return
-
-    try:
-        from datetime import datetime
-
-        expire_date = parse_date_flexible(expire_date_str)
-        now = datetime.now()
-
-        if expire_date <= now:
-            await message.reply(
-                "⚠️ Оплаченный период закончился, для возобновления доступа к сервису, необходимо оплатить доступ.",
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text="💵 Оплатить доступ",
-                                callback_data="pay",
-                            )
-                        ],
-                        [
-                            InlineKeyboardButton(
-                                text="На главную",
-                                callback_data="main",
-                            )
-                        ],
-                    ]
-                ),
-            )
-            return
-
-        # Calculate remaining time
-        time_left = expire_date - now
-        days_left = time_left.days
-        hours_left = time_left.seconds // 3600
-        minutes_left = (time_left.seconds % 3600) // 60
-
-        # Build message
-        status_text = "📊 Статус твоего VPN доступа:\n\n"
-        status_text += f"📅 Дата истечения: {expire_date.strftime('%d.%m.%Y')}\n\n"
-
-        if days_left > 0:
-            status_text += f"⏰ Осталось: {days_left} дн. {hours_left} ч. {minutes_left} мин."
-        elif hours_left > 0:
-            status_text += f"⏰ Осталось: {hours_left} ч. {minutes_left} мин."
-        else:
-            status_text += f"⏰ Осталось: {minutes_left} мин."
-
-        if days_left <= 3:
-            status_text += (
-                '\n\n⚠️ Доступ к сервису скоро истекает! Нажми "Продлить доступ" для продления.'
-            )
-
-        await ui_renderer.send_rich_or_text(
-            message.chat.id,
-            rich_markdown=(
-                "# 📊 Статус подписки\n\n"
-                f"**Действует до:** {expire_date.strftime('%d.%m.%Y %H:%M')}\n\n"
-                + status_text.split("\n\n", 2)[-1]
-            ),
-            fallback_text=status_text,
-        )
-
-    except ValueError as e:
-        logger.error(f"Failed to parse expiration date: {e}")
-        await message.reply("❌ Ошибка при получении информации о доступе.")

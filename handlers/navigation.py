@@ -2,7 +2,7 @@ import logging
 import time
 
 from aiogram import F, Router, types
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import CommandStart
 
 from database import Database
 from payment import PaymentManager
@@ -14,26 +14,34 @@ START_DEBOUNCE_SECONDS = 5.0
 _last_start_sent_at: dict[int, float] = {}
 
 @router.message(CommandStart())
-async def cmd_start(message: types.Message, create_main_menu_keyboard):
-    """Handle the /start command."""
+async def cmd_start(
+    message: types.Message, create_main_menu_keyboard, chat_panel
+):
+    """Restore the hidden bootstrap panel without exposing slash commands."""
     user_id = message.from_user.id
+    await chat_panel.delete_user_message(message)
     now_monotonic = time.monotonic()
     last_start = _last_start_sent_at.get(user_id, 0.0)
     if now_monotonic - last_start < START_DEBOUNCE_SECONDS:
         logger.info(
-            f"Skipping duplicate /start for user {user_id} within {START_DEBOUNCE_SECONDS}s window"
+            "Skipping duplicate hidden start for user %s within %ss",
+            user_id,
+            START_DEBOUNCE_SECONDS,
         )
         return
     _last_start_sent_at[user_id] = now_monotonic
-
-    welcome_text = """
-👋🏻 Привет! Здесь ты можешь подключиться к быстрому и безопасному VPN.
-
-Чтобы начать пользоваться нашим VPN, скачай клиент AmneziaWG из своего магазина приложений.
-В инструкции есть ссылки на скачивание приложения и описан процесс подключения.
-    """
-
-    await message.answer(welcome_text, reply_markup=create_main_menu_keyboard(user_id))
+    welcome_text = (
+        "👋🏻 Привет! Здесь ты можешь подключиться к быстрому и безопасному VPN.\n\n"
+        "Чтобы начать пользоваться нашим VPN, скачай клиент AmneziaWG из своего "
+        "магазина приложений. В инструкции есть ссылки на скачивание приложения "
+        "и описан процесс подключения."
+    )
+    await chat_panel.restore_or_create(
+        message.chat.id,
+        user_id,
+        welcome_text,
+        create_main_menu_keyboard(user_id),
+    )
 
 
 # Inline button handlers
@@ -128,7 +136,7 @@ async def handle_guide_callback(
     callback_query: types.CallbackQuery,
     safe_answer_callback,
     create_guide_keyboard,
-    ui_renderer,
+    chat_panel,
 ):
     """Handle the 'Guide' button."""
     await safe_answer_callback(callback_query)
@@ -155,38 +163,17 @@ async def handle_guide_callback(
    • Готово! 🎉
     """
 
-    await ui_renderer.send_rich_or_text(
-        callback_query.from_user.id,
+    await chat_panel.render_from_message(
+        callback_query.message,
+        guide_text,
+        create_guide_keyboard(),
+        user_id=callback_query.from_user.id,
         rich_markdown=(
             "# 📖 Инструкция\n\n"
             "1. Установите AmneziaWG кнопкой ниже.\n"
             "2. Получите конфигурацию в главном меню.\n"
             "3. Импортируйте `.conf` и включите туннель."
         ),
-        fallback_text=guide_text,
-        reply_markup=create_guide_keyboard(),
-    )
-
-
-@router.message(Command("help"))
-async def cmd_help(message: types.Message, create_guide_keyboard, ui_renderer):
-    """Show installation and support instructions."""
-    fallback_text = (
-        "📖 Инструкция по подключению\n\n"
-        "1. Установите AmneziaWG кнопкой ниже.\n"
-        "2. Используйте /connect для получения конфигурации.\n"
-        "3. Импортируйте файл и включите туннель."
-    )
-    await ui_renderer.send_rich_or_text(
-        message.chat.id,
-        rich_markdown=(
-            "# 📖 Инструкция по подключению\n\n"
-            "1. Установите AmneziaWG кнопкой ниже.\n"
-            "2. Используйте `/connect` для получения конфигурации.\n"
-            "3. Импортируйте файл и включите туннель."
-        ),
-        fallback_text=fallback_text,
-        reply_markup=create_guide_keyboard(),
     )
 
 

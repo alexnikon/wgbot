@@ -9,12 +9,13 @@ from typing import Any, TypeVar
 
 from aiogram import Bot
 from aiogram.exceptions import (
+    TelegramAPIError,
     TelegramBadRequest,
     TelegramForbiddenError,
     TelegramNetworkError,
     TelegramRetryAfter,
 )
-from aiogram.types import InlineKeyboardMarkup, InputRichMessage
+from aiogram.types import InlineKeyboardMarkup, InputRichMessage, Message
 
 from database import Database
 
@@ -173,6 +174,150 @@ class TelegramUIRenderer:
             )
         except TelegramBadRequest:
             return await message.edit_text(fallback_text, reply_markup=reply_markup)
+
+
+class ChatPanelService:
+    """Keep one persistent, editable control-panel message per private chat."""
+
+    def __init__(self, bot: Bot, db: Database) -> None:
+        self.bot = bot
+        self.db = db
+
+    async def _save(self, user_id: int, chat_id: int, message_id: int) -> None:
+        await asyncio.to_thread(
+            self.db.set_telegram_ui_panel, user_id, chat_id, message_id
+        )
+
+    async def _delete_message(self, chat_id: int, message_id: int) -> None:
+        try:
+            await self.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except TelegramAPIError:
+            logger.debug(
+                "Unable to delete obsolete panel chat_id=%s message_id=%s",
+                chat_id,
+                message_id,
+            )
+
+    async def adopt(self, message: Message, user_id: int) -> None:
+        panel = await asyncio.to_thread(self.db.get_telegram_ui_panel, user_id)
+        if panel and (
+            int(panel["chat_id"]) != message.chat.id
+            or int(panel["message_id"]) != message.message_id
+        ):
+            await self._delete_message(
+                int(panel["chat_id"]), int(panel["message_id"])
+            )
+        await self._save(user_id, message.chat.id, message.message_id)
+
+    async def _edit(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        reply_markup: InlineKeyboardMarkup | None,
+        rich_markdown: str | None,
+    ) -> bool:
+        if rich_markdown:
+            try:
+                await self.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    rich_message=InputRichMessage(markdown=rich_markdown),
+                    reply_markup=reply_markup,
+                )
+                return True
+            except TelegramBadRequest as exc:
+                if "message is not modified" in str(exc).lower():
+                    return True
+        try:
+            await self.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=reply_markup,
+            )
+            return True
+        except TelegramBadRequest as exc:
+            return "message is not modified" in str(exc).lower()
+        except TelegramForbiddenError:
+            return False
+
+    async def render(
+        self,
+        chat_id: int,
+        user_id: int,
+        text: str,
+        reply_markup: InlineKeyboardMarkup | None = None,
+        *,
+        rich_markdown: str | None = None,
+    ) -> Message | None:
+        panel = await asyncio.to_thread(self.db.get_telegram_ui_panel, user_id)
+        if panel and await self._edit(
+            int(panel["chat_id"]),
+            int(panel["message_id"]),
+            text,
+            reply_markup,
+            rich_markdown,
+        ):
+            return None
+        if panel:
+            await self._delete_message(
+                int(panel["chat_id"]), int(panel["message_id"])
+            )
+            await asyncio.to_thread(self.db.delete_telegram_ui_panel, user_id)
+        sent = await self.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=reply_markup,
+        )
+        await self._save(user_id, chat_id, sent.message_id)
+        return sent
+
+    async def render_from_message(
+        self,
+        message: Message,
+        text: str,
+        reply_markup: InlineKeyboardMarkup | None = None,
+        *,
+        user_id: int | None = None,
+        rich_markdown: str | None = None,
+    ) -> Message | None:
+        effective_user_id = user_id or message.chat.id
+        await self.adopt(message, effective_user_id)
+        return await self.render(
+            message.chat.id,
+            effective_user_id,
+            text,
+            reply_markup,
+            rich_markdown=rich_markdown,
+        )
+
+    async def restore_or_create(
+        self,
+        chat_id: int,
+        user_id: int,
+        text: str,
+        reply_markup: InlineKeyboardMarkup | None = None,
+        *,
+        rich_markdown: str | None = None,
+    ) -> Message | None:
+        return await self.render(
+            chat_id,
+            user_id,
+            text,
+            reply_markup,
+            rich_markdown=rich_markdown,
+        )
+
+    async def delete_user_message(self, message: Message) -> None:
+        try:
+            await message.delete()
+        except TelegramAPIError:
+            logger.debug(
+                "Unable to delete incoming message chat_id=%s message_id=%s",
+                message.chat.id,
+                message.message_id,
+            )
 
 
 _SECRET_PATTERNS = (

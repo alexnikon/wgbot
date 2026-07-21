@@ -3,7 +3,6 @@ import logging
 
 from aiogram import Bot, F, Router, types
 from aiogram.exceptions import TelegramAPIError
-from aiogram.filters import Command
 
 from callbacks import (
     PaymentAction,
@@ -38,15 +37,6 @@ def _parse_legacy_method(
     if user_id <= 0 or not payment_manager.is_tariff_enabled(tariff):
         return None
     return tariff, user_id
-
-
-@router.message(Command("buy"))
-async def cmd_buy(message: types.Message, payment_manager: PaymentManager):
-    """Handle the /buy command (payment method selection)."""
-    user_id = message.from_user.id
-
-    # Send payment method selection
-    await payment_manager.send_payment_selection(message.chat.id, user_id)
 
 
 # Callback button handlers for payment method selection
@@ -114,10 +104,19 @@ async def handle_pay_stars_callback(
         tariff_data = user_tariffs.get(tariff_key, {})
         tariff_name = tariff_data.get("name", "неизвестный тариф")
         stars_price = tariff_data.get("stars_price", 1)
-        await callback_query.message.reply(
+        await safe_edit_callback_message(
+            callback_query.message,
             f"❌ Ошибка при создании запроса на оплату через Telegram Stars.\n\n"
             f"💡 Убедись, что у тебя есть Telegram Stars на балансе.\n"
-            f"⭐ Стоимость: {stars_price} Stars за {tariff_name} доступа"
+            f"⭐ Стоимость: {stars_price} Stars за {tariff_name} доступа",
+            reply_markup=create_back_to_menu_keyboard(),
+        )
+    else:
+        await safe_edit_callback_message(
+            callback_query.message,
+            "⭐ Счёт Telegram Stars отправлен отдельным сообщением.\n\n"
+            "После оплаты эта панель обновится автоматически.",
+            reply_markup=create_back_to_menu_keyboard(),
         )
 
 
@@ -301,6 +300,9 @@ async def handle_cancel_yookassa_callback(
 @router.callback_query(F.data.startswith("cancel_stars_invoice_"))
 async def handle_cancel_stars_invoice_callback(
     callback_query: types.CallbackQuery,
+    db: Database,
+    payment_manager: PaymentManager,
+    chat_panel,
     safe_answer_callback,
     callback_data: PaymentActionCallback | None = None,
 ):
@@ -317,10 +319,22 @@ async def handle_cancel_stars_invoice_callback(
         return
 
     await safe_answer_callback(callback_query)
+    invoice_payload = getattr(
+        getattr(callback_query.message, "invoice", None), "payload", None
+    )
     try:
         await callback_query.message.delete()
     except TelegramAPIError as e:
         logger.error(f"Failed to delete Stars invoice message for user {user_id}: {e}")
+    if invoice_payload:
+        await asyncio.to_thread(db.set_stars_invoice_message, invoice_payload, None)
+    payment_text, keyboard = await payment_manager.get_payment_selection_view(user_id)
+    await chat_panel.render(
+        callback_query.message.chat.id,
+        user_id,
+        f"Счёт Telegram Stars отменён.\n\n{payment_text.strip()}",
+        keyboard,
+    )
 
 
 # Retry config creation after successful payment if the initial attempt failed
@@ -407,23 +421,36 @@ async def process_successful_payment(
     notify_admins,
     format_admin_payment_notification,
     user_action_locks: UserActionLocks,
+    chat_panel,
+    create_main_menu_keyboard,
 ):
     """Handle a successful Telegram Stars payment and synchronize Cascade."""
     user_id = message.from_user.id
     username = message.from_user.username
     successful_payment = message.successful_payment
+    await chat_panel.delete_user_message(message)
     confirmed, _, amount_paid = await payment_manager.confirm_payment(
         successful_payment, payer_user_id=user_id
     )
     parsed = payment_manager.parse_invoice_payload(successful_payment.invoice_payload)
     if not confirmed or not parsed or parsed[0] != "stars":
-        await message.reply("❌ Ошибка при обработке платежа.")
+        await chat_panel.render(
+            message.chat.id,
+            user_id,
+            "❌ Ошибка при обработке платежа.",
+            create_main_menu_keyboard(user_id),
+        )
         return
 
     tariff_key = parsed[1]
     tariff_data = payment_manager.tariffs.get(tariff_key)
     if not tariff_data:
-        await message.reply("❌ Ошибка в данных платежа.")
+        await chat_panel.render(
+            message.chat.id,
+            user_id,
+            "❌ Ошибка в данных платежа.",
+            create_main_menu_keyboard(user_id),
+        )
         return
 
     payment = await asyncio.to_thread(
@@ -431,7 +458,12 @@ async def process_successful_payment(
     )
     if not payment:
         logger.error("Stars payment has no matching intent")
-        await message.reply("⚠️ Платеж получен и передан администратору на сверку.")
+        await chat_panel.render(
+            message.chat.id,
+            user_id,
+            "⚠️ Платеж получен и передан администратору на сверку.",
+            create_main_menu_keyboard(user_id),
+        )
         return
     intent_matches = (
         int(payment["user_id"]) == user_id
@@ -452,8 +484,22 @@ async def process_successful_payment(
             "⚠️ Stars payment requires manual review\n\n"
             f"Payment ID: {payment['payment_id']}\nTelegram ID: {user_id}"
         )
-        await message.reply("⚠️ Платеж получен и передан администратору на сверку.")
+        await chat_panel.render(
+            message.chat.id,
+            user_id,
+            "⚠️ Платеж получен и передан администратору на сверку.",
+            create_main_menu_keyboard(user_id),
+        )
         return
+    invoice_message_id = payment.get("invoice_message_id")
+    if invoice_message_id:
+        try:
+            await message.bot.delete_message(message.chat.id, int(invoice_message_id))
+        except TelegramAPIError:
+            logger.debug("Unable to delete paid Stars invoice for user %s", user_id)
+        await asyncio.to_thread(
+            db.set_stars_invoice_message, successful_payment.invoice_payload, None
+        )
     payment_id = payment["payment_id"]
     payment_result = await asyncio.to_thread(
         db.apply_verified_payment,
@@ -486,30 +532,49 @@ async def process_successful_payment(
                 {"expire_date": expire_date},
                 f"Failed peers: {sync_result['failed']}",
             )
-        await message.reply(
+        await chat_panel.render(
+            message.chat.id,
+            user_id,
             f"✅ Платеж успешно обработан!\n"
             f"🎉 Продлили тебе доступ на {tariff_data['days']} дней!\n"
             f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
             f"Текущая конфигурация остается актуальной.",
-            reply_markup=create_home_keyboard(),
+            create_main_menu_keyboard(user_id),
         )
         title = "🔁 Клиент продлил подписку"
     else:
-        await message.reply("🔄 Создаю VPN доступ...")
+        await chat_panel.render(
+            message.chat.id,
+            user_id,
+            "🔄 Создаю VPN доступ...",
+            create_home_keyboard(),
+        )
         ok, error, config = await create_or_restore_peer_for_user(user_id, username, tariff_key)
         if not ok:
-            await message.reply(
+            await chat_panel.render(
+                message.chat.id,
+                user_id,
                 f"⚠️ {error}. Мы повторим создание автоматически.",
-                reply_markup=create_home_keyboard(),
+                create_main_menu_keyboard(user_id),
             )
             await notify_admins(
                 f"⚠️ Оплата получена, provisioning отложен\n\nTelegram ID: {user_id}\nПричина: {error}"
             )
             return
         if not await send_config_with_confirmation(message.chat.id, config, caption=None):
-            await message.reply(
-                "✅ Доступ активирован, но конфиг не удалось отправить. Используй /connect.",
-                reply_markup=create_home_keyboard(),
+            await chat_panel.render(
+                message.chat.id,
+                user_id,
+                "✅ Доступ активирован, но конфиг не удалось отправить. "
+                "Попробуй получить его кнопкой в главном меню.",
+                create_main_menu_keyboard(user_id),
+            )
+        else:
+            await chat_panel.render(
+                message.chat.id,
+                user_id,
+                "✅ Платеж обработан, доступ создан, конфигурация отправлена файлом.",
+                create_main_menu_keyboard(user_id),
             )
         title = "🆕 Новый клиент подключился"
 
@@ -531,9 +596,13 @@ async def process_refunded_payment(
     message: types.Message,
     db: Database,
     notify_admins,
+    chat_panel,
+    create_main_menu_keyboard,
 ):
     """Record a Telegram Stars refund without changing VPN access automatically."""
     refund = message.refunded_payment
+    user_id = message.from_user.id if message.from_user else message.chat.id
+    await chat_panel.delete_user_message(message)
     matched = await asyncio.to_thread(
         db.mark_stars_refund_observed,
         refund.telegram_payment_charge_id,
@@ -562,13 +631,26 @@ async def process_refunded_payment(
         f"Telegram ID: {message.from_user.id if message.from_user else 'unknown'}\n"
         "Доступ автоматически не изменен."
     )
+    await chat_panel.render(
+        message.chat.id,
+        user_id,
+        "↩️ Telegram сообщил о возврате Stars.\n\n"
+        "VPN-доступ автоматически не изменён; операция передана администратору.",
+        create_main_menu_keyboard(user_id),
+    )
 
 
-@router.message(Command("payments"))
-async def cmd_payments(message: types.Message, db: Database, is_admin):
-    if not is_admin(message.from_user.id):
-        await message.answer("❌ Недостаточно прав.")
+@router.callback_query(F.data == "admin_payments")
+async def open_admin_payments(
+    callback_query: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    is_admin,
+):
+    if not is_admin(callback_query.from_user.id):
+        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
         return
+    await safe_answer_callback(callback_query)
     payments = await asyncio.to_thread(db.list_recent_payments, 10)
     lines = ["💳 Последние платежи"]
     for payment in payments:
@@ -583,10 +665,9 @@ async def cmd_payments(message: types.Message, db: Database, is_admin):
             f"{latest['status']}, расхождений: {latest['discrepancy_count']}"
         )
     discrepancies = await asyncio.to_thread(db.list_star_discrepancies, 5)
-    keyboard = None
+    buttons = []
     if discrepancies:
         lines.append("\n⚠️ Требуют ручной проверки:")
-        buttons = []
         for item in discrepancies:
             short_review_id = item["review_id"][:8]
             lines.append(
@@ -603,8 +684,48 @@ async def cmd_payments(message: types.Message, db: Database, is_admin):
                     )
                 ]
             )
-        keyboard = types.InlineKeyboardMarkup(inline_keyboard=buttons)
-    await message.answer("\n".join(lines), reply_markup=keyboard)
+    buttons.append(
+        [
+            types.InlineKeyboardButton(
+                text="⬅️ Управление клиентами",
+                callback_data="admin_manage_clients",
+            )
+        ]
+    )
+    await callback_query.message.edit_text(
+        "\n".join(lines),
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@router.callback_query(F.data == "admin_stars_reconcile")
+async def run_admin_stars_reconciliation(
+    callback_query: types.CallbackQuery,
+    stars_reconciler: StarsReconciler,
+    safe_answer_callback,
+    is_admin,
+):
+    if not is_admin(callback_query.from_user.id):
+        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
+        return
+    await safe_answer_callback(callback_query)
+    await callback_query.message.edit_text("⭐ Выполняю сверку Stars...")
+    result = await stars_reconciler.run_once()
+    await callback_query.message.edit_text(
+        stars_reconciler.format_report(result),
+        reply_markup=types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(
+                        text="⬅️ Управление клиентами",
+                        callback_data="admin_manage_clients",
+                    )
+                ]
+            ]
+        ),
+    )
+
+
 
 
 @router.callback_query(StarApprovalCallback.filter())
@@ -632,62 +753,21 @@ async def approve_star_discrepancy(
         return
     await callback_query.message.edit_text(
         "✅ Историческая Stars-транзакция подтверждена. "
-        "VPN-доступ автоматически не изменялся."
-    )
-
-
-@router.message(Command("stars_reconcile"))
-async def cmd_stars_reconcile(
-    message: types.Message,
-    stars_reconciler: StarsReconciler,
-    is_admin,
-):
-    if not is_admin(message.from_user.id):
-        await message.answer("❌ Недостаточно прав.")
-        return
-    result = await stars_reconciler.run_once()
-    await message.answer(stars_reconciler.format_report(result))
-
-
-@router.message(Command("refund_stars"))
-async def cmd_refund_stars(message: types.Message, db: Database, is_admin):
-    if not is_admin(message.from_user.id):
-        await message.answer("❌ Недостаточно прав.")
-        return
-    parts = (message.text or "").split(maxsplit=1)
-    if len(parts) != 2:
-        await message.answer("Использование: /refund_stars <telegram_charge_id>")
-        return
-    payment = await asyncio.to_thread(db.get_payment_by_telegram_charge, parts[1].strip())
-    if not payment or payment["payment_method"] != "stars":
-        await message.answer("❌ Платеж Telegram Stars не найден.")
-        return
-    later_payments = [
-        item
-        for item in await asyncio.to_thread(db.list_recent_payments, 100)
-        if item["user_id"] == payment["user_id"] and item["id"] > payment["id"]
-    ]
-    keyboard = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                types.InlineKeyboardButton(
-                    text="Подтвердить возврат",
-                    callback_data=RefundConfirmationCallback(
-                        payment_id=payment["payment_id"]
-                    ).pack(),
-                )
+        "VPN-доступ автоматически не изменялся.",
+        reply_markup=types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(
+                        text="⬅️ К платежам", callback_data="admin_payments"
+                    )
+                ]
             ]
-        ]
+        ),
     )
-    await message.answer(
-        "Подтвердить возврат Telegram Stars?\n\n"
-        f"Telegram ID: {payment['user_id']}\n"
-        f"Сумма: {payment['amount']} Stars\n"
-        f"Тариф: {payment['tariff_key']}\n"
-        f"Более поздних платежей: {len(later_payments)}\n\n"
-        "VPN-доступ автоматически изменен не будет.",
-        reply_markup=keyboard,
-    )
+
+
+
+
 
 
 @router.callback_query(RefundConfirmationCallback.filter())
@@ -730,7 +810,17 @@ async def confirm_stars_refund(
         f"payment_id={payment['payment_id']}",
     )
     await callback_query.message.edit_text(
-        "✅ Возврат отправлен Telegram. VPN-доступ оставлен без изменений."
+        "✅ Возврат отправлен Telegram. VPN-доступ оставлен без изменений.",
+        reply_markup=types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(
+                        text="⬅️ Управление клиентами",
+                        callback_data="admin_manage_clients",
+                    )
+                ]
+            ]
+        ),
     )
 
 

@@ -401,7 +401,9 @@ class PaymentManager:
             logger.error(f"Failed to send payment selection to user {user_id}: {e}")
             return False
     
-    async def send_stars_payment_request(self, chat_id: int, user_id: int, tariff_key: str, username: str = None) -> bool:
+    async def send_stars_payment_request(
+        self, chat_id: int, user_id: int, tariff_key: str, username: str = None
+    ):
         """
         Send a Telegram Stars payment request.
         
@@ -419,13 +421,16 @@ class PaymentManager:
             if not invoice_data:
                 return False
             
-            await self.bot.send_invoice(
+            sent = await self.bot.send_invoice(
                 chat_id=chat_id,
                 **invoice_data
             )
+            self.db.set_stars_invoice_message(
+                invoice_data["payload"], sent.message_id
+            )
             
             logger.info(f"Stars payment request sent to user {user_id}, tariff {tariff_key}")
-            return True
+            return sent
             
         except TelegramAPIError as e:
             logger.error(f"Telegram API error while sending Stars payment request: {e}")

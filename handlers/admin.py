@@ -4,10 +4,15 @@ from contextlib import suppress
 from typing import Any
 
 from aiogram import Bot, F, Router, types
-from aiogram.filters import BaseFilter, Command
+from aiogram.filters import BaseFilter
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from callbacks import AdminClientCallback, AdminDiscountCallback, AdminPageCallback
+from callbacks import (
+    AdminClientCallback,
+    AdminDiscountCallback,
+    AdminPageCallback,
+    RefundConfirmationCallback,
+)
 from config import get_admin_telegram_ids
 from database import Database
 from utils import format_date_for_user
@@ -55,12 +60,6 @@ class ActiveAdminWorkflow(BaseFilter):
         )
 
 
-def home_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="На главную", callback_data="main")]]
-    )
-
-
 def broadcast_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -71,7 +70,41 @@ def broadcast_menu_keyboard() -> InlineKeyboardMarkup:
                     callback_data="admin_broadcast_client_menu",
                 )
             ],
-            [InlineKeyboardButton(text="На главную", callback_data="main")],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Управление клиентами",
+                    callback_data="admin_manage_clients",
+                )
+            ],
+        ]
+    )
+
+
+def admin_dashboard_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="👥 Клиенты и скидки", callback_data="admin_client_list"
+                )
+            ],
+            [InlineKeyboardButton(text="📣 Рассылка", callback_data="admin_broadcast")],
+            [
+                InlineKeyboardButton(
+                    text="💳 Платежи и расхождения", callback_data="admin_payments"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⭐ Сверить Stars", callback_data="admin_stars_reconcile"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="↩️ Возврат Stars", callback_data="admin_refund_stars"
+                )
+            ],
+            [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main")],
         ]
     )
 
@@ -137,7 +170,13 @@ def client_list_keyboard(
         rows.append(
             [InlineKeyboardButton(text="🔎 Найти клиента", callback_data="admin_search_client")]
         )
-    rows.append([InlineKeyboardButton(text="На главную", callback_data="main")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ Управление клиентами", callback_data="admin_manage_clients"
+            )
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows), total
 
 
@@ -165,7 +204,13 @@ def discount_keyboard(user_id: int) -> InlineKeyboardMarkup:
             )
         ]
     )
-    rows.append([InlineKeyboardButton(text="На главную", callback_data="main")])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ Управление клиентами", callback_data="admin_manage_clients"
+            )
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -184,39 +229,6 @@ def format_client(client: dict[str, Any]) -> str:
     )
 
 
-async def require_admin(message: types.Message) -> bool:
-    if is_admin(message.from_user.id):
-        return True
-    await message.answer("❌ Недостаточно прав.")
-    return False
-
-
-@router.message(Command("admin_broadcast", "broadcast"))
-async def cmd_broadcast(message: types.Message) -> None:
-    if not await require_admin(message):
-        return
-    await message.answer("📣 Рассылка", reply_markup=broadcast_menu_keyboard())
-
-
-@router.message(Command("admin_clients", "clients"))
-async def cmd_clients(message: types.Message, db: Database) -> None:
-    if not await require_admin(message):
-        return
-    keyboard, total = client_list_keyboard(db, view="discount", page=0)
-    await message.answer(
-        f"👥 Управление клиентами\n\nНайдено: {total}", reply_markup=keyboard
-    )
-
-
-@router.message(Command("cancel"))
-async def cmd_cancel(
-    message: types.Message, admin_workflows: AdminWorkflowService
-) -> None:
-    if not await require_admin(message):
-        return
-    admin_workflows.clear(message.from_user.id)
-    await message.answer("Действие отменено.", reply_markup=home_keyboard())
-
 
 @router.callback_query(F.data == "admin_broadcast")
 async def open_broadcast(callback: types.CallbackQuery, safe_answer_callback) -> None:
@@ -230,12 +242,26 @@ async def open_broadcast(callback: types.CallbackQuery, safe_answer_callback) ->
 async def open_clients(
     callback: types.CallbackQuery, db: Database, safe_answer_callback
 ) -> None:
-    await safe_answer_callback(callback)
     if not is_admin(callback.from_user.id):
+        await safe_answer_callback(callback, "❌ Недостаточно прав.")
         return
+    await safe_answer_callback(callback)
+    await callback.message.edit_text(
+        "👥 Управление клиентами", reply_markup=admin_dashboard_keyboard()
+    )
+
+
+@router.callback_query(F.data == "admin_client_list")
+async def open_client_list(
+    callback: types.CallbackQuery, db: Database, safe_answer_callback
+) -> None:
+    if not is_admin(callback.from_user.id):
+        await safe_answer_callback(callback, "❌ Недостаточно прав.")
+        return
+    await safe_answer_callback(callback)
     keyboard, total = client_list_keyboard(db, view="discount", page=0)
     await callback.message.edit_text(
-        f"👥 Управление клиентами\n\nНайдено: {total}", reply_markup=keyboard
+        f"👥 Клиенты и скидки\n\nНайдено: {total}", reply_markup=keyboard
     )
 
 
@@ -347,7 +373,9 @@ async def choose_discount_client(
     )
     client = db.get_admin_client_details(user_id)
     if not client:
-        await callback.message.edit_text("❌ Клиент не найден.", reply_markup=home_keyboard())
+        await callback.message.edit_text(
+            "❌ Клиент не найден.", reply_markup=admin_dashboard_keyboard()
+        )
         return
     await callback.message.edit_text(
         format_client(client), reply_markup=discount_keyboard(user_id)
@@ -383,7 +411,8 @@ async def set_discount(
         value,
     )
     await callback.message.edit_text(
-        f"✅ Скидка {value}% сохранена.", reply_markup=home_keyboard()
+        f"✅ Скидка {value}% сохранена.",
+        reply_markup=admin_dashboard_keyboard(),
     )
 
 
@@ -433,6 +462,28 @@ async def start_search(
     )
 
 
+@router.callback_query(F.data == "admin_refund_stars")
+async def start_stars_refund(
+    callback: types.CallbackQuery,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+) -> None:
+    if not is_admin(callback.from_user.id):
+        await safe_answer_callback(callback, "❌ Недостаточно прав.")
+        return
+    await safe_answer_callback(callback)
+    admin_workflows.set(
+        callback.from_user.id,
+        "await_refund_charge",
+        service_chat_id=callback.message.chat.id,
+        service_message_id=callback.message.message_id,
+    )
+    await callback.message.edit_text(
+        "Введи Telegram charge ID платежа Stars.",
+        reply_markup=cancel_keyboard(),
+    )
+
+
 @router.message(ActiveAdminWorkflow())
 async def capture_admin_input(
     message: types.Message,
@@ -462,7 +513,14 @@ async def capture_admin_input(
         except ValueError:
             value = -1
         if not 0 <= value <= 90:
-            await message.answer("Скидка должна быть целым числом от 0 до 90.")
+            await bot.edit_message_text(
+                chat_id=flow["service_chat_id"],
+                message_id=flow["service_message_id"],
+                text="Скидка должна быть целым числом от 0 до 90.",
+                reply_markup=cancel_keyboard(),
+            )
+            with suppress(Exception):
+                await message.delete()
             return
         client = db.get_admin_client_details(int(flow["user_id"]))
         if client and db.set_client_promo(int(flow["user_id"]), value):
@@ -474,7 +532,61 @@ async def capture_admin_input(
                 value,
             )
         admin_workflows.clear(message.from_user.id)
-        await message.answer(f"✅ Скидка {value}% сохранена.", reply_markup=home_keyboard())
+        await bot.edit_message_text(
+            chat_id=flow["service_chat_id"],
+            message_id=flow["service_message_id"],
+            text=f"✅ Скидка {value}% сохранена.",
+            reply_markup=admin_dashboard_keyboard(),
+        )
+    elif state == "await_refund_charge":
+        charge_id = (message.text or "").strip()[:200]
+        payment = await asyncio.to_thread(db.get_payment_by_telegram_charge, charge_id)
+        if not payment or payment["payment_method"] != "stars":
+            await bot.edit_message_text(
+                chat_id=flow["service_chat_id"],
+                message_id=flow["service_message_id"],
+                text="❌ Платеж Telegram Stars не найден. Введи другой charge ID.",
+                reply_markup=cancel_keyboard(),
+            )
+            with suppress(Exception):
+                await message.delete()
+            return
+        later_payments = [
+            item
+            for item in await asyncio.to_thread(db.list_recent_payments, 100)
+            if item["user_id"] == payment["user_id"] and item["id"] > payment["id"]
+        ]
+        admin_workflows.clear(message.from_user.id)
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="Подтвердить возврат",
+                        callback_data=RefundConfirmationCallback(
+                            payment_id=payment["payment_id"]
+                        ).pack(),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="❌ Отмена", callback_data="admin_flow_cancel"
+                    )
+                ],
+            ]
+        )
+        await bot.edit_message_text(
+            chat_id=flow["service_chat_id"],
+            message_id=flow["service_message_id"],
+            text=(
+                "Подтвердить возврат Telegram Stars?\n\n"
+                f"Telegram ID: {payment['user_id']}\n"
+                f"Сумма: {payment['amount']} Stars\n"
+                f"Тариф: {payment['tariff_key']}\n"
+                f"Более поздних платежей: {len(later_payments)}\n\n"
+                "VPN-доступ автоматически изменен не будет."
+            ),
+            reply_markup=keyboard,
+        )
     elif state == "await_message":
         admin_workflows.set(
             message.from_user.id,
@@ -504,8 +616,16 @@ async def cancel_flow(
     safe_answer_callback,
 ) -> None:
     await safe_answer_callback(callback)
+    flow = admin_workflows.get(callback.from_user.id)
     admin_workflows.clear(callback.from_user.id)
-    await callback.message.edit_text("Действие отменено.", reply_markup=home_keyboard())
+    if flow and flow.get("source_chat_id") and flow.get("source_message_id"):
+        with suppress(Exception):
+            await callback.bot.delete_message(
+                flow["source_chat_id"], flow["source_message_id"]
+            )
+    await callback.message.edit_text(
+        "Действие отменено.", reply_markup=admin_dashboard_keyboard()
+    )
 
 
 @router.callback_query(F.data == "admin_flow_confirm")
@@ -552,5 +672,5 @@ async def confirm_flow(
         await bot.delete_message(flow["source_chat_id"], flow["source_message_id"])
     await callback.message.edit_text(
         f"📣 Рассылка завершена.\n\nОтправлено: {sent}\nНе доставлено: {failed}",
-        reply_markup=home_keyboard(),
+        reply_markup=admin_dashboard_keyboard(),
     )

@@ -135,6 +135,13 @@ class Database:
                     PRIMARY KEY(admin_id, workflow_type)
                 );
 
+                CREATE TABLE IF NOT EXISTS telegram_ui_panels (
+                    telegram_user_id INTEGER PRIMARY KEY,
+                    chat_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
                 CREATE TABLE IF NOT EXISTS star_transactions (
                     transaction_id TEXT NOT NULL,
                     direction TEXT NOT NULL,
@@ -220,6 +227,7 @@ class Database:
                 "refunded_amount": "INTEGER NOT NULL DEFAULT 0",
                 "refunded_at": "TEXT",
                 "refund_review_status": "TEXT",
+                "invoice_message_id": "INTEGER",
             }.items():
                 self._ensure_column(conn, "payments", column, definition)
             conn.execute(
@@ -360,6 +368,37 @@ class Database:
                 WHERE telegram_user_id=?
                 """,
                 (error_type[:100], user_id),
+            )
+            conn.commit()
+
+    def get_telegram_ui_panel(self, user_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM telegram_ui_panels WHERE telegram_user_id=?",
+                (user_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def set_telegram_ui_panel(self, user_id: int, chat_id: int, message_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO telegram_ui_panels(telegram_user_id, chat_id, message_id)
+                VALUES (?, ?, ?)
+                ON CONFLICT(telegram_user_id) DO UPDATE SET
+                    chat_id=excluded.chat_id,
+                    message_id=excluded.message_id,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (user_id, chat_id, message_id),
+            )
+            conn.commit()
+
+    def delete_telegram_ui_panel(self, user_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM telegram_ui_panels WHERE telegram_user_id=?", (user_id,)
             )
             conn.commit()
 
@@ -1401,6 +1440,20 @@ class Database:
                 (invoice_payload,),
             ).fetchone()
             return dict(row) if row else None
+
+    def set_stars_invoice_message(
+        self, invoice_payload: str, message_id: int | None
+    ) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE payments SET invoice_message_id=?, updated_at=CURRENT_TIMESTAMP
+                WHERE invoice_payload=? AND payment_method='stars'
+                """,
+                (message_id, invoice_payload),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
 
     def get_payment_by_telegram_charge(self, charge_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:

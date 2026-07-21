@@ -13,7 +13,6 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
 )
 from aiogram.types import (
-    BotCommand,
     BotCommandScopeChat,
     BotCommandScopeDefault,
     ErrorEvent,
@@ -46,6 +45,7 @@ from services import AppServices
 from stars import StarsReconciler
 from subscription_notifications import SubscriptionNotificationWorker
 from telegram_runtime import (
+    ChatPanelService,
     TelegramSender,
     TelegramUIRenderer,
     UserActionLocks,
@@ -73,6 +73,7 @@ telegram_sender: TelegramSender
 ui_renderer: TelegramUIRenderer
 stars_reconciler: StarsReconciler
 admin_workflows: AdminWorkflowService
+chat_panel: ChatPanelService
 
 
 def configure_runtime(services: AppServices) -> None:
@@ -80,6 +81,7 @@ def configure_runtime(services: AppServices) -> None:
     global app_services, bot, cascade_router, db, payment_manager, yookassa_client
     global user_action_locks, telegram_sender, ui_renderer, stars_reconciler
     global admin_workflows
+    global chat_panel
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
     app_services = services
@@ -97,6 +99,7 @@ def configure_runtime(services: AppServices) -> None:
     services.metrics.set_telegram_gauge_provider(user_action_locks.snapshot)
     telegram_sender = TelegramSender(bot, db)
     ui_renderer = TelegramUIRenderer(bot)
+    chat_panel = ChatPanelService(bot, db)
     admin_workflows = AdminWorkflowService(db)
     stars_reconciler = StarsReconciler(
         bot,
@@ -114,6 +117,7 @@ def configure_runtime(services: AppServices) -> None:
         user_action_locks=user_action_locks,
         telegram_sender=telegram_sender,
         ui_renderer=ui_renderer,
+        chat_panel=chat_panel,
         stars_reconciler=stars_reconciler,
         admin_workflows=admin_workflows,
         safe_answer_callback=safe_answer_callback,
@@ -192,8 +196,29 @@ class ConcurrencyMetricsMiddleware:
             metrics.telegram_handler_finished()
 
 
+class PanelTrackingMiddleware:
+    """Persist callback source messages as the active panel, excluding invoices."""
+
+    async def __call__(
+        self,
+        handler: Callable[[Any, dict[str, Any]], Awaitable[Any]],
+        event: types.CallbackQuery,
+        data: dict[str, Any],
+    ) -> Any:
+        message = event.message
+        panel = data.get("chat_panel")
+        if (
+            panel is not None
+            and isinstance(message, types.Message)
+            and message.invoice is None
+        ):
+            await panel.adopt(message, event.from_user.id)
+        return await handler(event, data)
+
+
 dp.message.outer_middleware(OperationLoggingMiddleware())
 dp.callback_query.outer_middleware(OperationLoggingMiddleware())
+dp.callback_query.outer_middleware(PanelTrackingMiddleware())
 dp.update.outer_middleware(ConcurrencyMetricsMiddleware())
 
 def format_admin_payment_notification(
@@ -277,18 +302,9 @@ async def send_config_with_confirmation(
         chat_id,
         config_content,
         caption=effective_caption,
-        reply_markup=create_home_keyboard(),
+        reply_markup=None,
     )
-    if not sent:
-        return False
-
-    if source_message is not None:
-        try:
-            await source_message.delete()
-        except Exception as e:
-            logger.warning(f"Failed to delete temporary config status message: {e}")
-
-    return True
+    return sent
 
 
 # Helper: create or restore a peer and return config
@@ -374,37 +390,8 @@ async def safe_answer_callback(callback_query: types.CallbackQuery, text: str = 
 async def safe_edit_callback_message(
     message: types.Message, text: str, reply_markup: InlineKeyboardMarkup | None = None
 ) -> bool:
-    """Edit a callback source message, falling back safely for media messages."""
-    try:
-        await message.edit_text(text, reply_markup=reply_markup)
-        return True
-    except TelegramBadRequest as e:
-        error_text = str(e).lower()
-        if "message is not modified" in error_text:
-            logger.debug("Skip edit_text: message is not modified")
-            return False
-        if (
-            "there is no text in the message to edit" not in error_text
-            and "message can't be edited" not in error_text
-            and "message to edit not found" not in error_text
-        ):
-            raise
-
-    try:
-        await message.edit_caption(caption=text, reply_markup=reply_markup)
-        return True
-    except TelegramBadRequest as e:
-        error_text = str(e).lower()
-        if "message is not modified" in error_text:
-            logger.debug("Skip edit_caption: message is not modified")
-            return False
-        logger.info(f"Falling back to send_message after edit failure: {e}")
-
-    await bot.send_message(
-        message.chat.id,
-        text,
-        reply_markup=reply_markup,
-    )
+    """Render callback state through the persistent chat panel."""
+    await chat_panel.render_from_message(message, text, reply_markup)
     return True
 
 
@@ -414,14 +401,19 @@ async def show_menu_from_callback(
     """Show a menu from any callback source message without crashing on media messages."""
     message = callback_query.message
     if message is None:
-        await bot.send_message(
+        await chat_panel.restore_or_create(
+            callback_query.from_user.id,
             callback_query.from_user.id,
             text,
-            reply_markup=reply_markup,
+            reply_markup,
         )
         return
-
-    await safe_edit_callback_message(message, text, reply_markup=reply_markup)
+    await chat_panel.render_from_message(
+        message,
+        text,
+        reply_markup,
+        user_id=callback_query.from_user.id,
+    )
 
 
 def create_home_keyboard() -> InlineKeyboardMarkup:
@@ -513,9 +505,6 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
                     text="👥 Управление клиентами", callback_data="admin_manage_clients"
                 )
             ]
-        )
-        inline_keyboard.append(
-            [InlineKeyboardButton(text="📣 Рассылка", callback_data="admin_broadcast")]
         )
     keyboard = InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
     return keyboard
@@ -620,27 +609,10 @@ async def telegram_error_handler(event: ErrorEvent) -> bool:
 
 
 async def register_bot_commands() -> None:
-    default_commands = [
-        BotCommand(command="start", description="Главное меню"),
-        BotCommand(command="status", description="Статус подписки"),
-        BotCommand(command="connect", description="Получить конфигурацию"),
-        BotCommand(command="buy", description="Купить или продлить доступ"),
-        BotCommand(command="help", description="Инструкция и поддержка"),
-    ]
-    await bot.set_my_commands(default_commands, scope=BotCommandScopeDefault())
-    admin_commands = [
-        *default_commands,
-        BotCommand(command="clients", description="Управление клиентами"),
-        BotCommand(command="broadcast", description="Рассылка"),
-        BotCommand(command="payments", description="Последние платежи"),
-        BotCommand(command="stars_reconcile", description="Сверить Telegram Stars"),
-        BotCommand(command="refund_stars", description="Вернуть Telegram Stars"),
-    ]
+    """Remove public command menus; /start remains a hidden bootstrap handler."""
+    await bot.delete_my_commands(scope=BotCommandScopeDefault())
     for admin_id in get_admin_telegram_ids():
-        await bot.set_my_commands(
-            admin_commands,
-            scope=BotCommandScopeChat(chat_id=admin_id),
-        )
+        await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=admin_id))
 
 
 # Periodic check for expired peers and notifications

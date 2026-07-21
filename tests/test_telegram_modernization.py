@@ -18,7 +18,9 @@ from aiogram.exceptions import (
 import bot as bot_module
 from callbacks import PaymentMethod, PaymentMethodCallback, RefundConfirmationCallback
 from database import Database
-from handlers.admin import AdminWorkflowService
+from handlers.admin import AdminWorkflowService, admin_dashboard_keyboard
+from handlers.fallback import handle_unknown
+from handlers.navigation import _last_start_sent_at, cmd_start
 from handlers.payments import (
     _parse_legacy_method,
     confirm_stars_refund,
@@ -28,6 +30,7 @@ from handlers.payments import (
 from payment import PaymentManager
 from stars import StarsReconciler
 from telegram_runtime import (
+    ChatPanelService,
     TelegramSender,
     TelegramUIRenderer,
     UserActionLocks,
@@ -121,6 +124,84 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "sent")
         self.assertEqual(fake.fallback["text"], "Status")
 
+    async def test_chat_panel_restores_persisted_message_without_sending(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        try:
+            database = Database(path)
+            database.set_telegram_ui_panel(10, 10, 77)
+            fake_bot = SimpleNamespace(
+                edit_message_text=AsyncMock(return_value=True),
+                send_message=AsyncMock(),
+                delete_message=AsyncMock(),
+            )
+            panel = ChatPanelService(fake_bot, database)
+            await panel.restore_or_create(10, 10, "Main")
+            fake_bot.edit_message_text.assert_awaited_once()
+            fake_bot.send_message.assert_not_awaited()
+            self.assertEqual(database.get_telegram_ui_panel(10)["message_id"], 77)
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_chat_panel_replaces_deleted_message_once(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        try:
+            database = Database(path)
+            database.set_telegram_ui_panel(10, 10, 77)
+            fake_bot = SimpleNamespace(
+                edit_message_text=AsyncMock(
+                    side_effect=TelegramBadRequest(SimpleNamespace(), "message not found")
+                ),
+                send_message=AsyncMock(
+                    return_value=SimpleNamespace(message_id=88)
+                ),
+                delete_message=AsyncMock(),
+            )
+            panel = ChatPanelService(fake_bot, database)
+            await panel.restore_or_create(10, 10, "Main")
+            fake_bot.send_message.assert_awaited_once()
+            self.assertEqual(database.get_telegram_ui_panel(10)["message_id"], 88)
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_chat_panel_rich_fallback_edits_same_message(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        try:
+            database = Database(path)
+            database.set_telegram_ui_panel(10, 10, 77)
+            fake_bot = SimpleNamespace(
+                edit_message_text=AsyncMock(
+                    side_effect=[
+                        TelegramBadRequest(SimpleNamespace(), "unsupported rich"),
+                        True,
+                    ]
+                ),
+                send_message=AsyncMock(),
+                delete_message=AsyncMock(),
+            )
+            panel = ChatPanelService(fake_bot, database)
+            await panel.restore_or_create(
+                10, 10, "Plain status", rich_markdown="# Rich status"
+            )
+            self.assertEqual(fake_bot.edit_message_text.await_count, 2)
+            fake_bot.send_message.assert_not_awaited()
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
     def test_polling_source_does_not_use_skip_updates(self):
         import inspect
 
@@ -164,20 +245,53 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed, [(77, 1)])
         self.assertEqual(locks.active_keys, 0)
 
-    async def test_config_is_sent_once_with_caption_and_home_keyboard(self):
+    async def test_config_is_sent_once_with_caption_without_navigation_keyboard(self):
         fake_bot = SimpleNamespace(send_document=AsyncMock())
-        keyboard = SimpleNamespace()
-        with (
-            patch.object(bot_module, "bot", fake_bot, create=True),
-            patch.object(bot_module, "create_home_keyboard", return_value=keyboard),
-        ):
+        with patch.object(bot_module, "bot", fake_bot, create=True):
             self.assertTrue(
                 await bot_module.send_config_with_confirmation(10, b"config")
             )
         fake_bot.send_document.assert_awaited_once()
         arguments = fake_bot.send_document.await_args.kwargs
         self.assertIn("AmneziaWG", arguments["caption"])
-        self.assertIs(arguments["reply_markup"], keyboard)
+        self.assertIsNone(arguments["reply_markup"])
+
+    async def test_hidden_start_deletes_input_and_restores_panel(self):
+        _last_start_sent_at.clear()
+        panel = SimpleNamespace(
+            delete_user_message=AsyncMock(), restore_or_create=AsyncMock()
+        )
+        message = SimpleNamespace(
+            from_user=SimpleNamespace(id=42), chat=SimpleNamespace(id=42)
+        )
+        keyboard = SimpleNamespace()
+        await cmd_start(message, lambda _user_id: keyboard, panel)
+        panel.delete_user_message.assert_awaited_once_with(message)
+        panel.restore_or_create.assert_awaited_once()
+        self.assertIs(panel.restore_or_create.await_args.args[3], keyboard)
+
+    async def test_unknown_input_is_deleted_without_new_reply(self):
+        panel = SimpleNamespace(
+            delete_user_message=AsyncMock(), restore_or_create=AsyncMock()
+        )
+        message = SimpleNamespace(
+            from_user=SimpleNamespace(id=42), chat=SimpleNamespace(id=42)
+        )
+        await handle_unknown(message, lambda _user_id: SimpleNamespace(), panel)
+        panel.delete_user_message.assert_awaited_once_with(message)
+        panel.restore_or_create.assert_awaited_once()
+
+    def test_admin_dashboard_contains_all_button_only_operations(self):
+        labels = [
+            button.text
+            for row in admin_dashboard_keyboard().inline_keyboard
+            for button in row
+        ]
+        self.assertIn("👥 Клиенты и скидки", labels)
+        self.assertIn("📣 Рассылка", labels)
+        self.assertIn("💳 Платежи и расхождения", labels)
+        self.assertIn("⭐ Сверить Stars", labels)
+        self.assertIn("↩️ Возврат Stars", labels)
 
 
 class TelegramDatabaseTests(unittest.TestCase):
@@ -366,6 +480,34 @@ class TelegramSenderTests(unittest.IsolatedAsyncioTestCase):
                 except FileNotFoundError:
                     pass
 
+    def test_stars_invoice_message_is_persisted_and_cleared(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        try:
+            database = Database(path)
+            payment_id = str(uuid.uuid4())
+            payload = f"vpn2:{payment_id}:14_days:10"
+            self.assertTrue(
+                database.create_stars_payment_intent(
+                    payment_id, 10, 100, "14_days", payload
+                )
+            )
+            self.assertTrue(database.set_stars_invoice_message(payload, 55))
+            self.assertEqual(
+                database.get_payment_by_invoice_payload(payload)["invoice_message_id"],
+                55,
+            )
+            self.assertTrue(database.set_stars_invoice_message(payload, None))
+            self.assertIsNone(
+                database.get_payment_by_invoice_payload(payload)["invoice_message_id"]
+            )
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
     async def test_retry_after_retries_only_the_operation(self):
         sender = TelegramSender(SimpleNamespace(), SimpleNamespace())
         attempts = 0
@@ -449,21 +591,17 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(events, ["ack", "cascade", "invoice"])
 
-    async def test_command_scopes_are_registered(self):
-        fake_bot = SimpleNamespace(set_my_commands=AsyncMock())
+    async def test_command_scopes_are_cleared(self):
+        fake_bot = SimpleNamespace(
+            delete_my_commands=AsyncMock(), set_my_commands=AsyncMock()
+        )
         with (
             patch.object(bot_module, "bot", fake_bot, create=True),
             patch.object(bot_module, "get_admin_telegram_ids", return_value=[99]),
         ):
             await bot_module.register_bot_commands()
-        self.assertEqual(fake_bot.set_my_commands.await_count, 2)
-        default_commands = fake_bot.set_my_commands.await_args_list[0].args[0]
-        admin_commands = fake_bot.set_my_commands.await_args_list[1].args[0]
-        self.assertEqual(
-            [command.command for command in default_commands],
-            ["start", "status", "connect", "buy", "help"],
-        )
-        self.assertIn("stars_reconcile", [command.command for command in admin_commands])
+        self.assertEqual(fake_bot.delete_my_commands.await_count, 2)
+        fake_bot.set_my_commands.assert_not_awaited()
 
     async def test_my_chat_member_transitions_reachability(self):
         database = SimpleNamespace(
@@ -554,8 +692,18 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 date=SimpleNamespace(timestamp=lambda: 1),
                 from_user=SimpleNamespace(id=80),
+                chat=SimpleNamespace(id=80),
             )
-            await process_refunded_payment(message, database, AsyncMock())
+            panel = SimpleNamespace(
+                delete_user_message=AsyncMock(), render=AsyncMock()
+            )
+            await process_refunded_payment(
+                message,
+                database,
+                AsyncMock(),
+                panel,
+                lambda _user_id: None,
+            )
             self.assertEqual(
                 database.get_peer_by_telegram_id(80)["expire_date"],
                 applied["expire_date"],
