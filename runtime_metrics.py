@@ -12,6 +12,10 @@ class RuntimeMetrics:
         self._lock = threading.Lock()
         self._cascade: dict[str, dict[str, float | int]] = {}
         self._provisioning = {"claimed": 0, "completed": 0, "failed": 0}
+        self._telegram = {
+            "legacy_callbacks": 0,
+            "unhandled_errors": 0,
+        }
         self._last_provisioning_error: dict[str, Any] | None = None
 
     @staticmethod
@@ -46,6 +50,12 @@ class RuntimeMetrics:
                 "at": datetime.now(UTC).isoformat(),
             }
 
+    def telegram_event(self, name: str) -> None:
+        with self._lock:
+            if name not in self._telegram:
+                self._telegram[name] = 0
+            self._telegram[name] += 1
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             cascade = {}
@@ -63,6 +73,7 @@ class RuntimeMetrics:
                 "started_at": self.started_at.isoformat(),
                 "cascade": cascade,
                 "provisioning": dict(self._provisioning),
+                "telegram": dict(self._telegram),
                 "last_provisioning_error": dict(self._last_provisioning_error)
                 if self._last_provisioning_error
                 else None,

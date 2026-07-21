@@ -7,6 +7,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from database import Database
 from payment import PaymentManager
+from telegram_runtime import TelegramSender
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +30,13 @@ class SubscriptionNotificationWorker:
         db: Database,
         payment_manager: PaymentManager,
         interval_seconds: int = 30 * 60,
+        telegram_sender: TelegramSender | None = None,
     ) -> None:
         self.bot = bot
         self.db = db
         self.payment_manager = payment_manager
         self.interval_seconds = interval_seconds
+        self.telegram_sender = telegram_sender or TelegramSender(bot, db)
 
     async def run(self) -> None:
         while True:
@@ -65,15 +68,19 @@ class SubscriptionNotificationWorker:
     async def _send_expired(self, subscription: dict) -> None:
         user_id = int(subscription["telegram_user_id"])
         try:
-            await self.bot.send_message(
-                chat_id=user_id,
-                text=(
-                    "⚠️ Оплаченный период закончился, для возобновления доступа "
-                    "к сервису, необходимо оплатить доступ."
+            sent = await self.telegram_sender.call(
+                user_id,
+                lambda: self.bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        "⚠️ Оплаченный период закончился, для возобновления доступа "
+                        "к сервису, необходимо оплатить доступ."
+                    ),
+                    reply_markup=renewal_keyboard("💳 Купить доступ"),
                 ),
-                reply_markup=renewal_keyboard("💵 Оплатить доступ"),
             )
-            await asyncio.to_thread(self.db.mark_expired_notification_sent, user_id)
+            if sent:
+                await asyncio.to_thread(self.db.mark_expired_notification_sent, user_id)
         except TelegramAPIError:
             logger.warning("Failed to send expiration notice to user %s", user_id)
 
@@ -86,19 +93,23 @@ class SubscriptionNotificationWorker:
             for tariff in tariffs.values()
         )
         try:
-            await self.bot.send_message(
-                chat_id=user_id,
-                text=(
-                    f"⏰ Доступ к nikonVPN истекает {deadline}!\n\n"
-                    f"💎 Доступные тарифы для продления:\n{tariff_text}"
+            sent = await self.telegram_sender.call(
+                user_id,
+                lambda: self.bot.send_message(
+                    chat_id=user_id,
+                    text=(
+                        f"⏰ Доступ к nikonVPN истекает {deadline}!\n\n"
+                        f"💎 Доступные тарифы для продления:\n{tariff_text}"
+                    ),
+                    reply_markup=renewal_keyboard(),
                 ),
-                reply_markup=renewal_keyboard(),
             )
             marker = (
                 self.db.mark_hour_notification_sent
                 if deadline == "через 1 час"
                 else self.db.mark_notification_sent
             )
-            await asyncio.to_thread(marker, user_id)
+            if sent:
+                await asyncio.to_thread(marker, user_id)
         except TelegramAPIError:
             logger.warning("Failed to send %s reminder to user %s", deadline, user_id)

@@ -133,3 +133,25 @@ uv sync --frozen
 uv run ruff check .
 uv run python -m unittest discover -s tests -v
 ```
+
+## Telegram Runtime Controls
+
+The polling process preserves pending updates across restarts and limits concurrently
+executing updates. The following optional environment variables are validated at startup:
+
+```bash
+TELEGRAM_TASKS_CONCURRENCY_LIMIT=100
+STARS_RECONCILIATION_INTERVAL_SECONDS=3600
+LOG_TELEGRAM_CONTENT=false
+```
+
+Keep `LOG_TELEGRAM_CONTENT` disabled in production. When enabled, debug previews are
+still passed through credential redaction.
+
+Administrative Telegram flows are persisted in SQLite for 24 hours. Telegram Stars
+payments use a local intent before an invoice is sent, and the hourly reconciliation
+worker compares these intents with `getStarTransactions`. Refund events are recorded
+for manual access review; they never shorten VPN access automatically.
+
+Admin command aliases are `/clients`, `/broadcast`, `/payments`, `/stars_reconcile`,
+and `/refund_stars <telegram_charge_id>`.

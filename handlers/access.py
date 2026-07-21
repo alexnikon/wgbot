@@ -1,71 +1,67 @@
 import logging
-from typing import Any
 
 from aiogram import F, Router, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from cascade_api import CascadeNotFound
+from cascade_api import CascadeNotFound, CascadeRouter
+from database import Database
+from payment import PaymentManager
+from telegram_runtime import serialized_user_action
 from utils import format_date_for_user, parse_date_flexible
 
 logger = logging.getLogger(__name__)
 router = Router(name="access")
 
-db: Any
-cascade_router: Any
-payment_manager: Any
-safe_answer_callback: Any
-safe_edit_callback_message: Any
-show_menu_from_callback: Any
-create_back_to_menu_keyboard: Any
-create_main_menu_keyboard: Any
-create_or_restore_peer_for_user: Any
-send_config_with_confirmation: Any
-is_access_active: Any
-
-
-def configure(
-    *,
-    runtime_db: Any,
-    runtime_cascade_router: Any,
-    runtime_payment_manager: Any,
-    answer_callback: Any,
-    edit_callback_message: Any,
-    show_callback_menu: Any,
-    back_to_menu_keyboard: Any,
-    main_menu_keyboard: Any,
-    create_or_restore_peer: Any,
-    send_config: Any,
-    access_checker: Any,
-) -> None:
-    """Inject runtime services and shared access helpers."""
-    global db, cascade_router, payment_manager
-    global safe_answer_callback, safe_edit_callback_message, show_menu_from_callback
-    global create_back_to_menu_keyboard, create_main_menu_keyboard
-    global create_or_restore_peer_for_user, send_config_with_confirmation
-    global is_access_active
-    db = runtime_db
-    cascade_router = runtime_cascade_router
-    payment_manager = runtime_payment_manager
-    safe_answer_callback = answer_callback
-    safe_edit_callback_message = edit_callback_message
-    show_menu_from_callback = show_callback_menu
-    create_back_to_menu_keyboard = back_to_menu_keyboard
-    create_main_menu_keyboard = main_menu_keyboard
-    create_or_restore_peer_for_user = create_or_restore_peer
-    send_config_with_confirmation = send_config
-    is_access_active = access_checker
-
-
 @router.callback_query(F.data == "get_config")
-async def handle_get_config_callback(callback_query: types.CallbackQuery):
+async def handle_get_config_callback(
+    callback_query: types.CallbackQuery,
+    db: Database,
+    cascade_router: CascadeRouter,
+    safe_answer_callback,
+    safe_edit_callback_message,
+    show_menu_from_callback,
+    create_back_to_menu_keyboard,
+    create_main_menu_keyboard,
+    create_or_restore_peer_for_user,
+    send_config_with_confirmation,
+    is_access_active,
+    user_action_locks,
+):
     """Handle the 'Get config' button."""
     await safe_answer_callback(callback_query)
 
     user_id = callback_query.from_user.id
-    username = callback_query.from_user.username
 
-    # Check if the user already has an active peer
+    async with user_action_locks.hold(user_id):
+        return await _handle_get_config_locked(
+            callback_query,
+            db,
+            cascade_router,
+            safe_edit_callback_message,
+            show_menu_from_callback,
+            create_back_to_menu_keyboard,
+            create_main_menu_keyboard,
+            create_or_restore_peer_for_user,
+            send_config_with_confirmation,
+            is_access_active,
+        )
+
+
+async def _handle_get_config_locked(
+    callback_query,
+    db,
+    cascade_router,
+    safe_edit_callback_message,
+    show_menu_from_callback,
+    create_back_to_menu_keyboard,
+    create_main_menu_keyboard,
+    create_or_restore_peer_for_user,
+    send_config_with_confirmation,
+    is_access_active,
+):
+    user_id = callback_query.from_user.id
+    username = callback_query.from_user.username
     existing_peer = db.get_peer_by_telegram_id(user_id)
     if existing_peer:
         # Check if access is active (paid and not expired)
@@ -166,7 +162,15 @@ async def handle_get_config_callback(callback_query: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "extend")
-async def handle_extend_callback(callback_query: types.CallbackQuery):
+async def handle_extend_callback(
+    callback_query: types.CallbackQuery,
+    db: Database,
+    payment_manager: PaymentManager,
+    safe_answer_callback,
+    safe_edit_callback_message,
+    show_menu_from_callback,
+    create_main_menu_keyboard,
+):
     """Handle the 'Extend access' button."""
     await safe_answer_callback(callback_query)
 
@@ -213,7 +217,14 @@ async def handle_extend_callback(callback_query: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "status")
-async def handle_status_callback(callback_query: types.CallbackQuery):
+async def handle_status_callback(
+    callback_query: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    show_menu_from_callback,
+    create_main_menu_keyboard,
+    ui_renderer,
+):
     """Handle the 'Access status' button."""
     await safe_answer_callback(callback_query)
 
@@ -311,10 +322,14 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
 Выбери действие с помощью кнопок ниже:
                 """
 
-        await show_menu_from_callback(
-            callback_query,
-            status_text,
-            create_main_menu_keyboard(user_id),
+        await ui_renderer.edit_rich_or_text(
+            callback_query.message,
+            rich_markdown=(
+                "# 📊 Статус подписки\n\n"
+                + status_text.replace("📊 Статус доступа:", "").strip()
+            ),
+            fallback_text=status_text,
+            reply_markup=create_main_menu_keyboard(user_id),
         )
 
     except Exception as e:
@@ -332,7 +347,17 @@ async def handle_status_callback(callback_query: types.CallbackQuery):
 
 
 @router.message(Command("connect"))
-async def cmd_connect(message: types.Message):
+@serialized_user_action
+async def cmd_connect(
+    message: types.Message,
+    db: Database,
+    cascade_router: CascadeRouter,
+    payment_manager: PaymentManager,
+    create_or_restore_peer_for_user,
+    send_config_with_confirmation,
+    is_access_active,
+    user_action_locks,
+):
     """Handle the /connect command."""
     user_id = message.from_user.id
     username = message.from_user.username
@@ -423,7 +448,7 @@ async def cmd_connect(message: types.Message):
 
 
 @router.message(Command("extend"))
-async def cmd_extend(message: types.Message):
+async def cmd_extend(message: types.Message, db: Database, payment_manager: PaymentManager):
     """Handle the /extend command (access extension)."""
     user_id = message.from_user.id
 
@@ -454,7 +479,7 @@ async def cmd_extend(message: types.Message):
 
 
 @router.message(Command("status"))
-async def cmd_status(message: types.Message):
+async def cmd_status(message: types.Message, db: Database, ui_renderer):
     """Handle the /status command (remaining access time)."""
     user_id = message.from_user.id
 
@@ -480,7 +505,7 @@ async def cmd_status(message: types.Message):
     try:
         from datetime import datetime
 
-        expire_date = datetime.strptime(expire_date_str, "%Y-%m-%d")
+        expire_date = parse_date_flexible(expire_date_str)
         now = datetime.now()
 
         if expire_date <= now:
@@ -527,7 +552,15 @@ async def cmd_status(message: types.Message):
                 '\n\n⚠️ Доступ к сервису скоро истекает! Нажми "Продлить доступ" для продления.'
             )
 
-        await message.reply(status_text)
+        await ui_renderer.send_rich_or_text(
+            message.chat.id,
+            rich_markdown=(
+                "# 📊 Статус подписки\n\n"
+                f"**Действует до:** {expire_date.strftime('%d.%m.%Y %H:%M')}\n\n"
+                + status_text.split("\n\n", 2)[-1]
+            ),
+            fallback_text=status_text,
+        )
 
     except ValueError as e:
         logger.error(f"Failed to parse expiration date: {e}")

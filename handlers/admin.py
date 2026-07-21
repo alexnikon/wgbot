@@ -3,112 +3,68 @@ import logging
 from contextlib import suppress
 from typing import Any
 
-from aiogram import F, Router, types
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
-from aiogram.filters import Command
+from aiogram import Bot, F, Router, types
+from aiogram.filters import BaseFilter, Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from callbacks import AdminClientCallback, AdminDiscountCallback, AdminPageCallback
 from config import get_admin_telegram_ids
+from database import Database
 from utils import format_date_for_user
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin")
 ADMIN_CLIENTS_PAGE_SIZE = 8
-
-bot: Any
-db: Any
-payment_manager: Any
-safe_answer_callback: Any
-safe_edit_callback_message: Any
-show_menu_from_callback: Any
-create_main_menu_keyboard: Any
-
-_awaiting_admin_message: dict[int, dict[str, Any]] = {}
-_pending_admin_message: dict[int, dict[str, Any]] = {}
-_admin_client_selection_pages: dict[int, int] = {}
-_admin_discount_pages: dict[int, int] = {}
-_admin_discount_queries: dict[int, str] = {}
-_awaiting_admin_discount_input: dict[int, dict[str, Any]] = {}
-_pending_admin_discounts: dict[int, dict[str, Any]] = {}
-
-
-def configure(
-    *,
-    runtime_bot: Any,
-    runtime_db: Any,
-    runtime_payment_manager: Any,
-    answer_callback: Any,
-    edit_callback_message: Any,
-    show_callback_menu: Any,
-    main_menu_keyboard: Any,
-) -> None:
-    """Inject runtime services and shared UI helpers."""
-    global bot, db, payment_manager
-    global safe_answer_callback, safe_edit_callback_message
-    global show_menu_from_callback, create_main_menu_keyboard
-    bot = runtime_bot
-    db = runtime_db
-    payment_manager = runtime_payment_manager
-    safe_answer_callback = answer_callback
-    safe_edit_callback_message = edit_callback_message
-    show_menu_from_callback = show_callback_menu
-    create_main_menu_keyboard = main_menu_keyboard
+ADMIN_WORKFLOW_TYPE = "admin_flow"
 
 
 def is_admin(user_id: int) -> bool:
-    """Check whether a Telegram user is configured as an admin."""
     return user_id in get_admin_telegram_ids()
 
 
-def clear_admin_state(admin_id: int) -> None:
-    """Clear transient admin interaction state."""
-    _awaiting_admin_message.pop(admin_id, None)
-    _pending_admin_message.pop(admin_id, None)
-    _admin_client_selection_pages.pop(admin_id, None)
-    _admin_discount_pages.pop(admin_id, None)
-    _admin_discount_queries.pop(admin_id, None)
-    _awaiting_admin_discount_input.pop(admin_id, None)
-    _pending_admin_discounts.pop(admin_id, None)
+class AdminWorkflowService:
+    """Persist administrative conversation state in SQLite."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def get(self, admin_id: int) -> dict[str, Any] | None:
+        workflow = self.db.get_admin_workflow(admin_id, ADMIN_WORKFLOW_TYPE)
+        return workflow["data"] if workflow else None
+
+    def set(self, admin_id: int, state: str, **data: Any) -> None:
+        self.db.set_admin_workflow(
+            admin_id,
+            ADMIN_WORKFLOW_TYPE,
+            state,
+            {"state": state, **data},
+        )
+
+    def clear(self, admin_id: int) -> None:
+        self.db.delete_admin_workflow(admin_id, ADMIN_WORKFLOW_TYPE)
 
 
-def get_broadcast_recipients() -> list[int]:
-    """Return all unique client Telegram IDs for admin broadcasts."""
-    return db.get_client_telegram_ids()
+class ActiveAdminWorkflow(BaseFilter):
+    async def __call__(
+        self, message: types.Message, admin_workflows: AdminWorkflowService
+    ) -> bool:
+        return bool(
+            message.from_user
+            and is_admin(message.from_user.id)
+            and admin_workflows.get(message.from_user.id)
+        )
 
 
-def get_admin_client_options() -> list[dict[str, Any]]:
-    """Return clients available for admin direct messages."""
-    return db.get_admin_client_options()
+def home_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="На главную", callback_data="main")]]
+    )
 
 
-def format_admin_client_label(client: dict[str, Any]) -> str:
-    """Format a client button label for admin selection."""
-    username = client.get("username") or "без username"
-    username_label = f"@{username}" if username != "без username" else username
-    return f"{client['telegramId']} | {username_label}"
-
-
-def build_admin_recipient_short_labels(user_ids: list[int]) -> dict[int, str]:
-    """Build compact recipient labels for admin send reports."""
-    labels = {user_id: str(user_id) for user_id in user_ids}
-    for client in get_admin_client_options():
-        telegram_id = client["telegramId"]
-        username = client.get("username") or ""
-        if telegram_id in labels and username:
-            labels[telegram_id] = f"@{username}"
-    return labels
-
-
-def create_admin_broadcast_menu_keyboard() -> InlineKeyboardMarkup:
-    """Create the admin broadcast menu keyboard."""
+def broadcast_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📣 Рассылка всем",
-                    callback_data="admin_broadcast_all",
-                )
-            ],
+            [InlineKeyboardButton(text="📣 Рассылка всем", callback_data="admin_broadcast_all")],
             [
                 InlineKeyboardButton(
                     text="👤 Сообщение клиенту",
@@ -120,997 +76,481 @@ def create_admin_broadcast_menu_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def create_admin_clients_keyboard(page: int = 0) -> InlineKeyboardMarkup:
-    """Create a paginated client selection keyboard for admins."""
-    clients = get_admin_client_options()
-    total_pages = max(
-        1,
-        (len(clients) + ADMIN_CLIENTS_PAGE_SIZE - 1) // ADMIN_CLIENTS_PAGE_SIZE,
-    )
-    page = max(0, min(page, total_pages - 1))
-    start = page * ADMIN_CLIENTS_PAGE_SIZE
-    page_clients = clients[start : start + ADMIN_CLIENTS_PAGE_SIZE]
-
-    rows: list[list[InlineKeyboardButton]] = []
-    for client in page_clients:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=format_admin_client_label(client),
-                    callback_data=f"admin_message_client_{client['telegramId']}",
-                )
-            ]
-        )
-
-    navigation_row: list[InlineKeyboardButton] = []
-    if page > 0:
-        navigation_row.append(
-            InlineKeyboardButton(
-                text="⬅️ Назад",
-                callback_data=f"admin_clients_page_{page - 1}",
-            )
-        )
-    if page < total_pages - 1:
-        navigation_row.append(
-            InlineKeyboardButton(
-                text="Далее ➡️",
-                callback_data=f"admin_clients_page_{page + 1}",
-            )
-        )
-    if navigation_row:
-        rows.append(navigation_row)
-
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="🔙 Назад",
-                callback_data="admin_broadcast",
-            )
+def cancel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_flow_cancel")]
         ]
     )
-    rows.append([InlineKeyboardButton(text="На главную", callback_data="main")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def format_discount_client_label(client: dict[str, Any]) -> str:
-    """Format a compact client label for discount management."""
-    username = str(client.get("telegram_username") or "").strip()
-    identity = f"@{username}" if username else str(client["telegram_user_id"])
-    return f"{identity} | ID {client['telegram_user_id']} | {int(client.get('promo') or 0)}%"
+def confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Отправить", callback_data="admin_flow_confirm"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data="admin_flow_cancel"),
+            ]
+        ]
+    )
 
 
-def create_admin_discount_clients_keyboard(
-    admin_id: int, page: int = 0
-) -> tuple[InlineKeyboardMarkup, int, int]:
-    """Create a paginated discount-management client keyboard."""
-    query = _admin_discount_queries.get(admin_id, "")
-    clients, total = db.get_admin_clients_page(page, ADMIN_CLIENTS_PAGE_SIZE, query)
-    total_pages = max(1, (total + ADMIN_CLIENTS_PAGE_SIZE - 1) // ADMIN_CLIENTS_PAGE_SIZE)
-    page = max(0, min(page, total_pages - 1))
-    if page and not clients:
-        clients, total = db.get_admin_clients_page(page, ADMIN_CLIENTS_PAGE_SIZE, query)
-
+def client_list_keyboard(
+    db: Database, *, view: str, page: int, query: str = ""
+) -> tuple[InlineKeyboardMarkup, int]:
+    clients, total = db.get_admin_clients_page(
+        page, ADMIN_CLIENTS_PAGE_SIZE, query=query
+    )
+    pages = max(1, (total + ADMIN_CLIENTS_PAGE_SIZE - 1) // ADMIN_CLIENTS_PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
     rows: list[list[InlineKeyboardButton]] = []
     for client in clients:
+        user_id = int(client["telegram_user_id"])
+        username = str(client.get("telegram_username") or "")
+        label = f"{user_id} | @{username}" if username else str(user_id)
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=format_discount_client_label(client),
-                    callback_data=f"admin_discount_client_{client['telegram_user_id']}",
+                    text=label,
+                    callback_data=AdminClientCallback(action=view, user_id=user_id).pack(),
                 )
             ]
         )
-
     navigation: list[InlineKeyboardButton] = []
     if page > 0:
         navigation.append(
-            InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_discount_page_{page - 1}")
+            InlineKeyboardButton(
+                text="⬅️",
+                callback_data=AdminPageCallback(view=view, page=page - 1).pack(),
+            )
         )
-    if page < total_pages - 1:
+    if page + 1 < pages:
         navigation.append(
-            InlineKeyboardButton(text="Далее ➡️", callback_data=f"admin_discount_page_{page + 1}")
+            InlineKeyboardButton(
+                text="➡️",
+                callback_data=AdminPageCallback(view=view, page=page + 1).pack(),
+            )
         )
     if navigation:
         rows.append(navigation)
+    if view == "discount":
+        rows.append(
+            [InlineKeyboardButton(text="🔎 Найти клиента", callback_data="admin_search_client")]
+        )
+    rows.append([InlineKeyboardButton(text="На главную", callback_data="main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows), total
 
-    rows.append(
-        [InlineKeyboardButton(text="🔎 Найти клиента", callback_data="admin_discount_search")]
-    )
-    if query:
+
+def discount_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    rows = []
+    for values in ((0, 5, 10), (15, 20, 25)):
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="✖️ Сбросить поиск", callback_data="admin_discount_search_reset"
+                    text=f"{value}%",
+                    callback_data=AdminDiscountCallback(
+                        user_id=user_id, value=value
+                    ).pack(),
                 )
+                for value in values
             ]
         )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="✏️ Другое значение",
+                callback_data=AdminClientCallback(
+                    action="custom_discount", user_id=user_id
+                ).pack(),
+            )
+        ]
+    )
     rows.append([InlineKeyboardButton(text="На главную", callback_data="main")])
-    return InlineKeyboardMarkup(inline_keyboard=rows), page, total
-
-
-def format_admin_client_details(client: dict[str, Any]) -> str:
-    """Build the admin-facing client details and effective tariff prices."""
-    user_id = int(client["telegram_user_id"])
-    username = str(client.get("telegram_username") or "").strip()
-    expire_date = client.get("expire_date")
-    expire_text = format_date_for_user(expire_date) if expire_date else "Не задан"
-    server_key = client.get("server_key") or "Не назначен"
-    interface_id = client.get("interface_id") or "Не назначен"
-    peer_name = client.get("peer_name") or "Не назначен"
-    tariffs = payment_manager.get_user_tariffs(user_id)
-    prices = "\n".join(
-        f"• {tariff['name']}: ⭐ {tariff['stars_price']} | 💳 {tariff['rub_price']} руб."
-        for tariff in tariffs.values()
-    )
-    return (
-        "👤 Клиент\n\n"
-        f"Username: {'@' + username if username else 'не указан'}\n"
-        f"Telegram ID: {user_id}\n"
-        f"Статус: {client.get('payment_status') or 'unpaid'}\n"
-        f"Доступ до: {expire_text}\n"
-        f"Скидка: {int(client.get('promo') or 0)}%\n"
-        f"Сервер: {server_key}\n"
-        f"Интерфейс: {interface_id}\n"
-        f"Primary peer: {peer_name}\n"
-        f"Устройств: {int(client.get('device_count') or 0)}\n\n"
-        f"Цены со скидкой:\n{prices}"
-    )
-
-
-def create_admin_client_discount_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    presets = (0, 10, 20, 30, 50)
-    rows = [
-        [
-            InlineKeyboardButton(
-                text=f"{value}%",
-                callback_data=f"admin_discount_value_{user_id}_{value}",
-            )
-            for value in presets[:3]
-        ],
-        [
-            InlineKeyboardButton(
-                text=f"{value}%",
-                callback_data=f"admin_discount_value_{user_id}_{value}",
-            )
-            for value in presets[3:]
-        ],
-        [
-            InlineKeyboardButton(
-                text="✏️ Другая скидка",
-                callback_data=f"admin_discount_custom_{user_id}",
-            )
-        ],
-        [InlineKeyboardButton(text="🔙 К списку", callback_data="admin_manage_clients")],
-        [InlineKeyboardButton(text="На главную", callback_data="main")],
-    ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def create_admin_discount_confirm_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Подтвердить", callback_data="admin_discount_confirm"),
-                InlineKeyboardButton(text="❌ Отмена", callback_data="admin_discount_cancel"),
-            ],
-            [InlineKeyboardButton(text="На главную", callback_data="main")],
-        ]
+def format_client(client: dict[str, Any]) -> str:
+    username = str(client.get("telegram_username") or "")
+    identity = f"@{username}" if username else "без username"
+    expiry = client.get("expire_date")
+    return (
+        "👤 Клиент\n\n"
+        f"Telegram ID: {client['telegram_user_id']}\n"
+        f"Username: {identity}\n"
+        f"Скидка: {int(client.get('promo') or 0)}%\n"
+        f"Сервер: {client.get('server_key') or 'не назначен'}\n"
+        f"Устройств: {int(client.get('device_count') or 0)}\n"
+        f"Доступ до: {format_date_for_user(expiry) if expiry else 'нет'}"
     )
 
 
-def create_admin_discount_input_cancel_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
-    callback = f"admin_discount_client_{user_id}" if user_id else "admin_manage_clients"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Отмена", callback_data=callback)],
-            [InlineKeyboardButton(text="На главную", callback_data="main")],
-        ]
-    )
+async def require_admin(message: types.Message) -> bool:
+    if is_admin(message.from_user.id):
+        return True
+    await message.answer("❌ Недостаточно прав.")
+    return False
 
 
-def create_admin_message_confirm_keyboard() -> InlineKeyboardMarkup:
-    """Create the admin message confirmation keyboard."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Отправить", callback_data="admin_broadcast_confirm"),
-                InlineKeyboardButton(text="❌ Отмена", callback_data="admin_broadcast_cancel"),
-            ],
-        ]
-    )
-
-
-def create_admin_message_cancel_keyboard() -> InlineKeyboardMarkup:
-    """Create a cancel keyboard for admin message capture."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="❌ Отмена",
-                    callback_data="admin_message_cancel",
-                )
-            ]
-        ]
-    )
-
-
-async def send_admin_broadcast_menu(chat_id: int, admin_id: int) -> None:
-    """Send the admin broadcast menu."""
-    if not is_admin(admin_id):
-        logger.warning(f"Rejected admin menu access from non-admin user {admin_id}")
-        await bot.send_message(chat_id, "❌ Недостаточно прав.")
+@router.message(Command("admin_broadcast", "broadcast"))
+async def cmd_broadcast(message: types.Message) -> None:
+    if not await require_admin(message):
         return
-
-    await bot.send_message(
-        chat_id,
-        "📣 Админ-рассылка\n\nВыбери действие:",
-        reply_markup=create_admin_broadcast_menu_keyboard(),
-    )
+    await message.answer("📣 Рассылка", reply_markup=broadcast_menu_keyboard())
 
 
-@router.message(Command("admin_broadcast"))
-async def cmd_admin_broadcast(message: types.Message):
-    """Show the admin broadcast menu from a command."""
-    await send_admin_broadcast_menu(message.chat.id, message.from_user.id)
-
-
-@router.callback_query(F.data == "admin_broadcast")
-async def handle_admin_broadcast_callback(callback_query: types.CallbackQuery):
-    """Show the admin broadcast menu from the main menu."""
-    await safe_answer_callback(callback_query)
-    admin_id = callback_query.from_user.id
-    if not is_admin(admin_id):
-        logger.warning(f"Rejected admin menu access from non-admin user {admin_id}")
-        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
+@router.message(Command("admin_clients", "clients"))
+async def cmd_clients(message: types.Message, db: Database) -> None:
+    if not await require_admin(message):
         return
-
-    await show_menu_from_callback(
-        callback_query,
-        "📣 Админ-рассылка\n\nВыбери действие:",
-        create_admin_broadcast_menu_keyboard(),
-    )
-
-
-async def show_admin_discount_clients(callback_query: types.CallbackQuery, page: int = 0) -> None:
-    admin_id = callback_query.from_user.id
-    keyboard, page, total = create_admin_discount_clients_keyboard(admin_id, page)
-    _admin_discount_pages[admin_id] = page
-    query = _admin_discount_queries.get(admin_id, "")
-    query_text = f"\nПоиск: {query}" if query else ""
-    await show_menu_from_callback(
-        callback_query,
-        f"👥 Управление клиентами\n\nНайдено: {total}{query_text}\nВыбери клиента:",
-        keyboard,
-    )
-
-
-@router.message(Command("admin_clients"))
-async def cmd_admin_clients(message: types.Message):
-    """Open discount management from a command."""
-    admin_id = message.from_user.id
-    if not is_admin(admin_id):
-        await message.answer("❌ Недостаточно прав.")
-        return
-    _admin_discount_queries.pop(admin_id, None)
-    _admin_discount_pages[admin_id] = 0
-    keyboard, _, total = create_admin_discount_clients_keyboard(admin_id, 0)
+    keyboard, total = client_list_keyboard(db, view="discount", page=0)
     await message.answer(
-        f"👥 Управление клиентами\n\nНайдено: {total}\nВыбери клиента:",
-        reply_markup=keyboard,
+        f"👥 Управление клиентами\n\nНайдено: {total}", reply_markup=keyboard
     )
-
-
-@router.callback_query(F.data == "admin_manage_clients")
-async def handle_admin_manage_clients(callback_query: types.CallbackQuery):
-    await safe_answer_callback(callback_query)
-    admin_id = callback_query.from_user.id
-    if not is_admin(admin_id):
-        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
-        return
-    _awaiting_admin_discount_input.pop(admin_id, None)
-    _pending_admin_discounts.pop(admin_id, None)
-    await show_admin_discount_clients(callback_query, _admin_discount_pages.get(admin_id, 0))
-
-
-@router.callback_query(F.data.startswith("admin_discount_page_"))
-async def handle_admin_discount_page(callback_query: types.CallbackQuery):
-    await safe_answer_callback(callback_query)
-    admin_id = callback_query.from_user.id
-    if not is_admin(admin_id):
-        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
-        return
-    try:
-        page = int(callback_query.data.rsplit("_", 1)[1])
-    except (ValueError, IndexError):
-        page = 0
-    await show_admin_discount_clients(callback_query, page)
-
-
-@router.callback_query(F.data == "admin_discount_search")
-async def handle_admin_discount_search(callback_query: types.CallbackQuery):
-    await safe_answer_callback(callback_query)
-    admin_id = callback_query.from_user.id
-    if not is_admin(admin_id):
-        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
-        return
-    _pending_admin_discounts.pop(admin_id, None)
-    _awaiting_admin_discount_input[admin_id] = {
-        "mode": "search",
-        "service_chat_id": callback_query.message.chat.id,
-        "service_message_id": callback_query.message.message_id,
-    }
-    await show_menu_from_callback(
-        callback_query,
-        "🔎 Отправь Telegram ID, username или часть username клиента.",
-        create_admin_discount_input_cancel_keyboard(),
-    )
-
-
-@router.callback_query(F.data == "admin_discount_search_reset")
-async def handle_admin_discount_search_reset(callback_query: types.CallbackQuery):
-    await safe_answer_callback(callback_query)
-    admin_id = callback_query.from_user.id
-    if not is_admin(admin_id):
-        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
-        return
-    _admin_discount_queries.pop(admin_id, None)
-    await show_admin_discount_clients(callback_query, 0)
-
-
-@router.callback_query(F.data.startswith("admin_discount_client_"))
-async def handle_admin_discount_client(callback_query: types.CallbackQuery):
-    await safe_answer_callback(callback_query)
-    admin_id = callback_query.from_user.id
-    if not is_admin(admin_id):
-        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
-        return
-    try:
-        user_id = int(callback_query.data.rsplit("_", 1)[1])
-    except (ValueError, IndexError):
-        await safe_answer_callback(callback_query, "❌ Некорректный Telegram ID")
-        return
-    client = db.get_admin_client_details(user_id)
-    if not client:
-        await safe_answer_callback(callback_query, "❌ Клиент не найден")
-        await show_admin_discount_clients(callback_query, 0)
-        return
-    _awaiting_admin_discount_input.pop(admin_id, None)
-    _pending_admin_discounts.pop(admin_id, None)
-    await show_menu_from_callback(
-        callback_query,
-        format_admin_client_details(client),
-        create_admin_client_discount_keyboard(user_id),
-    )
-
-
-async def show_admin_discount_confirmation(
-    callback_query: types.CallbackQuery,
-    client: dict[str, Any],
-    new_promo: int,
-) -> None:
-    admin_id = callback_query.from_user.id
-    user_id = int(client["telegram_user_id"])
-    old_promo = int(client.get("promo") or 0)
-    _pending_admin_discounts[admin_id] = {
-        "user_id": user_id,
-        "old_promo": old_promo,
-        "new_promo": new_promo,
-    }
-    username = str(client.get("telegram_username") or "").strip()
-    identity = f"@{username}" if username else str(user_id)
-    await show_menu_from_callback(
-        callback_query,
-        "Подтвердить изменение скидки?\n\n"
-        f"Клиент: {identity}\n"
-        f"Telegram ID: {user_id}\n"
-        f"Сервер: {client.get('server_key') or 'Не назначен'}\n"
-        f"Текущая скидка: {old_promo}%\n"
-        f"Новая скидка: {new_promo}%",
-        create_admin_discount_confirm_keyboard(),
-    )
-
-
-@router.callback_query(F.data.startswith("admin_discount_value_"))
-async def handle_admin_discount_value(callback_query: types.CallbackQuery):
-    await safe_answer_callback(callback_query)
-    admin_id = callback_query.from_user.id
-    if not is_admin(admin_id):
-        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
-        return
-    try:
-        _, user_id_text, promo_text = callback_query.data.rsplit("_", 2)
-        user_id, promo = int(user_id_text), int(promo_text)
-    except (ValueError, IndexError):
-        await safe_answer_callback(callback_query, "❌ Некорректные данные")
-        return
-    if promo not in {0, 10, 20, 30, 50}:
-        await safe_answer_callback(callback_query, "❌ Недопустимая скидка")
-        return
-    client = db.get_admin_client_details(user_id)
-    if not client:
-        await safe_answer_callback(callback_query, "❌ Клиент не найден")
-        return
-    await show_admin_discount_confirmation(callback_query, client, promo)
-
-
-@router.callback_query(F.data.startswith("admin_discount_custom_"))
-async def handle_admin_discount_custom(callback_query: types.CallbackQuery):
-    await safe_answer_callback(callback_query)
-    admin_id = callback_query.from_user.id
-    if not is_admin(admin_id):
-        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
-        return
-    try:
-        user_id = int(callback_query.data.rsplit("_", 1)[1])
-    except (ValueError, IndexError):
-        await safe_answer_callback(callback_query, "❌ Некорректный Telegram ID")
-        return
-    if not db.get_admin_client_details(user_id):
-        await safe_answer_callback(callback_query, "❌ Клиент не найден")
-        return
-    _pending_admin_discounts.pop(admin_id, None)
-    _awaiting_admin_discount_input[admin_id] = {
-        "mode": "promo",
-        "user_id": user_id,
-        "service_chat_id": callback_query.message.chat.id,
-        "service_message_id": callback_query.message.message_id,
-    }
-    await show_menu_from_callback(
-        callback_query,
-        "✏️ Отправь размер скидки целым числом от 0 до 90.",
-        create_admin_discount_input_cancel_keyboard(user_id),
-    )
-
-
-@router.callback_query(F.data == "admin_discount_confirm")
-async def handle_admin_discount_confirm(callback_query: types.CallbackQuery):
-    await safe_answer_callback(callback_query)
-    admin_id = callback_query.from_user.id
-    if not is_admin(admin_id):
-        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
-        return
-    pending = _pending_admin_discounts.pop(admin_id, None)
-    if not pending:
-        await safe_answer_callback(callback_query, "Изменение уже обработано")
-        return
-    user_id = int(pending["user_id"])
-    client = db.get_admin_client_details(user_id)
-    if not client:
-        await safe_answer_callback(callback_query, "❌ Клиент не найден")
-        return
-    old_promo = int(client.get("promo") or 0)
-    new_promo = int(pending["new_promo"])
-    if not db.set_client_promo(user_id, new_promo):
-        await safe_answer_callback(callback_query, "❌ Не удалось сохранить скидку")
-        return
-    db.log_admin_promo_change(admin_id, user_id, client.get("server_key"), old_promo, new_promo)
-    updated = db.get_admin_client_details(user_id)
-    await show_menu_from_callback(
-        callback_query,
-        "✅ Скидка сохранена.\n\n" + format_admin_client_details(updated),
-        create_admin_client_discount_keyboard(user_id),
-    )
-
-
-@router.callback_query(F.data == "admin_discount_cancel")
-async def handle_admin_discount_cancel(callback_query: types.CallbackQuery):
-    await safe_answer_callback(callback_query)
-    admin_id = callback_query.from_user.id
-    if not is_admin(admin_id):
-        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
-        return
-    pending = _pending_admin_discounts.pop(admin_id, None)
-    if pending and db.get_admin_client_details(int(pending["user_id"])):
-        client = db.get_admin_client_details(int(pending["user_id"]))
-        await show_menu_from_callback(
-            callback_query,
-            format_admin_client_details(client),
-            create_admin_client_discount_keyboard(int(pending["user_id"])),
-        )
-        return
-    await show_admin_discount_clients(callback_query, _admin_discount_pages.get(admin_id, 0))
 
 
 @router.message(Command("cancel"))
-async def cmd_cancel(message: types.Message):
-    """Cancel the current admin action."""
-    user_id = message.from_user.id
-    if (
-        user_id in _awaiting_admin_message
-        or user_id in _pending_admin_message
-        or user_id in _awaiting_admin_discount_input
-        or user_id in _pending_admin_discounts
-    ):
-        _awaiting_admin_message.pop(user_id, None)
-        _pending_admin_message.pop(user_id, None)
-        _admin_client_selection_pages.pop(user_id, None)
-        _awaiting_admin_discount_input.pop(user_id, None)
-        _pending_admin_discounts.pop(user_id, None)
-        await message.answer(
-            "Действие администратора отменено.",
-            reply_markup=create_main_menu_keyboard(user_id),
-        )
-        return
-
-    await message.answer("Нет активного действия для отмены.")
-
-
-async def show_admin_previous_step(
-    callback_query: types.CallbackQuery,
-    flow: dict[str, Any] | None,
+async def cmd_cancel(
+    message: types.Message, admin_workflows: AdminWorkflowService
 ) -> None:
-    """Return the admin UI to the previous step for the current flow."""
-    admin_id = callback_query.from_user.id
-    if flow and flow.get("mode") == "client":
-        page = int(flow.get("return_page") or 0)
-        _admin_client_selection_pages[admin_id] = page
-        await show_menu_from_callback(
-            callback_query,
-            "👤 Выбери клиента для отправки сообщения:",
-            create_admin_clients_keyboard(page),
-        )
+    if not await require_admin(message):
         return
-
-    await show_menu_from_callback(
-        callback_query,
-        "📣 Админ-рассылка\n\nВыбери действие:",
-        create_admin_broadcast_menu_keyboard(),
-    )
+    admin_workflows.clear(message.from_user.id)
+    await message.answer("Действие отменено.", reply_markup=home_keyboard())
 
 
-async def edit_admin_service_message(
-    flow: dict[str, Any],
-    text: str,
-    reply_markup: InlineKeyboardMarkup | None = None,
-) -> bool:
-    """Edit the stored admin service message when possible."""
-    chat_id = flow.get("service_chat_id")
-    message_id = flow.get("service_message_id")
-    if not chat_id or not message_id:
-        return False
-
-    try:
-        await bot.edit_message_text(
-            text,
-            chat_id=chat_id,
-            message_id=message_id,
-            reply_markup=reply_markup,
-        )
-        return True
-    except TelegramBadRequest as e:
-        if "message is not modified" in str(e):
-            return True
-        logger.warning(f"Failed to edit admin service message: {e}")
-        return False
-    except TelegramAPIError as e:
-        logger.warning(f"Failed to edit admin service message: {e}")
-        return False
+@router.callback_query(F.data == "admin_broadcast")
+async def open_broadcast(callback: types.CallbackQuery, safe_answer_callback) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    await callback.message.edit_text("📣 Рассылка", reply_markup=broadcast_menu_keyboard())
 
 
-async def start_admin_message_capture(
-    callback_query: types.CallbackQuery,
-    mode: str,
-    recipient_id: int | None = None,
-    recipient_label: str | None = None,
-    return_page: int = 0,
+@router.callback_query(F.data == "admin_manage_clients")
+async def open_clients(
+    callback: types.CallbackQuery, db: Database, safe_answer_callback
 ) -> None:
-    """Ask an admin to send the message that should be copied."""
-    admin_id = callback_query.from_user.id
-    if not is_admin(admin_id):
-        logger.warning(f"Rejected admin message capture from non-admin user {admin_id}")
-        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
         return
-
-    _awaiting_admin_message[admin_id] = {
-        "mode": mode,
-        "recipient_id": recipient_id,
-        "recipient_label": recipient_label,
-        "return_page": return_page,
-        "service_chat_id": callback_query.message.chat.id,
-        "service_message_id": callback_query.message.message_id,
-    }
-    _pending_admin_message.pop(admin_id, None)
-
-    if mode == "all":
-        recipient_text = f"Получателей: {len(get_broadcast_recipients())}"
-    else:
-        recipient_text = f"Получатель: {recipient_label or recipient_id}"
-
-    await show_menu_from_callback(
-        callback_query,
-        "Отправь сообщение для пересылки клиентам.\n\n"
-        f"{recipient_text}\n\n"
-        "Можно отправить текст, фото, видео или файл с подписью.",
-        create_admin_message_cancel_keyboard(),
+    keyboard, total = client_list_keyboard(db, view="discount", page=0)
+    await callback.message.edit_text(
+        f"👥 Управление клиентами\n\nНайдено: {total}", reply_markup=keyboard
     )
 
 
 @router.callback_query(F.data == "admin_broadcast_all")
-async def handle_admin_broadcast_all_callback(callback_query: types.CallbackQuery):
-    """Start broadcast-to-all message capture."""
-    await safe_answer_callback(callback_query)
-    admin_id = callback_query.from_user.id
-    if not is_admin(admin_id):
-        logger.warning(f"Rejected broadcast-all access from non-admin user {admin_id}")
-        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
+async def start_broadcast_all(
+    callback: types.CallbackQuery,
+    db: Database,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
         return
-
-    await start_admin_message_capture(callback_query, mode="all")
+    admin_workflows.set(
+        callback.from_user.id,
+        "await_message",
+        mode="all",
+        service_chat_id=callback.message.chat.id,
+        service_message_id=callback.message.message_id,
+    )
+    recipients = db.get_client_telegram_ids()
+    await callback.message.edit_text(
+        f"Отправь сообщение для рассылки.\n\nПолучателей: {len(recipients)}",
+        reply_markup=cancel_keyboard(),
+    )
 
 
 @router.callback_query(F.data == "admin_broadcast_client_menu")
-async def handle_admin_broadcast_client_menu(callback_query: types.CallbackQuery):
-    """Show clients for a direct admin message."""
-    await safe_answer_callback(callback_query)
-    admin_id = callback_query.from_user.id
-    if not is_admin(admin_id):
-        logger.warning(f"Rejected client selection from non-admin user {admin_id}")
-        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
+async def open_message_clients(
+    callback: types.CallbackQuery, db: Database, safe_answer_callback
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
         return
-
-    clients = get_admin_client_options()
-    if not clients:
-        await show_menu_from_callback(
-            callback_query,
-            "В базе данных пока нет клиентов.",
-            create_admin_broadcast_menu_keyboard(),
-        )
-        return
-
-    _admin_client_selection_pages[admin_id] = 0
-    await show_menu_from_callback(
-        callback_query,
-        "👤 Выбери клиента для отправки сообщения:",
-        create_admin_clients_keyboard(0),
+    keyboard, total = client_list_keyboard(db, view="message", page=0)
+    await callback.message.edit_text(
+        f"👤 Выбери получателя\n\nНайдено: {total}", reply_markup=keyboard
     )
 
 
-@router.callback_query(F.data.startswith("admin_clients_page_"))
-async def handle_admin_clients_page(callback_query: types.CallbackQuery):
-    """Show a requested clients page for admin direct messages."""
-    await safe_answer_callback(callback_query)
-    admin_id = callback_query.from_user.id
-    if not is_admin(admin_id):
-        logger.warning(f"Rejected client page access from non-admin user {admin_id}")
-        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
+@router.callback_query(AdminPageCallback.filter())
+@router.callback_query(F.data.regexp(r"^admin_clients_page_[0-9]+$"))
+@router.callback_query(F.data.regexp(r"^admin_discount_page_[0-9]+$"))
+async def change_page(
+    callback: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    callback_data: AdminPageCallback | None = None,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
         return
-
-    try:
-        page = int(callback_query.data.replace("admin_clients_page_", ""))
-    except ValueError:
-        page = 0
-
-    _admin_client_selection_pages[admin_id] = page
-    await show_menu_from_callback(
-        callback_query,
-        "👤 Выбери клиента для отправки сообщения:",
-        create_admin_clients_keyboard(page),
-    )
-
-
-@router.callback_query(F.data.startswith("admin_message_client_"))
-async def handle_admin_message_client(callback_query: types.CallbackQuery):
-    """Start direct message capture for a selected client."""
-    await safe_answer_callback(callback_query)
-    admin_id = callback_query.from_user.id
-    if not is_admin(admin_id):
-        logger.warning(f"Rejected direct message access from non-admin user {admin_id}")
-        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
-        return
-
-    try:
-        recipient_id = int(callback_query.data.replace("admin_message_client_", ""))
-    except ValueError:
-        await safe_answer_callback(callback_query, "❌ Некорректный Telegram ID")
-        return
-
-    recipient_label = str(recipient_id)
-    for client in get_admin_client_options():
-        if client["telegramId"] == recipient_id:
-            recipient_label = format_admin_client_label(client)
-            break
-
-    await start_admin_message_capture(
-        callback_query,
-        mode="client",
-        recipient_id=recipient_id,
-        recipient_label=recipient_label,
-        return_page=_admin_client_selection_pages.get(admin_id, 0),
-    )
-
-
-def is_supported_admin_message(message: types.Message) -> bool:
-    """Check if the message can be copied to users."""
-    return any(
-        [
-            message.text,
-            message.photo,
-            message.document,
-            message.video,
-            message.animation,
-            message.audio,
-            message.voice,
-            message.video_note,
-        ]
-    )
-
-
-def get_admin_message_text(message: types.Message) -> str:
-    """Return a short text representation for an admin message."""
-    text = (message.text or message.caption or "").strip()
-    if text:
-        return text
-    return "[медиа/файл без текста]"
-
-
-@router.message(
-    lambda message: message.from_user and message.from_user.id in _awaiting_admin_discount_input
-)
-async def handle_admin_discount_input(message: types.Message):
-    """Handle admin client search and custom discount input."""
-    admin_id = message.from_user.id
-    flow = _awaiting_admin_discount_input.get(admin_id)
-    if not flow or not is_admin(admin_id):
-        _awaiting_admin_discount_input.pop(admin_id, None)
-        return
-    value = (message.text or "").strip()
-    if flow["mode"] == "search":
-        if not value:
-            await message.answer("Введи Telegram ID или username клиента.")
-            return
-        _awaiting_admin_discount_input.pop(admin_id, None)
-        _admin_discount_queries[admin_id] = value[:100]
-        _admin_discount_pages[admin_id] = 0
-        keyboard, _, total = create_admin_discount_clients_keyboard(admin_id, 0)
-        text = (
-            f"👥 Управление клиентами\n\nНайдено: {total}\n"
-            f"Поиск: {_admin_discount_queries[admin_id]}\nВыбери клиента:"
-        )
-        edited = await edit_admin_service_message(flow, text, keyboard)
-        if not edited:
-            await message.answer(text, reply_markup=keyboard)
+    if callback_data:
+        view, page = callback_data.view, callback_data.page
     else:
+        data = callback.data or ""
+        view = "message" if data.startswith("admin_clients_page_") else "discount"
         try:
-            promo = int(value)
+            page = int(data.rsplit("_", 1)[1])
         except ValueError:
-            promo = -1
-        if not 0 <= promo <= 90 or str(promo) != value:
-            error_text = "Скидка должна быть целым числом от 0 до 90. Попробуй еще раз."
-            edited = await edit_admin_service_message(
-                flow,
-                error_text,
-                create_admin_discount_input_cancel_keyboard(flow.get("user_id")),
-            )
-            if not edited:
-                await message.answer(error_text)
-            return
-        user_id = int(flow["user_id"])
-        client = db.get_admin_client_details(user_id)
-        if not client:
-            _awaiting_admin_discount_input.pop(admin_id, None)
-            await message.answer("❌ Клиент не найден.")
-            return
-        _awaiting_admin_discount_input.pop(admin_id, None)
-        old_promo = int(client.get("promo") or 0)
-        _pending_admin_discounts[admin_id] = {
-            "user_id": user_id,
-            "old_promo": old_promo,
-            "new_promo": promo,
-        }
-        username = str(client.get("telegram_username") or "").strip()
-        identity = f"@{username}" if username else str(user_id)
-        text = (
-            "Подтвердить изменение скидки?\n\n"
-            f"Клиент: {identity}\n"
-            f"Telegram ID: {user_id}\n"
-            f"Сервер: {client.get('server_key') or 'Не назначен'}\n"
-            f"Текущая скидка: {old_promo}%\n"
-            f"Новая скидка: {promo}%"
-        )
-        edited = await edit_admin_service_message(
-            flow, text, create_admin_discount_confirm_keyboard()
-        )
-        if not edited:
-            await message.answer(text, reply_markup=create_admin_discount_confirm_keyboard())
-    with suppress(TelegramAPIError):
-        await message.delete()
-
-
-@router.message(
-    lambda message: message.from_user and message.from_user.id in _awaiting_admin_message
-)
-async def handle_admin_message_content(message: types.Message):
-    """Save a message reference for admin broadcast/direct sending."""
-    admin_id = message.from_user.id
-    flow = _awaiting_admin_message.get(admin_id)
-    if not flow or not is_admin(admin_id):
-        _awaiting_admin_message.pop(admin_id, None)
-        return
-
-    if not is_supported_admin_message(message):
-        error_text = (
-            "Этот тип сообщения не поддерживается.\nОтправь текст, фото, видео или файл с подписью."
-        )
-        edited = await edit_admin_service_message(
-            flow,
-            error_text,
-            create_admin_message_cancel_keyboard(),
-        )
-        if not edited:
-            await message.answer(error_text)
-        return
-
-    _awaiting_admin_message.pop(admin_id, None)
-    pending = {
-        **flow,
-        "source_chat_id": message.chat.id,
-        "source_message_id": message.message_id,
-        "source_text": get_admin_message_text(message),
-    }
-    _pending_admin_message[admin_id] = pending
-
-    if flow["mode"] == "all":
-        target_text = f"Получателей: {len(get_broadcast_recipients())}"
-    else:
-        target_text = f"Получатель: {flow.get('recipient_label') or flow.get('recipient_id')}"
-
-    edited = await edit_admin_service_message(
-        flow,
-        f"{target_text}\n\nОтправить это сообщение?",
-        create_admin_message_confirm_keyboard(),
+            page = 0
+    keyboard, total = client_list_keyboard(db, view=view, page=page)
+    await callback.message.edit_text(
+        f"👥 Клиенты\n\nНайдено: {total}", reply_markup=keyboard
     )
-    if not edited:
-        await message.answer(
-            f"{target_text}\n\nОтправить это сообщение?",
-            reply_markup=create_admin_message_confirm_keyboard(),
+
+
+@router.callback_query(AdminClientCallback.filter(F.action == "message"))
+@router.callback_query(F.data.regexp(r"^admin_message_client_[0-9]+$"))
+async def choose_message_client(
+    callback: types.CallbackQuery,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+    callback_data: AdminClientCallback | None = None,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    user_id = callback_data.user_id if callback_data else int(
+        (callback.data or "").removeprefix("admin_message_client_")
+    )
+    admin_workflows.set(
+        callback.from_user.id,
+        "await_message",
+        mode="client",
+        recipient_id=user_id,
+        service_chat_id=callback.message.chat.id,
+        service_message_id=callback.message.message_id,
+    )
+    await callback.message.edit_text(
+        f"Отправь сообщение для пользователя {user_id}.",
+        reply_markup=cancel_keyboard(),
+    )
+
+
+@router.callback_query(AdminClientCallback.filter(F.action == "discount"))
+@router.callback_query(F.data.regexp(r"^admin_discount_client_[0-9]+$"))
+async def choose_discount_client(
+    callback: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    callback_data: AdminClientCallback | None = None,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    user_id = callback_data.user_id if callback_data else int(
+        (callback.data or "").removeprefix("admin_discount_client_")
+    )
+    client = db.get_admin_client_details(user_id)
+    if not client:
+        await callback.message.edit_text("❌ Клиент не найден.", reply_markup=home_keyboard())
+        return
+    await callback.message.edit_text(
+        format_client(client), reply_markup=discount_keyboard(user_id)
+    )
+
+
+@router.callback_query(AdminDiscountCallback.filter())
+@router.callback_query(F.data.regexp(r"^admin_discount_value_[0-9]+_[0-9]+$"))
+async def set_discount(
+    callback: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    callback_data: AdminDiscountCallback | None = None,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    if callback_data:
+        user_id, value = callback_data.user_id, callback_data.value
+    else:
+        raw = (callback.data or "").removeprefix("admin_discount_value_")
+        raw_user_id, raw_value = raw.rsplit("_", 1)
+        user_id, value = int(raw_user_id), int(raw_value)
+    client = db.get_admin_client_details(user_id)
+    if not client or not db.set_client_promo(user_id, value):
+        await callback.message.edit_text("❌ Не удалось сохранить скидку.")
+        return
+    db.log_admin_promo_change(
+        callback.from_user.id,
+        user_id,
+        client.get("server_key"),
+        int(client.get("promo") or 0),
+        value,
+    )
+    await callback.message.edit_text(
+        f"✅ Скидка {value}% сохранена.", reply_markup=home_keyboard()
+    )
+
+
+@router.callback_query(AdminClientCallback.filter(F.action == "custom_discount"))
+@router.callback_query(F.data.regexp(r"^admin_discount_custom_[0-9]+$"))
+async def start_custom_discount(
+    callback: types.CallbackQuery,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+    callback_data: AdminClientCallback | None = None,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    user_id = callback_data.user_id if callback_data else int(
+        (callback.data or "").removeprefix("admin_discount_custom_")
+    )
+    admin_workflows.set(
+        callback.from_user.id,
+        "await_discount",
+        user_id=user_id,
+        service_chat_id=callback.message.chat.id,
+        service_message_id=callback.message.message_id,
+    )
+    await callback.message.edit_text(
+        "Введи скидку целым числом от 0 до 90.", reply_markup=cancel_keyboard()
+    )
+
+
+@router.callback_query(F.data == "admin_search_client")
+async def start_search(
+    callback: types.CallbackQuery,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    admin_workflows.set(
+        callback.from_user.id,
+        "await_search",
+        service_chat_id=callback.message.chat.id,
+        service_message_id=callback.message.message_id,
+    )
+    await callback.message.edit_text(
+        "Введи Telegram ID или username.", reply_markup=cancel_keyboard()
+    )
+
+
+@router.message(ActiveAdminWorkflow())
+async def capture_admin_input(
+    message: types.Message,
+    bot: Bot,
+    db: Database,
+    admin_workflows: AdminWorkflowService,
+) -> None:
+    flow = admin_workflows.get(message.from_user.id)
+    if not flow:
+        return
+    state = flow["state"]
+    if state == "await_search":
+        query = (message.text or "").strip()[:100]
+        keyboard, total = client_list_keyboard(
+            db, view="discount", page=0, query=query
         )
+        admin_workflows.clear(message.from_user.id)
+        await bot.edit_message_text(
+            chat_id=flow["service_chat_id"],
+            message_id=flow["service_message_id"],
+            text=f"👥 Результаты поиска: {total}",
+            reply_markup=keyboard,
+        )
+    elif state == "await_discount":
+        try:
+            value = int((message.text or "").strip())
+        except ValueError:
+            value = -1
+        if not 0 <= value <= 90:
+            await message.answer("Скидка должна быть целым числом от 0 до 90.")
+            return
+        client = db.get_admin_client_details(int(flow["user_id"]))
+        if client and db.set_client_promo(int(flow["user_id"]), value):
+            db.log_admin_promo_change(
+                message.from_user.id,
+                int(flow["user_id"]),
+                client.get("server_key"),
+                int(client.get("promo") or 0),
+                value,
+            )
+        admin_workflows.clear(message.from_user.id)
+        await message.answer(f"✅ Скидка {value}% сохранена.", reply_markup=home_keyboard())
+    elif state == "await_message":
+        admin_workflows.set(
+            message.from_user.id,
+            "confirm_message",
+            **{key: value for key, value in flow.items() if key != "state"},
+            source_chat_id=message.chat.id,
+            source_message_id=message.message_id,
+        )
+        await bot.edit_message_text(
+            chat_id=flow["service_chat_id"],
+            message_id=flow["service_message_id"],
+            text="Отправить это сообщение?",
+            reply_markup=confirm_keyboard(),
+        )
+    with suppress(Exception):
+        if state != "await_message":
+            await message.delete()
 
 
+@router.callback_query(F.data == "admin_flow_cancel")
 @router.callback_query(F.data == "admin_broadcast_cancel")
-async def handle_admin_broadcast_cancel(callback_query: types.CallbackQuery):
-    """Cancel a pending admin message."""
-    admin_id = callback_query.from_user.id
-    if not is_admin(admin_id):
-        logger.warning(f"Rejected admin cancel from non-admin user {admin_id}")
-        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
-        return
-
-    await safe_answer_callback(callback_query)
-    flow = _pending_admin_message.pop(admin_id, None)
-    if flow is None:
-        flow = _awaiting_admin_message.pop(admin_id, None)
-    elif flow.get("source_chat_id") and flow.get("source_message_id"):
-        try:
-            await bot.delete_message(
-                chat_id=flow["source_chat_id"],
-                message_id=flow["source_message_id"],
-            )
-        except TelegramAPIError as e:
-            logger.warning(f"Failed to delete canceled admin source message: {e}")
-    await show_admin_previous_step(callback_query, flow)
-
-
 @router.callback_query(F.data == "admin_message_cancel")
-async def handle_admin_message_capture_cancel(callback_query: types.CallbackQuery):
-    """Cancel admin message capture and return to the previous step."""
-    admin_id = callback_query.from_user.id
-    if not is_admin(admin_id):
-        logger.warning(f"Rejected admin capture cancel from non-admin user {admin_id}")
-        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
-        return
-
-    await safe_answer_callback(callback_query)
-    flow = _awaiting_admin_message.pop(admin_id, None)
-    if flow is None:
-        flow = _pending_admin_message.pop(admin_id, None)
-        if flow and flow.get("source_chat_id") and flow.get("source_message_id"):
-            try:
-                await bot.delete_message(
-                    chat_id=flow["source_chat_id"],
-                    message_id=flow["source_message_id"],
-                )
-            except TelegramAPIError as e:
-                logger.warning(f"Failed to delete canceled admin source message: {e}")
-    await show_admin_previous_step(callback_query, flow)
+@router.callback_query(F.data == "admin_discount_cancel")
+async def cancel_flow(
+    callback: types.CallbackQuery,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+) -> None:
+    await safe_answer_callback(callback)
+    admin_workflows.clear(callback.from_user.id)
+    await callback.message.edit_text("Действие отменено.", reply_markup=home_keyboard())
 
 
+@router.callback_query(F.data == "admin_flow_confirm")
 @router.callback_query(F.data == "admin_broadcast_confirm")
-async def handle_admin_broadcast_confirm(callback_query: types.CallbackQuery):
-    """Copy the pending admin message to selected recipients."""
-    admin_id = callback_query.from_user.id
-    if not is_admin(admin_id):
-        logger.warning(f"Rejected broadcast confirm from non-admin user {admin_id}")
-        await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
+async def confirm_flow(
+    callback: types.CallbackQuery,
+    bot: Bot,
+    db: Database,
+    admin_workflows: AdminWorkflowService,
+    telegram_sender,
+    safe_answer_callback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
         return
-    await safe_answer_callback(callback_query)
-
-    pending = _pending_admin_message.pop(admin_id, None)
-    _awaiting_admin_message.pop(admin_id, None)
-    if not pending:
-        await show_menu_from_callback(
-            callback_query,
-            "Нет подготовленного сообщения.",
-            create_main_menu_keyboard(admin_id),
-        )
+    flow = admin_workflows.get(callback.from_user.id)
+    if not flow or flow["state"] != "confirm_message":
+        await callback.message.edit_text("Нет подготовленного сообщения.")
         return
-
-    if pending["mode"] == "all":
-        recipients = get_broadcast_recipients()
-        target_description = f"Получателей: {len(recipients)}"
-    else:
-        recipients = [pending["recipient_id"]]
-        target_description = (
-            f"Получатель: {pending.get('recipient_label') or pending['recipient_id']}"
-        )
-
-    logger.info(
-        f"Starting admin message send: admin_id={admin_id}, mode={pending['mode']}, recipients={len(recipients)}"
+    recipients = (
+        db.get_client_telegram_ids()
+        if flow["mode"] == "all"
+        else [int(flow["recipient_id"])]
     )
-    await show_menu_from_callback(
-        callback_query,
-        f"📣 Отправка запущена.\n{target_description}",
-        create_main_menu_keyboard(admin_id),
-    )
-
-    sent_count = 0
-    failed_count = 0
-    sent_recipients: list[int] = []
+    admin_workflows.clear(callback.from_user.id)
+    await callback.message.edit_text(f"📣 Отправка запущена. Получателей: {len(recipients)}")
+    sent = 0
+    failed = 0
     for recipient_id in recipients:
-        try:
-            await bot.copy_message(
+        result = await telegram_sender.call(
+            recipient_id,
+            lambda recipient_id=recipient_id: bot.copy_message(
                 chat_id=recipient_id,
-                from_chat_id=pending["source_chat_id"],
-                message_id=pending["source_message_id"],
-            )
-            sent_count += 1
-            sent_recipients.append(recipient_id)
-        except TelegramAPIError as e:
-            failed_count += 1
-            logger.warning(f"Failed to copy admin message to user {recipient_id}: {e}")
-        except Exception as e:
-            failed_count += 1
-            logger.warning(f"Unexpected admin message error for user {recipient_id}: {e}")
+                from_chat_id=flow["source_chat_id"],
+                message_id=flow["source_message_id"],
+            ),
+        )
+        if result is None:
+            failed += 1
+        else:
+            sent += 1
         await asyncio.sleep(0.07)
-
-    try:
-        await bot.delete_message(
-            chat_id=pending["source_chat_id"],
-            message_id=pending["source_message_id"],
-        )
-    except TelegramAPIError as e:
-        logger.warning(f"Failed to delete admin source message after send: {e}")
-    except Exception as e:
-        logger.warning(f"Unexpected admin source message delete error: {e}")
-
-    logger.info(
-        f"Admin message send completed: admin_id={admin_id}, sent={sent_count}, failed={failed_count}"
-    )
-    message_text = pending.get("source_text") or "[медиа/файл без текста]"
-    if pending["mode"] == "all":
-        recipient_labels = build_admin_recipient_short_labels(sent_recipients)
-        delivered_labels = [
-            recipient_labels[recipient_id]
-            for recipient_id in sent_recipients
-            if recipient_id in recipient_labels
-        ]
-        displayed_labels = delivered_labels[:30]
-        recipients_text = "\n".join(displayed_labels)
-        remaining_count = max(0, len(delivered_labels) - len(displayed_labels))
-        if remaining_count:
-            recipients_text += f"\nи ещё {remaining_count}"
-        result_text = (
-            f"📣 Рассылка завершена.\n\nОтправлено: {sent_count}\nНе доставлено: {failed_count}"
-        )
-        if recipients_text:
-            result_text += f"\n\nПолучатели:\n{recipients_text}"
-    else:
-        recipient_label = build_admin_recipient_short_labels([pending["recipient_id"]])[
-            pending["recipient_id"]
-        ]
-        result_text = f"📣 Отправка {recipient_label} завершена.\n\n{message_text}"
-
-    await show_menu_from_callback(
-        callback_query,
-        result_text,
-        create_main_menu_keyboard(admin_id),
+    with suppress(Exception):
+        await bot.delete_message(flow["source_chat_id"], flow["source_message_id"])
+    await callback.message.edit_text(
+        f"📣 Рассылка завершена.\n\nОтправлено: {sent}\nНе доставлено: {failed}",
+        reply_markup=home_keyboard(),
     )

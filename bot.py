@@ -4,35 +4,53 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiogram import Bot, Dispatcher, types
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.enums import ChatMemberStatus, ChatType
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+)
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
+    ErrorEvent,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 
 from cascade_api import CascadeCapacityError, CascadeRouter
 from config import (
     CASCADE_RETRY_INTERVAL_SECONDS,
+    LOG_TELEGRAM_CONTENT,
     PROVISIONING_LEASE_SECONDS,
+    STARS_RECONCILIATION_INTERVAL_SECONDS,
     SUPPORT_URL,
     TELEGRAM_BOT_TOKEN,
+    TELEGRAM_TASKS_CONCURRENCY_LIMIT,
     get_admin_telegram_ids,
 )
 from database import Database
-from handlers.access import configure as configure_access_handlers
 from handlers.access import router as access_router
-from handlers.admin import clear_admin_state, is_admin
-from handlers.admin import configure as configure_admin_handlers
+from handlers.admin import AdminWorkflowService, is_admin
 from handlers.admin import router as admin_router
-from handlers.fallback import configure as configure_fallback_handlers
 from handlers.fallback import router as fallback_router
-from handlers.navigation import configure as configure_navigation_handlers
 from handlers.navigation import router as navigation_router
-from handlers.payments import configure as configure_payment_handlers
 from handlers.payments import router as payment_router
 from logging_setup import configure_logging
 from payment import PaymentManager
 from provisioning import ProvisioningWorker
 from services import AppServices
+from stars import StarsReconciler
 from subscription_notifications import SubscriptionNotificationWorker
+from telegram_runtime import (
+    TelegramSender,
+    TelegramUIRenderer,
+    UserActionLocks,
+    redact_telegram_content,
+)
 from utils import (
     format_date_for_user,
     generate_peer_name,
@@ -43,19 +61,25 @@ from yookassa_client import YooKassaClient
 configure_logging()
 logger = logging.getLogger(__name__)
 
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+dp = Dispatcher()
 bot: Bot
 db: Database
 cascade_router: CascadeRouter
 yookassa_client: YooKassaClient
 payment_manager: PaymentManager
 app_services: AppServices
+user_action_locks: UserActionLocks
+telegram_sender: TelegramSender
+ui_renderer: TelegramUIRenderer
+stars_reconciler: StarsReconciler
+admin_workflows: AdminWorkflowService
 
 
 def configure_runtime(services: AppServices) -> None:
     """Inject explicitly created runtime services before polling starts."""
     global app_services, bot, cascade_router, db, payment_manager, yookassa_client
+    global user_action_locks, telegram_sender, ui_renderer, stars_reconciler
+    global admin_workflows
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
     app_services = services
@@ -69,56 +93,43 @@ def configure_runtime(services: AppServices) -> None:
         db=db,
         cascade_router=cascade_router,
     )
-    configure_admin_handlers(
-        runtime_bot=bot,
-        runtime_db=db,
-        runtime_payment_manager=payment_manager,
-        answer_callback=safe_answer_callback,
-        edit_callback_message=safe_edit_callback_message,
-        show_callback_menu=show_menu_from_callback,
-        main_menu_keyboard=create_main_menu_keyboard,
+    user_action_locks = UserActionLocks()
+    telegram_sender = TelegramSender(bot, db)
+    ui_renderer = TelegramUIRenderer(bot)
+    admin_workflows = AdminWorkflowService(db)
+    stars_reconciler = StarsReconciler(
+        bot,
+        db,
+        payment_manager,
+        cascade_router,
+        notify_admins,
+        STARS_RECONCILIATION_INTERVAL_SECONDS,
     )
-    configure_payment_handlers(
-        runtime_bot=bot,
-        runtime_db=db,
-        runtime_cascade_router=cascade_router,
-        runtime_payment_manager=payment_manager,
-        answer_callback=safe_answer_callback,
-        edit_callback_message=safe_edit_callback_message,
-        back_to_menu_keyboard=create_back_to_menu_keyboard,
-        home_keyboard=create_home_keyboard,
-        main_menu_keyboard=create_main_menu_keyboard,
-        create_or_restore_peer=create_or_restore_peer_for_user,
-        send_config=send_config_with_confirmation,
-        admin_notifier=notify_admins,
-        admin_payment_formatter=format_admin_payment_notification,
+    dp.workflow_data.update(
+        db=db,
+        runtime_metrics=services.metrics,
+        cascade_router=cascade_router,
+        payment_manager=payment_manager,
+        user_action_locks=user_action_locks,
+        telegram_sender=telegram_sender,
+        ui_renderer=ui_renderer,
+        stars_reconciler=stars_reconciler,
+        admin_workflows=admin_workflows,
+        safe_answer_callback=safe_answer_callback,
+        safe_edit_callback_message=safe_edit_callback_message,
+        show_menu_from_callback=show_menu_from_callback,
+        create_guide_keyboard=create_guide_keyboard,
+        create_back_to_menu_keyboard=create_back_to_menu_keyboard,
+        create_home_keyboard=create_home_keyboard,
+        create_main_menu_keyboard=create_main_menu_keyboard,
+        create_or_restore_peer_for_user=create_or_restore_peer_for_user,
+        send_config_with_confirmation=send_config_with_confirmation,
+        is_access_active=is_access_active,
+        is_admin=is_admin,
+        clear_admin_state=admin_workflows.clear,
+        notify_admins=notify_admins,
+        format_admin_payment_notification=format_admin_payment_notification,
     )
-    configure_navigation_handlers(
-        runtime_db=db,
-        runtime_payment_manager=payment_manager,
-        answer_callback=safe_answer_callback,
-        edit_callback_message=safe_edit_callback_message,
-        show_callback_menu=show_menu_from_callback,
-        guide_keyboard=create_guide_keyboard,
-        main_menu_keyboard=create_main_menu_keyboard,
-        access_checker=is_access_active,
-        admin_checker=is_admin,
-        admin_state_clearer=clear_admin_state,
-    )
-    configure_access_handlers(
-        runtime_db=db,
-        runtime_cascade_router=cascade_router,
-        runtime_payment_manager=payment_manager,
-        answer_callback=safe_answer_callback,
-        edit_callback_message=safe_edit_callback_message,
-        show_callback_menu=show_menu_from_callback,
-        back_to_menu_keyboard=create_back_to_menu_keyboard,
-        main_menu_keyboard=create_main_menu_keyboard,
-        create_or_restore_peer=create_or_restore_peer_for_user,
-        send_config=send_config_with_confirmation,
-        access_checker=is_access_active,
-    )
-    configure_fallback_handlers(main_menu_keyboard=create_main_menu_keyboard)
 
 
 class OperationLoggingMiddleware:
@@ -133,16 +144,31 @@ class OperationLoggingMiddleware:
         if isinstance(event, types.Message):
             user_id = event.from_user.id if event.from_user else "unknown"
             chat_id = event.chat.id if event.chat else "unknown"
-            text = (event.text or event.caption or "").replace("\n", " ").strip()
+            text = event.text or event.caption or ""
             logger.info(
-                f"Incoming message operation: user_id={user_id}, chat_id={chat_id}, text={text[:200] or '<non-text>'}"
+                "Incoming message operation: user_id=%s, chat_id=%s, "
+                "content_type=%s, length=%s",
+                user_id,
+                chat_id,
+                event.content_type,
+                len(text),
             )
+            if LOG_TELEGRAM_CONTENT and text:
+                logger.debug(
+                    "Incoming message debug preview: user_id=%s, text=%s",
+                    user_id,
+                    redact_telegram_content(text),
+                )
         elif isinstance(event, types.CallbackQuery):
             user_id = event.from_user.id if event.from_user else "unknown"
             message = event.message
             chat_id = message.chat.id if message and message.chat else "unknown"
+            callback_type = (event.data or "").split(":", 1)[0].split("_", 1)[0]
             logger.info(
-                f"Incoming callback operation: user_id={user_id}, chat_id={chat_id}, data={event.data}"
+                "Incoming callback operation: user_id=%s, chat_id=%s, type=%s",
+                user_id,
+                chat_id,
+                callback_type,
             )
 
         return await handler(event, data)
@@ -178,7 +204,10 @@ async def notify_admins(text: str) -> None:
     """Send a best-effort notification to configured admins."""
     for admin_id in get_admin_telegram_ids():
         try:
-            await bot.send_message(admin_id, text)
+            await telegram_sender.call(
+                admin_id,
+                lambda admin_id=admin_id: bot.send_message(admin_id, text),
+            )
         except TelegramAPIError as e:
             logger.warning(f"Failed to send admin notification to {admin_id}: {e}")
         except Exception as e:
@@ -214,25 +243,23 @@ async def send_config_file(
         return False
 
 
-async def send_config_confirmation(chat_id: int) -> None:
-    """Send delayed confirmation after a config document is delivered."""
-    await asyncio.sleep(3)
-    logger.info(f"Sending delayed config confirmation to chat {chat_id}")
-    await bot.send_message(
-        chat_id=chat_id,
-        text="✅ Прислал тебе конфиг файл.\nДобавь его в приложение AmneziWG",
-        reply_markup=create_home_keyboard(),
-    )
-
-
 async def send_config_with_confirmation(
     chat_id: int,
     config_content: bytes | str | None,
     source_message: types.Message | None = None,
     caption: str | None = None,
 ) -> bool:
-    """Send config file first, then send a delayed confirmation message."""
-    sent = await send_config_file(chat_id, config_content, caption=caption)
+    """Send a configuration document with its import instructions."""
+    effective_caption = caption or (
+        "✅ Конфигурация nikonVPN готова.\n\n"
+        "Открой файл через AmneziaWG и добавь новый туннель."
+    )
+    sent = await send_config_file(
+        chat_id,
+        config_content,
+        caption=effective_caption,
+        reply_markup=create_home_keyboard(),
+    )
     if not sent:
         return False
 
@@ -242,7 +269,6 @@ async def send_config_with_confirmation(
         except Exception as e:
             logger.warning(f"Failed to delete temporary config status message: {e}")
 
-    await send_config_confirmation(chat_id)
     return True
 
 
@@ -440,24 +466,24 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     if has_active_access:
         inline_keyboard = [
             [InlineKeyboardButton(text="✅ Доступ приобретен", callback_data="already_paid")],
-            [InlineKeyboardButton(text="📅 Статус доступа", callback_data="status")],
+            [InlineKeyboardButton(text="📊 Статус подписки", callback_data="status")],
         ]
     else:
         inline_keyboard = [
-            [InlineKeyboardButton(text="💵 Оплатить доступ", callback_data="pay")],
+            [InlineKeyboardButton(text="💳 Купить доступ", callback_data="pay")],
         ]
     if has_active_access:
         inline_keyboard.append(
-            [InlineKeyboardButton(text="💵 Продлить доступ", callback_data="extend")]
+            [InlineKeyboardButton(text="🔄 Продлить подписку", callback_data="extend")]
         )
         inline_keyboard.append(
-            [InlineKeyboardButton(text="💾 Получить конфиг", callback_data="get_config")]
+            [InlineKeyboardButton(text="📥 Получить конфигурацию", callback_data="get_config")]
         )
     inline_keyboard.extend(
         [
             [
                 InlineKeyboardButton(text="📖 Инструкция", callback_data="guide"),
-                InlineKeyboardButton(text="❓ Есть вопрос?", url=SUPPORT_URL),
+                InlineKeyboardButton(text="💬 Поддержка", url=SUPPORT_URL),
             ],
         ]
     )
@@ -480,7 +506,27 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
 def create_guide_keyboard() -> InlineKeyboardMarkup:
     """Create the instruction keyboard."""
     keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="🔙 Вернуться в меню", callback_data="main")]]
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="iPhone / macOS",
+                    url="https://apps.apple.com/pl/app/amneziawg/id6478942365",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Android",
+                    url="https://play.google.com/store/apps/details?id=org.amnezia.awg",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Windows",
+                    url="https://github.com/amnezia-vpn/amneziawg-windows-client/releases",
+                )
+            ],
+            [InlineKeyboardButton(text="🔙 Вернуться в меню", callback_data="main")],
+        ]
     )
     return keyboard
 
@@ -500,10 +546,90 @@ dp.include_router(payment_router)
 dp.include_router(fallback_router)
 
 
+@dp.my_chat_member()
+async def handle_bot_chat_member_update(
+    event: types.ChatMemberUpdated, db: Database
+) -> None:
+    """Track private-chat block and unblock events."""
+    if event.chat.type != ChatType.PRIVATE:
+        return
+    user_id = event.chat.id
+    if event.new_chat_member.status == ChatMemberStatus.KICKED:
+        await asyncio.to_thread(
+            db.mark_telegram_unreachable, user_id, "my_chat_member:kicked"
+        )
+    elif event.new_chat_member.status in {
+        ChatMemberStatus.MEMBER,
+        ChatMemberStatus.ADMINISTRATOR,
+        ChatMemberStatus.CREATOR,
+    }:
+        await asyncio.to_thread(db.mark_telegram_reachable, user_id)
+
+
+@dp.error()
+async def telegram_error_handler(event: ErrorEvent) -> bool:
+    """Log unhandled update failures without exposing update content."""
+    update_id = event.update.update_id if event.update else None
+    app_services.metrics.telegram_event("unhandled_errors")
+    update_event = event.update.event if event.update else None
+    update_type = type(update_event).__name__ if update_event is not None else "unknown"
+    from_user = getattr(update_event, "from_user", None)
+    if isinstance(event.exception, TelegramForbiddenError) and from_user:
+        await asyncio.to_thread(
+            db.mark_telegram_unreachable,
+            from_user.id,
+            "TelegramForbiddenError",
+        )
+    retry_class = "rate_limit" if isinstance(event.exception, TelegramRetryAfter) else None
+    if isinstance(event.exception, TelegramNetworkError):
+        retry_class = "network"
+    elif isinstance(event.exception, TelegramBadRequest):
+        retry_class = "non_retryable"
+    logger.error(
+        "Unhandled Telegram update error: update_id=%s, update_type=%s, exception=%s, class=%s",
+        update_id,
+        update_type,
+        type(event.exception).__name__,
+        retry_class or "other",
+        exc_info=(
+            type(event.exception),
+            event.exception,
+            event.exception.__traceback__,
+        ),
+    )
+    return True
+
+
+async def register_bot_commands() -> None:
+    default_commands = [
+        BotCommand(command="start", description="Главное меню"),
+        BotCommand(command="status", description="Статус подписки"),
+        BotCommand(command="connect", description="Получить конфигурацию"),
+        BotCommand(command="buy", description="Купить или продлить доступ"),
+        BotCommand(command="help", description="Инструкция и поддержка"),
+    ]
+    await bot.set_my_commands(default_commands, scope=BotCommandScopeDefault())
+    admin_commands = [
+        *default_commands,
+        BotCommand(command="clients", description="Управление клиентами"),
+        BotCommand(command="broadcast", description="Рассылка"),
+        BotCommand(command="payments", description="Последние платежи"),
+        BotCommand(command="stars_reconcile", description="Сверить Telegram Stars"),
+        BotCommand(command="refund_stars", description="Вернуть Telegram Stars"),
+    ]
+    for admin_id in get_admin_telegram_ids():
+        await bot.set_my_commands(
+            admin_commands,
+            scope=BotCommandScopeChat(chat_id=admin_id),
+        )
+
+
 # Periodic check for expired peers and notifications
 async def check_expired_peers():
     """Check expired peers and notify users."""
-    worker = SubscriptionNotificationWorker(bot, db, payment_manager)
+    worker = SubscriptionNotificationWorker(
+        bot, db, payment_manager, telegram_sender=telegram_sender
+    )
     await worker.run()
 
 
@@ -542,11 +668,18 @@ async def main(services: AppServices):
         background_tasks = [
             asyncio.create_task(check_expired_peers(), name="subscription-notifications"),
             asyncio.create_task(retry_provisioning_tasks(), name="provisioning-worker"),
+            asyncio.create_task(stars_reconciler.run(), name="stars-reconciliation"),
         ]
 
         # Start the bot
         logger.info("Starting Wgbot app...")
-        await dp.start_polling(bot, skip_updates=True)
+        await register_bot_commands()
+        await bot.delete_webhook(drop_pending_updates=False)
+        await dp.start_polling(
+            bot,
+            allowed_updates=dp.resolve_used_update_types(),
+            tasks_concurrency_limit=TELEGRAM_TASKS_CONCURRENCY_LIMIT,
+        )
 
     except Exception as e:
         logger.error(f"Critical error: {e}")

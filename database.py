@@ -125,6 +125,41 @@ class Database:
                     metadata TEXT
                 );
 
+                CREATE TABLE IF NOT EXISTS admin_workflows (
+                    admin_id INTEGER NOT NULL,
+                    workflow_type TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    data TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TEXT NOT NULL,
+                    PRIMARY KEY(admin_id, workflow_type)
+                );
+
+                CREATE TABLE IF NOT EXISTS star_transactions (
+                    transaction_id TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    amount INTEGER NOT NULL,
+                    occurred_at INTEGER NOT NULL,
+                    transaction_type TEXT,
+                    user_id INTEGER,
+                    invoice_payload TEXT,
+                    matched_payment_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'observed',
+                    observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY(transaction_id, direction)
+                );
+
+                CREATE TABLE IF NOT EXISTS star_reconciliation_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TEXT,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    observed_count INTEGER NOT NULL DEFAULT 0,
+                    applied_count INTEGER NOT NULL DEFAULT 0,
+                    discrepancy_count INTEGER NOT NULL DEFAULT 0,
+                    error_type TEXT
+                );
+
                 CREATE TABLE IF NOT EXISTS schema_migrations (
                     version INTEGER PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -145,10 +180,45 @@ class Database:
             )
             self._ensure_column(conn, "provisioning_tasks", "lease_owner", "TEXT")
             self._ensure_column(conn, "provisioning_tasks", "lease_until", "TEXT")
+            self._ensure_column(conn, "clients", "telegram_reachable", "INTEGER")
+            self._ensure_column(conn, "clients", "telegram_blocked_at", "TEXT")
+            self._ensure_column(conn, "clients", "last_telegram_error", "TEXT")
+            self._ensure_column(
+                conn, "clients", "telegram_reachability_updated_at", "TEXT"
+            )
+            for column, definition in {
+                "telegram_payment_charge_id": "TEXT",
+                "provider_payment_charge_id": "TEXT",
+                "invoice_payload": "TEXT",
+                "is_recurring": "INTEGER NOT NULL DEFAULT 0",
+                "is_first_recurring": "INTEGER NOT NULL DEFAULT 0",
+                "subscription_expiration_date": "INTEGER",
+                "access_days": "INTEGER",
+                "applied_from": "TEXT",
+                "applied_until": "TEXT",
+                "refunded_amount": "INTEGER NOT NULL DEFAULT 0",
+                "refunded_at": "TEXT",
+                "refund_review_status": "TEXT",
+            }.items():
+                self._ensure_column(conn, "payments", column, definition)
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_provisioning_claim
                 ON provisioning_tasks(status, next_attempt_at, lease_until)
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_telegram_charge
+                ON payments(telegram_payment_charge_id)
+                WHERE telegram_payment_charge_id IS NOT NULL
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_provider_charge
+                ON payments(provider_payment_charge_id)
+                WHERE provider_payment_charge_id IS NOT NULL
                 """
             )
             legacy_migration = conn.execute(
@@ -240,6 +310,101 @@ class Database:
                 (user_id, (username or "").strip().lstrip("@")),
             )
             conn.commit()
+
+    def mark_telegram_reachable(self, user_id: int) -> None:
+        self.upsert_client(user_id)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE clients SET telegram_reachable=1, telegram_blocked_at=NULL,
+                    last_telegram_error=NULL,
+                    telegram_reachability_updated_at=CURRENT_TIMESTAMP,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE telegram_user_id=?
+                """,
+                (user_id,),
+            )
+            conn.commit()
+
+    def mark_telegram_unreachable(self, user_id: int, error_type: str) -> None:
+        self.upsert_client(user_id)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE clients SET telegram_reachable=0,
+                    telegram_blocked_at=COALESCE(telegram_blocked_at, CURRENT_TIMESTAMP),
+                    last_telegram_error=?,
+                    telegram_reachability_updated_at=CURRENT_TIMESTAMP,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE telegram_user_id=?
+                """,
+                (error_type[:100], user_id),
+            )
+            conn.commit()
+
+    def set_admin_workflow(
+        self,
+        admin_id: int,
+        workflow_type: str,
+        state: str,
+        data: dict[str, Any],
+        ttl_hours: int = 24,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO admin_workflows(
+                    admin_id, workflow_type, state, data, expires_at
+                ) VALUES (?, ?, ?, ?, datetime('now', ?))
+                ON CONFLICT(admin_id, workflow_type) DO UPDATE SET
+                    state=excluded.state, data=excluded.data,
+                    updated_at=CURRENT_TIMESTAMP, expires_at=excluded.expires_at
+                """,
+                (
+                    admin_id,
+                    workflow_type,
+                    state,
+                    json.dumps(data, sort_keys=True),
+                    f"+{int(ttl_hours)} hours",
+                ),
+            )
+            conn.commit()
+
+    def get_admin_workflow(
+        self, admin_id: int, workflow_type: str
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute(
+                "DELETE FROM admin_workflows WHERE expires_at <= datetime('now')"
+            )
+            row = conn.execute(
+                """
+                SELECT * FROM admin_workflows
+                WHERE admin_id=? AND workflow_type=?
+                """,
+                (admin_id, workflow_type),
+            ).fetchone()
+            conn.commit()
+        if not row:
+            return None
+        result = dict(row)
+        result["data"] = json.loads(result["data"])
+        return result
+
+    def delete_admin_workflow(self, admin_id: int, workflow_type: str | None = None) -> int:
+        with self._connect() as conn:
+            if workflow_type is None:
+                cursor = conn.execute(
+                    "DELETE FROM admin_workflows WHERE admin_id=?", (admin_id,)
+                )
+            else:
+                cursor = conn.execute(
+                    "DELETE FROM admin_workflows WHERE admin_id=? AND workflow_type=?",
+                    (admin_id, workflow_type),
+                )
+            conn.commit()
+            return cursor.rowcount
 
     def ensure_subscription(
         self,
@@ -402,7 +567,16 @@ class Database:
 
     def get_client_telegram_ids(self) -> list[int]:
         with self._connect() as conn:
-            return [int(row[0]) for row in conn.execute("SELECT telegram_user_id FROM clients ORDER BY telegram_user_id")]
+            return [
+                int(row[0])
+                for row in conn.execute(
+                    """
+                    SELECT telegram_user_id FROM clients
+                    WHERE telegram_reachable IS NULL OR telegram_reachable=1
+                    ORDER BY telegram_user_id
+                    """
+                )
+            ]
 
     def get_admin_client_options(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -775,6 +949,13 @@ class Database:
         payment_method: str,
         tariff_key: str,
         days: int,
+        *,
+        telegram_payment_charge_id: str | None = None,
+        provider_payment_charge_id: str | None = None,
+        invoice_payload: str | None = None,
+        is_recurring: bool = False,
+        is_first_recurring: bool = False,
+        subscription_expiration_date: int | None = None,
     ) -> dict[str, Any] | None:
         """Atomically claim a verified payment and update its subscription."""
         if payment_method not in {"stars", "yookassa"} or days <= 0:
@@ -860,10 +1041,27 @@ class Database:
             )
             updated = conn.execute(
                 """
-                UPDATE payments SET status='succeeded', updated_at=CURRENT_TIMESTAMP
+                UPDATE payments SET status='succeeded', updated_at=CURRENT_TIMESTAMP,
+                    telegram_payment_charge_id=COALESCE(?, telegram_payment_charge_id),
+                    provider_payment_charge_id=COALESCE(?, provider_payment_charge_id),
+                    invoice_payload=COALESCE(?, invoice_payload),
+                    is_recurring=?, is_first_recurring=?,
+                    subscription_expiration_date=?, access_days=?,
+                    applied_from=?, applied_until=?
                 WHERE payment_id=? AND status='pending'
                 """,
-                (payment_id,),
+                (
+                    telegram_payment_charge_id,
+                    provider_payment_charge_id,
+                    invoice_payload,
+                    int(is_recurring),
+                    int(is_first_recurring),
+                    subscription_expiration_date,
+                    days,
+                    max(current_expiry, now).strftime("%Y-%m-%d %H:%M:%S"),
+                    expire_date,
+                    payment_id,
+                ),
             )
             if updated.rowcount != 1:
                 conn.rollback()
@@ -1017,7 +1215,9 @@ class Database:
                 f"""
                 SELECT c.telegram_user_id, c.telegram_username, s.*
                 FROM subscriptions s JOIN clients c USING(telegram_user_id)
-                WHERE {where} ORDER BY s.expire_date
+                WHERE ({where})
+                  AND (c.telegram_reachable IS NULL OR c.telegram_reachable=1)
+                ORDER BY s.expire_date
                 """
             ).fetchall()
             return [dict(row) for row in rows]
@@ -1050,20 +1250,127 @@ class Database:
         payment_method: str,
         tariff_key: str,
         metadata: dict | None = None,
+        *,
+        currency: str | None = None,
+        invoice_payload: str | None = None,
+        provider_payment_charge_id: str | None = None,
     ) -> bool:
         try:
+            effective_currency = currency or (
+                "XTR" if payment_method == "stars" else "RUB"
+            )
             with self._connect() as conn:
                 conn.execute(
                     """
-                    INSERT INTO payments(payment_id, user_id, amount, payment_method, tariff_key, metadata)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO payments(
+                        payment_id, user_id, amount, payment_method, tariff_key,
+                        metadata, currency, invoice_payload, provider_payment_charge_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (payment_id, user_id, amount, payment_method, tariff_key, json.dumps(metadata or {})),
+                    (
+                        payment_id,
+                        user_id,
+                        amount,
+                        payment_method,
+                        tariff_key,
+                        json.dumps(metadata or {}),
+                        effective_currency,
+                        invoice_payload,
+                        provider_payment_charge_id,
+                    ),
                 )
                 conn.commit()
             return True
         except sqlite3.IntegrityError:
             return False
+
+    def create_stars_payment_intent(
+        self,
+        payment_id: str,
+        user_id: int,
+        amount: int,
+        tariff_key: str,
+        invoice_payload: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        return self.add_payment(
+            payment_id,
+            user_id,
+            amount,
+            "stars",
+            tariff_key,
+            metadata,
+            currency="XTR",
+            invoice_payload=invoice_payload,
+        )
+
+    def get_payment_by_invoice_payload(self, invoice_payload: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM payments WHERE invoice_payload=? ORDER BY id DESC LIMIT 1",
+                (invoice_payload,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_payment_by_telegram_charge(self, charge_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM payments WHERE telegram_payment_charge_id=? LIMIT 1",
+                (charge_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_recent_payments(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM payments ORDER BY id DESC LIMIT ?", (int(limit),)
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def mark_stars_refund_observed(
+        self, charge_id: str, amount: int, review_status: str = "pending_review"
+    ) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE payments SET refunded_amount=MAX(refunded_amount, ?),
+                    refunded_at=COALESCE(refunded_at, CURRENT_TIMESTAMP),
+                    refund_review_status=?, status='refunded',
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE telegram_payment_charge_id=?
+                """,
+                (amount, review_status, charge_id),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+
+    def claim_stars_refund_request(self, payment_id: str) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE payments SET refund_review_status='requested',
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE payment_id=? AND payment_method='stars' AND status='succeeded'
+                  AND COALESCE(refund_review_status, '') NOT IN ('requested', 'completed')
+                """,
+                (payment_id,),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+
+    def update_refund_request_status(self, payment_id: str, status: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE payments SET refund_review_status=?, updated_at=CURRENT_TIMESTAMP
+                WHERE payment_id=?
+                """,
+                (status, payment_id),
+            )
+            conn.commit()
 
     def update_payment_status_by_id(self, payment_id: str, status: str) -> bool:
         if status not in {"pending", "succeeded", "canceled", "refunded"}:
@@ -1107,6 +1414,133 @@ class Database:
             conn.row_factory = sqlite3.Row
             row = conn.execute("SELECT * FROM payments WHERE payment_id=?", (payment_id,)).fetchone()
             return dict(row) if row else None
+
+    def record_star_transaction(
+        self,
+        transaction_id: str,
+        direction: str,
+        amount: int,
+        occurred_at: int,
+        *,
+        transaction_type: str | None = None,
+        user_id: int | None = None,
+        invoice_payload: str | None = None,
+        matched_payment_id: str | None = None,
+        status: str = "observed",
+    ) -> bool:
+        if direction not in {"incoming", "outgoing"}:
+            raise ValueError("Invalid Star transaction direction")
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO star_transactions(
+                    transaction_id, direction, amount, occurred_at,
+                    transaction_type, user_id, invoice_payload,
+                    matched_payment_id, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    transaction_id,
+                    direction,
+                    amount,
+                    occurred_at,
+                    transaction_type,
+                    user_id,
+                    invoice_payload,
+                    matched_payment_id,
+                    status,
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+
+    def update_star_transaction_match(
+        self,
+        transaction_id: str,
+        direction: str,
+        payment_id: str | None,
+        status: str,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE star_transactions SET matched_payment_id=?, status=?
+                WHERE transaction_id=? AND direction=?
+                """,
+                (payment_id, status, transaction_id, direction),
+            )
+            conn.commit()
+
+    def start_star_reconciliation_run(self) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute("INSERT INTO star_reconciliation_runs DEFAULT VALUES")
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def finish_star_reconciliation_run(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        observed_count: int,
+        applied_count: int,
+        discrepancy_count: int,
+        error_type: str | None = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE star_reconciliation_runs SET completed_at=CURRENT_TIMESTAMP,
+                    status=?, observed_count=?, applied_count=?,
+                    discrepancy_count=?, error_type=? WHERE id=?
+                """,
+                (
+                    status,
+                    observed_count,
+                    applied_count,
+                    discrepancy_count,
+                    error_type,
+                    run_id,
+                ),
+            )
+            conn.commit()
+
+    def get_latest_star_reconciliation_run(self) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM star_reconciliation_runs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            return dict(row) if row else None
+
+    def count_star_discrepancies(self) -> int:
+        with self._connect() as conn:
+            return int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM star_transactions WHERE status='discrepancy'"
+                ).fetchone()[0]
+            )
+
+    def get_star_daily_summary(self) -> dict[str, int]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*),
+                       COALESCE(SUM(CASE WHEN direction='incoming' THEN amount ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN direction='outgoing' THEN ABS(amount) ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status='applied' THEN 1 ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status='discrepancy' THEN 1 ELSE 0 END), 0)
+                FROM star_transactions
+                WHERE observed_at >= datetime('now', '-1 day')
+                """
+            ).fetchone()
+        return {
+            "observed": int(row[0]),
+            "received_stars": int(row[1]),
+            "refunded_stars": int(row[2]),
+            "applied": int(row[3]),
+            "discrepancies": int(row[4]),
+        }
 
     def get_legacy_migration_candidates(self) -> list[dict[str, Any]]:
         with self._connect() as conn:

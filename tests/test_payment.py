@@ -24,6 +24,20 @@ class PaymentSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payment_type, "")
         self.assertEqual(amount, 0)
 
+    async def test_successful_payment_rejects_wrong_currency(self):
+        manager = PaymentManager.__new__(PaymentManager)
+        payment = SimpleNamespace(
+            invoice_payload="vpn_access_stars_14_days_123",
+            total_amount=50,
+            currency="RUB",
+        )
+        confirmed, payment_type, amount = await manager.confirm_payment(
+            payment, payer_user_id=123
+        )
+        self.assertFalse(confirmed)
+        self.assertEqual(payment_type, "")
+        self.assertEqual(amount, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

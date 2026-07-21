@@ -78,17 +78,29 @@ async def send_telegram_message(
     payload: dict = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
-    try:
-        response = await get_telegram_http_client().post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json=payload,
-            timeout=10.0,
-        )
-        if response.is_success:
-            return True
-        logger.error("Telegram sendMessage failed: %s", response.text)
-    except Exception as exc:
-        logger.error("Telegram sendMessage error: %s", exc)
+    for attempt in range(3):
+        try:
+            response = await get_telegram_http_client().post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json=payload,
+                timeout=10.0,
+            )
+            if response.is_success:
+                await asyncio.to_thread(db.mark_telegram_reachable, chat_id)
+                return True
+            if response.status_code == 403:
+                await asyncio.to_thread(
+                    db.mark_telegram_unreachable, chat_id, "TelegramForbiddenError"
+                )
+                return False
+            if response.status_code == 429 and attempt < 2:
+                retry_after = response.json().get("parameters", {}).get("retry_after", 1)
+                await asyncio.sleep(float(retry_after))
+                continue
+            logger.error("Telegram sendMessage failed: status=%s", response.status_code)
+        except Exception as exc:
+            logger.error("Telegram sendMessage error: %s", type(exc).__name__)
+        break
     return False
 
 
@@ -103,22 +115,45 @@ async def send_telegram_document(
             timeout=30.0,
         )
         if response.is_success:
+            await asyncio.to_thread(db.mark_telegram_reachable, chat_id)
             return True
-        logger.error("Telegram sendDocument failed: %s", response.text)
+        if response.status_code == 403:
+            await asyncio.to_thread(
+                db.mark_telegram_unreachable, chat_id, "TelegramForbiddenError"
+            )
+            return False
+        logger.error("Telegram sendDocument failed: status=%s", response.status_code)
     except Exception as exc:
-        logger.error("Telegram sendDocument error: %s", exc)
+        logger.error("Telegram sendDocument error: %s", type(exc).__name__)
     return False
 
 
 async def send_config_with_confirmation(chat_id: int, config: bytes | str) -> bool:
-    if not await send_telegram_document(chat_id, "nikonVPN.conf", config):
-        return False
-    await send_telegram_message(
-        chat_id,
-        "✅ Прислал тебе конфиг файл.\nДобавь его в приложение AmneziWG",
-        create_home_reply_markup(),
-    )
-    return True
+    try:
+        response = await get_telegram_http_client().post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
+            files={"document": ("nikonVPN.conf", config, "application/octet-stream")},
+            data={
+                "chat_id": str(chat_id),
+                "caption": (
+                    "✅ Конфигурация nikonVPN готова.\n\n"
+                    "Открой файл через AmneziaWG и добавь новый туннель."
+                ),
+                "reply_markup": json.dumps(create_home_reply_markup()),
+            },
+            timeout=30.0,
+        )
+        if response.is_success:
+            await asyncio.to_thread(db.mark_telegram_reachable, chat_id)
+            return True
+        if response.status_code == 403:
+            await asyncio.to_thread(
+                db.mark_telegram_unreachable, chat_id, "TelegramForbiddenError"
+            )
+        logger.error("Telegram sendDocument failed: status=%s", response.status_code)
+    except Exception as exc:
+        logger.error("Telegram sendDocument error: %s", type(exc).__name__)
+    return False
 
 
 async def notify_admins(text: str) -> None:

@@ -6,6 +6,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
 
+from callbacks import PaymentAction, PaymentActionCallback, PaymentMethod, PaymentMethodCallback
 from config import DOMAIN, PAYMENT_RETURN_URL, WEBHOOK_URL, get_tariffs
 from database import Database
 from yookassa_client import YooKassaClient
@@ -46,6 +47,16 @@ class PaymentManager:
     @staticmethod
     def parse_invoice_payload(payload: str) -> tuple[str, str, int] | None:
         """Parse and validate a bot invoice payload."""
+        if payload.startswith("vpn2:"):
+            try:
+                _, payment_id, tariff_key, raw_user_id = payload.split(":", 3)
+                uuid.UUID(payment_id)
+                user_id = int(raw_user_id)
+            except (ValueError, TypeError):
+                return None
+            if tariff_key not in {"14_days", "30_days", "90_days"} or user_id <= 0:
+                return None
+            return "stars", tariff_key, user_id
         for payment_type in ("stars", "yookassa"):
             prefix = f"vpn_access_{payment_type}_"
             if not payload.startswith(prefix):
@@ -117,11 +128,19 @@ class PaymentManager:
                     [
                         InlineKeyboardButton(
                             text=f"⭐ {tariff_data['stars_price']} Stars",
-                            callback_data=f"pay_stars_{tariff_key}_{user_id}",
+                            callback_data=PaymentMethodCallback(
+                                method=PaymentMethod.STARS,
+                                tariff=tariff_key,
+                                user_id=user_id,
+                            ).pack(),
                         ),
                         InlineKeyboardButton(
                             text=f"💳 {tariff_data['rub_price']} руб.",
-                            callback_data=f"pay_yookassa_{tariff_key}_{user_id}",
+                            callback_data=PaymentMethodCallback(
+                                method=PaymentMethod.YOOKASSA,
+                                tariff=tariff_key,
+                                user_id=user_id,
+                            ).pack(),
                         ),
                     ]
                 )
@@ -130,11 +149,19 @@ class PaymentManager:
                     [
                         InlineKeyboardButton(
                             text=f"⭐ {tariff_data['stars_price']} Stars",
-                            callback_data=f"pay_stars_{tariff_key}_{user_id}",
+                            callback_data=PaymentMethodCallback(
+                                method=PaymentMethod.STARS,
+                                tariff=tariff_key,
+                                user_id=user_id,
+                            ).pack(),
                         ),
                         InlineKeyboardButton(
                             text=f"💳 {tariff_data['rub_price']} руб.",
-                            callback_data=f"pay_yookassa_disabled_{user_id}",
+                            callback_data=PaymentMethodCallback(
+                                method=PaymentMethod.YOOKASSA_DISABLED,
+                                tariff=tariff_key,
+                                user_id=user_id,
+                            ).pack(),
                         ),
                     ]
                 )
@@ -170,8 +197,6 @@ class PaymentManager:
             Invoice data dict or None on error
         """
         try:
-            if self.cascade_router is not None:
-                await self.cascade_router.ensure_reservation(user_id)
             # Get user tariffs
             user_tariffs = self.get_user_tariffs(user_id)
             if tariff_key not in user_tariffs:
@@ -179,7 +204,19 @@ class PaymentManager:
                 return None
                 
             tariff_data = user_tariffs[tariff_key]
-            
+            payment_id = str(uuid.uuid4())
+            invoice_payload = f"vpn2:{payment_id}:{tariff_key}:{user_id}"
+            if not self.db.create_stars_payment_intent(
+                payment_id,
+                user_id,
+                int(tariff_data["stars_price"]),
+                tariff_key,
+                invoice_payload,
+                {"username": username or "", "source": "telegram_stars"},
+            ):
+                logger.error("Failed to persist Stars payment intent %s", payment_id)
+                return None
+
             # Build payment button
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -192,7 +229,11 @@ class PaymentManager:
                     [
                         InlineKeyboardButton(
                             text="❌ Отмена",
-                            callback_data=f"cancel_stars_invoice_{user_id}",
+                            callback_data=PaymentActionCallback(
+                                action=PaymentAction.CANCEL_STARS,
+                                tariff=tariff_key,
+                                user_id=user_id,
+                            ).pack(),
                         )
                     ],
                 ]
@@ -205,7 +246,7 @@ class PaymentManager:
                     f'Доступ к сервису на {tariff_data["name"]}\n\n'
                     f'Пользователь: @{username}'
                 ) if username else f'Доступ к сервису на {tariff_data["name"]}',
-                'payload': f'vpn_access_stars_{tariff_key}_{user_id}',
+                'payload': invoice_payload,
                 'start_parameter': f'vpn-{user_id}-{uuid.uuid4().hex[:16]}',
                 'provider_token': '',  # Not required for Telegram Stars
                 'currency': 'XTR',  # Currency code for Telegram Stars
@@ -239,9 +280,7 @@ class PaymentManager:
             Payment URL or None on error
         """
         try:
-            reservation = None
-            if self.cascade_router is not None:
-                reservation = await self.cascade_router.ensure_reservation(user_id)
+            reservation = self.db.get_active_reservation(user_id)
             if not self.yookassa_client.shop_id or not self.yookassa_client.secret_key:
                 logger.error("YooKassa is not configured")
                 return None
@@ -313,7 +352,9 @@ class PaymentManager:
                 amount=amount,
                 payment_method='yookassa',
                 tariff_key=tariff_key,
-                metadata=metadata
+                metadata=metadata,
+                currency="RUB",
+                provider_payment_charge_id=payment_id,
             )
             
             # Extract payment URL
@@ -432,7 +473,11 @@ class PaymentManager:
                     [
                         InlineKeyboardButton(
                             text="❌ Отмена",
-                            callback_data=f"cancel_yookassa_{user_id}",
+                            callback_data=PaymentActionCallback(
+                                action=PaymentAction.CANCEL_YOOKASSA,
+                                tariff=tariff_key,
+                                user_id=user_id,
+                            ).pack(),
                         )
                     ],
                 ]
@@ -477,14 +522,25 @@ class PaymentManager:
                     ok=False, error_message="Этот счет создан для другого пользователя"
                 )
                 return False
-            if self.cascade_router is not None:
-                await self.cascade_router.ensure_reservation(user_id)
+            expected_currency = "XTR" if payment_type == "stars" else "RUB"
+            if pre_checkout_query.currency != expected_currency:
+                await pre_checkout_query.answer(
+                    ok=False, error_message="Неверная валюта платежа"
+                )
+                return False
+            if not self.db.get_active_reservation(user_id):
+                await pre_checkout_query.answer(
+                    ok=False,
+                    error_message="Счет устарел. Вернитесь в бот и создайте новый счет.",
+                )
+                return False
 
             tariff_data = self.get_user_tariffs(user_id).get(tariff_key)
             if not tariff_data:
                 await pre_checkout_query.answer(ok=False, error_message="Тариф недоступен")
                 return False
-            expected_amount = (
+            intent = self.db.get_payment_by_invoice_payload(payload)
+            expected_amount = int(intent["amount"]) if intent else (
                 tariff_data["stars_price"]
                 if payment_type == "stars"
                 else tariff_data["rub_price"] * 100
@@ -527,6 +583,14 @@ class PaymentManager:
                     "Successful payment payer mismatch: payer=%s owner=%s",
                     payer_user_id,
                     user_id,
+                )
+                return False, "", 0
+            expected_currency = "XTR" if payment_type == "stars" else "RUB"
+            if successful_payment.currency != expected_currency:
+                logger.error(
+                    "Successful payment currency mismatch: expected=%s actual=%s",
+                    expected_currency,
+                    successful_payment.currency,
                 )
                 return False, "", 0
             amount_paid = successful_payment.total_amount

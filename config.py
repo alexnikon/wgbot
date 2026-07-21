@@ -17,9 +17,28 @@ def _get_float(name: str, default: float, *, minimum: float | None = None) -> fl
     return value
 
 
+def _get_bool(name: str, default: bool = False) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value")
+
+
 
 # Telegram Bot Configuration
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_TASKS_CONCURRENCY_LIMIT = _get_int(
+    "TELEGRAM_TASKS_CONCURRENCY_LIMIT", 100, minimum=1
+)
+STARS_RECONCILIATION_INTERVAL_SECONDS = _get_int(
+    "STARS_RECONCILIATION_INTERVAL_SECONDS", 3600, minimum=60
+)
+LOG_TELEGRAM_CONTENT = _get_bool("LOG_TELEGRAM_CONTENT", False)
 
 # Cascade server registry
 CASCADE_SERVERS_FILE = Path(

@@ -1,10 +1,11 @@
 import logging
 import time
-from typing import Any
 
 from aiogram import F, Router, types
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 
+from database import Database
+from payment import PaymentManager
 from utils import format_date_for_user
 
 logger = logging.getLogger(__name__)
@@ -12,49 +13,8 @@ router = Router(name="navigation")
 START_DEBOUNCE_SECONDS = 5.0
 _last_start_sent_at: dict[int, float] = {}
 
-db: Any
-payment_manager: Any
-safe_answer_callback: Any
-safe_edit_callback_message: Any
-show_menu_from_callback: Any
-create_guide_keyboard: Any
-create_main_menu_keyboard: Any
-is_access_active: Any
-is_admin: Any
-clear_admin_state: Any
-
-
-def configure(
-    *,
-    runtime_db: Any,
-    runtime_payment_manager: Any,
-    answer_callback: Any,
-    edit_callback_message: Any,
-    show_callback_menu: Any,
-    guide_keyboard: Any,
-    main_menu_keyboard: Any,
-    access_checker: Any,
-    admin_checker: Any,
-    admin_state_clearer: Any,
-) -> None:
-    """Inject runtime services and shared navigation helpers."""
-    global db, payment_manager, safe_answer_callback, safe_edit_callback_message
-    global show_menu_from_callback, create_guide_keyboard, create_main_menu_keyboard
-    global is_access_active, is_admin, clear_admin_state
-    db = runtime_db
-    payment_manager = runtime_payment_manager
-    safe_answer_callback = answer_callback
-    safe_edit_callback_message = edit_callback_message
-    show_menu_from_callback = show_callback_menu
-    create_guide_keyboard = guide_keyboard
-    create_main_menu_keyboard = main_menu_keyboard
-    is_access_active = access_checker
-    is_admin = admin_checker
-    clear_admin_state = admin_state_clearer
-
-
 @router.message(CommandStart())
-async def cmd_start(message: types.Message):
+async def cmd_start(message: types.Message, create_main_menu_keyboard):
     """Handle the /start command."""
     user_id = message.from_user.id
     now_monotonic = time.monotonic()
@@ -78,7 +38,12 @@ async def cmd_start(message: types.Message):
 
 # Inline button handlers
 @router.callback_query(F.data == "pay")
-async def handle_pay_callback(callback_query: types.CallbackQuery):
+async def handle_pay_callback(
+    callback_query: types.CallbackQuery,
+    payment_manager: PaymentManager,
+    safe_answer_callback,
+    safe_edit_callback_message,
+):
     """Handle the 'Buy access' button."""
     user_id = callback_query.from_user.id
 
@@ -93,13 +58,20 @@ async def handle_pay_callback(callback_query: types.CallbackQuery):
 
 
 @router.callback_query(F.data.startswith("tariff_label_"))
-async def handle_tariff_label_callback(callback_query: types.CallbackQuery):
+async def handle_tariff_label_callback(callback_query: types.CallbackQuery, safe_answer_callback):
     """Ignore taps on tariff label rows."""
     await safe_answer_callback(callback_query)
 
 
 @router.callback_query(F.data == "already_paid")
-async def handle_already_paid_callback(callback_query: types.CallbackQuery):
+async def handle_already_paid_callback(
+    callback_query: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    show_menu_from_callback,
+    create_main_menu_keyboard,
+    is_access_active,
+):
     """Handle the 'Access purchased' button."""
     user_id = callback_query.from_user.id
     # IMPORTANT: fetch fresh data from the DB
@@ -152,7 +124,12 @@ async def handle_already_paid_callback(callback_query: types.CallbackQuery):
 
 
 @router.callback_query(F.data == "guide")
-async def handle_guide_callback(callback_query: types.CallbackQuery):
+async def handle_guide_callback(
+    callback_query: types.CallbackQuery,
+    safe_answer_callback,
+    create_guide_keyboard,
+    ui_renderer,
+):
     """Handle the 'Guide' button."""
     await safe_answer_callback(callback_query)
 
@@ -178,11 +155,50 @@ async def handle_guide_callback(callback_query: types.CallbackQuery):
    • Готово! 🎉
     """
 
-    await callback_query.message.edit_text(guide_text, reply_markup=create_guide_keyboard())
+    await ui_renderer.send_rich_or_text(
+        callback_query.from_user.id,
+        rich_markdown=(
+            "# 📖 Инструкция\n\n"
+            "1. Установите AmneziaWG кнопкой ниже.\n"
+            "2. Получите конфигурацию в главном меню.\n"
+            "3. Импортируйте `.conf` и включите туннель."
+        ),
+        fallback_text=guide_text,
+        reply_markup=create_guide_keyboard(),
+    )
+
+
+@router.message(Command("help"))
+async def cmd_help(message: types.Message, create_guide_keyboard, ui_renderer):
+    """Show installation and support instructions."""
+    fallback_text = (
+        "📖 Инструкция по подключению\n\n"
+        "1. Установите AmneziaWG кнопкой ниже.\n"
+        "2. Используйте /connect для получения конфигурации.\n"
+        "3. Импортируйте файл и включите туннель."
+    )
+    await ui_renderer.send_rich_or_text(
+        message.chat.id,
+        rich_markdown=(
+            "# 📖 Инструкция по подключению\n\n"
+            "1. Установите AmneziaWG кнопкой ниже.\n"
+            "2. Используйте `/connect` для получения конфигурации.\n"
+            "3. Импортируйте файл и включите туннель."
+        ),
+        fallback_text=fallback_text,
+        reply_markup=create_guide_keyboard(),
+    )
 
 
 @router.callback_query(F.data == "main")
-async def handle_main_callback(callback_query: types.CallbackQuery):
+async def handle_main_callback(
+    callback_query: types.CallbackQuery,
+    safe_answer_callback,
+    show_menu_from_callback,
+    create_main_menu_keyboard,
+    is_admin,
+    clear_admin_state,
+):
     """Handle the 'Back to menu' button."""
     await safe_answer_callback(callback_query)
 
