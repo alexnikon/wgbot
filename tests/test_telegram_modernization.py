@@ -16,9 +16,19 @@ from aiogram.exceptions import (
 )
 
 import bot as bot_module
-from callbacks import PaymentMethod, PaymentMethodCallback, RefundConfirmationCallback
+from callbacks import (
+    ClientConfigCallback,
+    PaymentMethod,
+    PaymentMethodCallback,
+    RefundConfirmationCallback,
+)
 from database import Database
-from handlers.access import client_config_keyboard, config_filename
+from handlers.access import (
+    client_config_keyboard,
+    config_file_back_keyboard,
+    config_filename,
+    return_to_client_configs,
+)
 from handlers.admin import (
     AdminWorkflowService,
     admin_dashboard_keyboard,
@@ -261,21 +271,107 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
         fake_bot.send_document.assert_awaited_once()
         arguments = fake_bot.send_document.await_args.kwargs
         self.assertIn("AmneziaWG", arguments["caption"])
+        self.assertNotIn("Конфиг файл", arguments["caption"])
         self.assertIsNone(arguments["reply_markup"])
+
+    async def test_manual_config_includes_server_name_and_back_button(self):
+        fake_bot = SimpleNamespace(send_document=AsyncMock())
+        keyboard = config_file_back_keyboard()
+        with patch.object(bot_module, "bot", fake_bot, create=True):
+            self.assertTrue(
+                await bot_module.send_config_with_confirmation(
+                    10,
+                    b"config",
+                    server_name="Netherlands",
+                    reply_markup=keyboard,
+                )
+            )
+        arguments = fake_bot.send_document.await_args.kwargs
+        self.assertIn("📁 Конфиг файл", arguments["caption"])
+        self.assertIn("🌍 Netherlands", arguments["caption"])
+        self.assertIs(arguments["reply_markup"], keyboard)
 
     async def test_hidden_start_deletes_input_and_restores_panel(self):
         _last_start_sent_at.clear()
         panel = SimpleNamespace(
             delete_user_message=AsyncMock(), restore_or_create=AsyncMock()
         )
+        clear_admin_state = unittest.mock.Mock()
         message = SimpleNamespace(
             from_user=SimpleNamespace(id=42), chat=SimpleNamespace(id=42)
         )
         keyboard = SimpleNamespace()
-        await cmd_start(message, lambda _user_id: keyboard, panel)
+        await cmd_start(
+            message,
+            lambda _user_id: keyboard,
+            panel,
+            clear_admin_state,
+        )
         panel.delete_user_message.assert_awaited_once_with(message)
         panel.restore_or_create.assert_awaited_once()
         self.assertIs(panel.restore_or_create.await_args.args[3], keyboard)
+        clear_admin_state.assert_called_once_with(42)
+
+    async def test_document_callback_is_not_adopted_as_panel(self):
+        middleware = bot_module.PanelTrackingMiddleware()
+        panel = SimpleNamespace(adopt=AsyncMock())
+
+        class FakeMessage:
+            invoice = None
+            document = SimpleNamespace()
+
+        event = SimpleNamespace(
+            message=FakeMessage(),
+            from_user=SimpleNamespace(id=42),
+        )
+        handler = AsyncMock(return_value="done")
+        with patch.object(bot_module.types, "Message", FakeMessage):
+            result = await middleware(handler, event, {"chat_panel": panel})
+        self.assertEqual(result, "done")
+        panel.adopt.assert_not_awaited()
+
+    async def test_document_back_restores_config_menu_without_editing_document(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        try:
+            database = Database(path)
+            database.activate_new_access(42, "alice", 30, "30_days", "stars")
+            database.save_client_peer(
+                42,
+                "server-a",
+                "if-a",
+                "primary",
+                "key-a",
+                "alice",
+                "primary",
+            )
+            callback = SimpleNamespace(
+                from_user=SimpleNamespace(id=42),
+                message=SimpleNamespace(chat=SimpleNamespace(id=42)),
+            )
+            panel = SimpleNamespace(restore_or_create=AsyncMock())
+            answer = AsyncMock()
+            await return_to_client_configs(
+                callback,
+                database,
+                panel,
+                answer,
+                lambda _user_id: SimpleNamespace(),
+                lambda _peer: True,
+                ClientConfigCallback(action="back", page=0),
+            )
+            answer.assert_awaited_once_with(callback)
+            panel.restore_or_create.assert_awaited_once()
+            self.assertEqual(
+                panel.restore_or_create.await_args.args[2],
+                "📥 Выбери конфиг для скачивания.",
+            )
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
 
     async def test_unknown_input_is_deleted_without_new_reply(self):
         panel = SimpleNamespace(
@@ -652,7 +748,7 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(events, ["ack", "cascade", "invoice"])
 
-    async def test_command_scopes_are_cleared(self):
+    async def test_start_command_is_exposed_and_admin_override_is_cleared(self):
         fake_bot = SimpleNamespace(
             delete_my_commands=AsyncMock(), set_my_commands=AsyncMock()
         )
@@ -661,8 +757,11 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
             patch.object(bot_module, "get_admin_telegram_ids", return_value=[99]),
         ):
             await bot_module.register_bot_commands()
-        self.assertEqual(fake_bot.delete_my_commands.await_count, 2)
-        fake_bot.set_my_commands.assert_not_awaited()
+        self.assertEqual(fake_bot.delete_my_commands.await_count, 1)
+        fake_bot.set_my_commands.assert_awaited_once()
+        command = fake_bot.set_my_commands.await_args.args[0][0]
+        self.assertEqual(command.command, "start")
+        self.assertEqual(command.description, "Перезапустить бота")
 
     async def test_my_chat_member_transitions_reachability(self):
         database = SimpleNamespace(

@@ -26,7 +26,7 @@ def client_config_keyboard(
             InlineKeyboardButton(
                 text=str(config["config_name"]),
                 callback_data=ClientConfigCallback(
-                    action="download", peer_id=int(config["id"])
+                    action="download", peer_id=int(config["id"]), page=page
                 ).pack(),
             )
         ]
@@ -59,6 +59,21 @@ def config_filename(config_name: str) -> str:
         for character in config_name
     ).strip(" .")
     return f"{(safe or 'nikonVPN')[:48]}.conf"
+
+
+def config_file_back_keyboard(page: int = 0) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=ClientConfigCallback(
+                        action="back", page=max(0, page)
+                    ).pack(),
+                )
+            ]
+        ]
+    )
 
 
 @router.callback_query(F.data == "get_config")
@@ -123,6 +138,38 @@ async def handle_get_config_callback(
             "📥 Выбери конфиг для скачивания.",
             reply_markup=keyboard,
         )
+
+
+@router.callback_query(ClientConfigCallback.filter(F.action == "back"))
+async def return_to_client_configs(
+    callback_query: types.CallbackQuery,
+    db: Database,
+    chat_panel,
+    safe_answer_callback,
+    create_main_menu_keyboard,
+    is_access_active,
+    callback_data: ClientConfigCallback,
+) -> None:
+    """Return from a configuration document to the persistent config menu."""
+    await safe_answer_callback(callback_query)
+    user_id = callback_query.from_user.id
+    existing_peer = db.get_peer_by_telegram_id(user_id)
+    if existing_peer and is_access_active(existing_peer):
+        keyboard, count = client_config_keyboard(db, user_id, callback_data.page)
+        if count:
+            await chat_panel.restore_or_create(
+                callback_query.message.chat.id,
+                user_id,
+                "📥 Выбери конфиг для скачивания.",
+                keyboard,
+            )
+            return
+    await chat_panel.restore_or_create(
+        callback_query.message.chat.id,
+        user_id,
+        "👋🏻 Главное меню",
+        create_main_menu_keyboard(user_id),
+    )
 
 
 @router.callback_query(ClientConfigCallback.filter(F.action == "page"))
@@ -222,6 +269,10 @@ async def download_client_config(
                 source_message=callback_query.message,
                 caption=None,
                 filename=config_filename(str(config["config_name"])),
+                server_name=cascade_router.get_server_name(
+                    str(config["server_key"])
+                ),
+                reply_markup=config_file_back_keyboard(callback_data.page),
             )
             if not sent:
                 await safe_edit_callback_message(

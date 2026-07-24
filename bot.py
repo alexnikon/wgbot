@@ -13,6 +13,7 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
 )
 from aiogram.types import (
+    BotCommand,
     BotCommandScopeChat,
     BotCommandScopeDefault,
     ErrorEvent,
@@ -211,6 +212,7 @@ class PanelTrackingMiddleware:
             panel is not None
             and isinstance(message, types.Message)
             and message.invoice is None
+            and message.document is None
         ):
             await panel.adopt(message, event.from_user.id)
         return await handler(event, data)
@@ -294,17 +296,29 @@ async def send_config_with_confirmation(
     source_message: types.Message | None = None,
     caption: str | None = None,
     filename: str = "nikonVPN.conf",
+    server_name: str | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> bool:
     """Send a configuration document with its import instructions."""
-    effective_caption = caption or (
-        "✅ Конфигурация nikonVPN готова.\n\n"
-        "Открой файл через AmneziaWG и добавь новый туннель."
-    )
+    if caption:
+        effective_caption = caption
+    elif server_name:
+        effective_caption = (
+            "📁 Конфиг файл\n"
+            f"🌍 {server_name}\n\n"
+            "✅ Конфигурация nikonVPN готова.\n"
+            "Открой файл через AmneziaWG и добавь новый туннель."
+        )
+    else:
+        effective_caption = (
+            "✅ Конфигурация nikonVPN готова.\n\n"
+            "Открой файл через AmneziaWG и добавь новый туннель."
+        )
     sent = await send_config_file(
         chat_id,
         config_content,
         caption=effective_caption,
-        reply_markup=None,
+        reply_markup=reply_markup,
         filename=filename,
     )
     return sent
@@ -612,8 +626,11 @@ async def telegram_error_handler(event: ErrorEvent) -> bool:
 
 
 async def register_bot_commands() -> None:
-    """Remove public command menus; /start remains a hidden bootstrap handler."""
-    await bot.delete_my_commands(scope=BotCommandScopeDefault())
+    """Expose the public restart command and remove stale chat-specific scopes."""
+    await bot.set_my_commands(
+        [BotCommand(command="start", description="Перезапустить бота")],
+        scope=BotCommandScopeDefault(),
+    )
     for admin_id in get_admin_telegram_ids():
         await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=admin_id))
 

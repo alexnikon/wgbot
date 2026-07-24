@@ -73,6 +73,7 @@ class CascadeServerRegistryTests(unittest.TestCase):
                         "interface_id": "interface-a",
                         "priority": 10,
                         "max_peers": 100,
+                        "server_name": "Netherlands",
                     },
                 ]
             }
@@ -81,6 +82,28 @@ class CascadeServerRegistryTests(unittest.TestCase):
         servers = load_cascade_servers(path)
 
         self.assertEqual([server.server_key for server in servers], ["server-a", "server-b"])
+        self.assertEqual(servers[0].server_name, "Netherlands")
+        self.assertEqual(servers[1].server_name, "server-b")
+
+    def test_rejects_invalid_server_name(self):
+        path = self._write_registry(
+            {
+                "servers": [
+                    {
+                        "server_key": "server-a",
+                        "server_name": "Invalid\nName",
+                        "base_url": "https://a.example/admin",
+                        "api_token": "a" * 32,
+                        "interface_id": "interface-a",
+                        "priority": 10,
+                        "max_peers": 100,
+                    }
+                ]
+            }
+        )
+
+        with self.assertRaisesRegex(CascadeError, "server_name"):
+            load_cascade_servers(path)
 
     def test_rejects_http_when_tls_verification_is_enabled(self):
         path = self._write_registry(

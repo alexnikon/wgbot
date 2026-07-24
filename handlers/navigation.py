@@ -15,11 +15,15 @@ _last_start_sent_at: dict[int, float] = {}
 
 @router.message(CommandStart())
 async def cmd_start(
-    message: types.Message, create_main_menu_keyboard, chat_panel
+    message: types.Message,
+    create_main_menu_keyboard,
+    chat_panel,
+    clear_admin_state,
 ):
-    """Restore the hidden bootstrap panel without exposing slash commands."""
+    """Reset transient UI state and restore the main control panel."""
     user_id = message.from_user.id
     await chat_panel.delete_user_message(message)
+    clear_admin_state(user_id)
     now_monotonic = time.monotonic()
     last_start = _last_start_sent_at.get(user_id, 0.0)
     if now_monotonic - last_start < START_DEBOUNCE_SECONDS:

@@ -45,6 +45,7 @@ class CascadeServer:
     client_group: str = "Basic"
     enabled: bool = True
     verify_tls: bool = True
+    server_name: str = ""
 
     @property
     def api_url(self) -> str:
@@ -76,8 +77,10 @@ def load_cascade_servers(path: Path = CASCADE_SERVERS_FILE) -> list[CascadeServe
             raise CascadeError(
                 f"enabled and verify_tls must be JSON booleans for server entry {index}"
             )
+        server_key = str(item.get("server_key") or "").strip()
+        raw_server_name = item.get("server_name", server_key)
         server = CascadeServer(
-            server_key=str(item.get("server_key") or "").strip(),
+            server_key=server_key,
             base_url=str(item.get("base_url") or "").strip(),
             api_token=str(item.get("api_token") or "").strip(),
             interface_id=str(item.get("interface_id") or "").strip(),
@@ -86,6 +89,7 @@ def load_cascade_servers(path: Path = CASCADE_SERVERS_FILE) -> list[CascadeServe
             client_group=str(item.get("client_group") or "Basic").strip(),
             enabled=enabled,
             verify_tls=verify_tls,
+            server_name=str(raw_server_name or "").strip(),
         )
         if not all((server.server_key, server.base_url, server.api_token, server.interface_id)):
             raise CascadeError(f"Cascade server entry {index} has missing required fields")
@@ -109,6 +113,18 @@ def load_cascade_servers(path: Path = CASCADE_SERVERS_FILE) -> list[CascadeServe
             raise CascadeError(f"API token is unexpectedly short for {server.server_key}")
         if not server.client_group:
             raise CascadeError(f"client_group must not be empty for {server.server_key}")
+        if (
+            not server.server_name
+            or len(server.server_name) > 64
+            or any(
+                ord(character) < 32 or ord(character) == 127
+                for character in server.server_name
+            )
+        ):
+            raise CascadeError(
+                f"server_name must contain 1-64 printable characters for "
+                f"{server.server_key}"
+            )
         seen.add(server.server_key)
         servers.append(server)
 
@@ -357,6 +373,10 @@ class CascadeRouter:
 
     def get_enabled_servers(self) -> list[CascadeServer]:
         return [server for server in self.servers if server.enabled]
+
+    def get_server_name(self, server_key: str) -> str:
+        server = self.get_server(server_key)
+        return server.server_name or server.server_key
 
     async def list_server_interfaces(self, server_key: str) -> list[dict[str, Any]]:
         server = self.get_server(server_key)
