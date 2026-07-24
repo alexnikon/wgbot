@@ -65,7 +65,7 @@ jobs:
 
       - name: Validate Docker Compose configuration
         run: |
-          touch .env
+          printf 'WGBOT_IMAGE=wgbot:ci\n' > .env
           mkdir -p DB secrets
           cp cascade_servers.example.json secrets/cascade_servers.json
           docker compose config --quiet

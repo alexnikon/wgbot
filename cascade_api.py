@@ -591,6 +591,24 @@ class CascadeRouter:
             self.db.set_client_peer_enabled(peer["cascade_peer_id"], False)
             raise
 
+    async def get_admin_managed_config(
+        self, user_id: int, peer_id: int
+    ) -> tuple[dict[str, Any], bytes]:
+        """Download a paid client's managed config without changing access state."""
+        peer = self.db.get_admin_managed_config(peer_id, user_id)
+        if not peer or peer["payment_status"] != "paid":
+            raise CascadeNotFound(
+                f"No paid managed configuration {peer_id} for user {user_id}"
+            )
+        try:
+            content = await self.get_api(peer["server_key"]).download_config(
+                peer["cascade_peer_id"], peer["interface_id"]
+            )
+        except CascadeNotFound:
+            self.db.set_client_peer_enabled(peer["cascade_peer_id"], False)
+            raise
+        return peer, content
+
     async def create_additional_config(
         self,
         user_id: int,

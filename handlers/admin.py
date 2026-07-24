@@ -17,7 +17,7 @@ from callbacks import (
 from cascade_api import CascadeError, CascadeNotFound, CascadeRouter
 from config import get_admin_telegram_ids
 from database import Database, normalize_config_name
-from utils import format_date_for_user
+from utils import config_filename, format_date_for_user
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin")
@@ -317,6 +317,20 @@ def config_details_keyboard(config: dict[str, Any]) -> InlineKeyboardMarkup:
     user_id = int(config["telegram_user_id"])
     peer_id = int(config["id"])
     rows = [
+        *(
+            [
+                [
+                    InlineKeyboardButton(
+                        text="📥 Скачать конфиг",
+                        callback_data=AdminConfigCallback(
+                            action="download", user_id=user_id, peer_id=peer_id
+                        ).pack(),
+                    )
+                ]
+            ]
+            if config.get("payment_status") == "paid"
+            else []
+        ),
         [
             InlineKeyboardButton(
                 text="✏️ Переименовать",
@@ -365,17 +379,23 @@ def config_error_back_keyboard(user_id: int, peer_id: int) -> InlineKeyboardMark
     )
 
 
-def format_config(config: dict[str, Any]) -> str:
+def format_config(config: dict[str, Any], server_name: str | None = None) -> str:
     if not config["admin_enabled"]:
         status = "деактивирован"
     elif config["enabled"]:
         status = "активен"
     else:
         status = "недоступен или срок истёк"
+    server_key = str(config["server_key"])
+    server_label = (
+        f"{server_name} ({server_key})"
+        if server_name and server_name != server_key
+        else server_key
+    )
     return (
         f"🗂 {config['config_name']}\n\n"
         f"Тип: {'основной' if config['role'] == 'primary' else 'дополнительный'}\n"
-        f"Сервер: {config['server_key']}\n"
+        f"Сервер: {server_label}\n"
         f"Интерфейс: {config['interface_id']}\n"
         f"Состояние: {status}"
     )
@@ -699,18 +719,112 @@ async def show_client_configs(
 async def show_config_details(
     callback: types.CallbackQuery,
     db: Database,
+    cascade_router: CascadeRouter,
     safe_answer_callback,
     callback_data: AdminConfigCallback,
 ) -> None:
     await safe_answer_callback(callback)
     if not is_admin(callback.from_user.id):
         return
-    config = db.get_client_peer(callback_data.peer_id, callback_data.user_id)
-    if not config or config["role"] not in {"primary", "additional"}:
+    config = db.get_admin_managed_config(
+        callback_data.peer_id, callback_data.user_id
+    )
+    if not config:
         await callback.message.edit_text("❌ Конфиг не найден.")
         return
+    try:
+        server_name = cascade_router.get_server_name(str(config["server_key"]))
+    except CascadeError:
+        server_name = str(config["server_key"])
     await callback.message.edit_text(
-        format_config(config), reply_markup=config_details_keyboard(config)
+        format_config(config, server_name),
+        reply_markup=config_details_keyboard(config),
+    )
+
+
+@router.callback_query(AdminConfigCallback.filter(F.action == "download"))
+async def download_paid_client_config(
+    callback: types.CallbackQuery,
+    bot: Bot,
+    db: Database,
+    cascade_router: CascadeRouter,
+    safe_answer_callback,
+    callback_data: AdminConfigCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    config = db.get_admin_managed_config(
+        callback_data.peer_id, callback_data.user_id
+    )
+    if not config:
+        await callback.message.edit_text(
+            "❌ Конфиг не найден.",
+            reply_markup=config_error_back_keyboard(
+                callback_data.user_id, callback_data.peer_id
+            ),
+        )
+        return
+    if config.get("payment_status") != "paid":
+        await callback.message.edit_text(
+            "❌ Скачивание доступно только для клиентов с подтверждённой оплатой.",
+            reply_markup=config_error_back_keyboard(
+                callback_data.user_id, callback_data.peer_id
+            ),
+        )
+        return
+    try:
+        config, content = await cascade_router.get_admin_managed_config(
+            callback_data.user_id, callback_data.peer_id
+        )
+        server_name = cascade_router.get_server_name(str(config["server_key"]))
+        await bot.send_document(
+            chat_id=callback.from_user.id,
+            document=types.BufferedInputFile(
+                file=content,
+                filename=config_filename(
+                    str(config["config_name"]),
+                    prefix=f"{callback_data.user_id}-",
+                ),
+            ),
+            caption=(
+                f"Клиент: {callback_data.user_id}\n"
+                f"Конфиг: {config['config_name']}\n"
+                f"Локация: {server_name}"
+            ),
+        )
+    except CascadeNotFound:
+        await callback.message.edit_text(
+            "❌ Peer отсутствует в Cascade. Создай новый конфиг.",
+            reply_markup=config_error_back_keyboard(
+                callback_data.user_id, callback_data.peer_id
+            ),
+        )
+        return
+    except CascadeError:
+        logger.exception("Failed to download a paid client configuration")
+        await callback.message.edit_text(
+            "❌ Не удалось скачать конфиг.",
+            reply_markup=config_error_back_keyboard(
+                callback_data.user_id, callback_data.peer_id
+            ),
+        )
+        return
+    except Exception:
+        logger.exception("Failed to send a paid client configuration to the admin")
+        await callback.message.edit_text(
+            "❌ Не удалось отправить конфиг.",
+            reply_markup=config_error_back_keyboard(
+                callback_data.user_id, callback_data.peer_id
+            ),
+        )
+        return
+    db.log_admin_config_change(
+        callback.from_user.id,
+        callback_data.user_id,
+        callback_data.peer_id,
+        "admin_download_config",
+        server_key=str(config["server_key"]),
     )
 
 
@@ -1038,9 +1152,12 @@ async def change_config_state(
         operation,
         server_key=str(config["server_key"]),
     )
+    refreshed_config = db.get_admin_managed_config(
+        callback_data.peer_id, callback_data.user_id
+    )
     await callback.message.edit_text(
         "✅ Конфиг восстановлен." if active else "✅ Конфиг деактивирован.",
-        reply_markup=config_details_keyboard(config),
+        reply_markup=config_details_keyboard(refreshed_config or config),
     )
 
 
@@ -1102,7 +1219,7 @@ async def capture_admin_input(
                 with suppress(Exception):
                     await message.delete()
                 return
-            config = db.get_client_peer(peer_id, int(flow["user_id"]))
+            config = db.get_admin_managed_config(peer_id, int(flow["user_id"]))
             admin_workflows.clear(message.from_user.id)
             db.log_admin_config_change(
                 message.from_user.id,

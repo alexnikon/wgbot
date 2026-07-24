@@ -2,6 +2,7 @@
 """Create consistent runtime backups and enforce retention limits."""
 
 import argparse
+import json
 import os
 import re
 import sqlite3
@@ -12,7 +13,8 @@ from pathlib import Path
 DEFAULT_RETENTION_DAYS = 30
 DEFAULT_MAX_FILES = 20
 MANAGED_BACKUP_RE = re.compile(
-    r"^(?P<source>wgbot\.db)(?:\.[A-Za-z0-9_-]+)?\.\d{8}-\d{6}$"
+    r"^(?P<source>wgbot\.db|cascade_servers\.json)"
+    r"(?:\.[A-Za-z0-9_-]+)?\.\d{8}-\d{6}$"
 )
 TEMPORARY_SIDECAR_RE = re.compile(
     r"^wgbot\.db(?:\.[A-Za-z0-9_-]+)?\.\d{8}-\d{6}\.tmp-(?:wal|shm)$"
@@ -64,10 +66,28 @@ def backup_sqlite(source: Path, destination: Path) -> None:
             if not integrity or integrity[0] != "ok":
                 raise sqlite3.DatabaseError("SQLite backup integrity check failed")
         temporary.replace(destination)
+        destination.chmod(0o600)
     finally:
         temporary.unlink(missing_ok=True)
         Path(f"{temporary}-wal").unlink(missing_ok=True)
         Path(f"{temporary}-shm").unlink(missing_ok=True)
+
+
+def backup_json(source: Path, destination: Path) -> None:
+    """Validate and atomically copy a protected JSON runtime file."""
+    content = source.read_bytes()
+    registry = json.loads(content)
+    if not isinstance(registry, dict) or not isinstance(registry.get("servers"), list):
+        raise ValueError("Cascade registry must contain a servers list")
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    temporary.unlink(missing_ok=True)
+    try:
+        temporary.write_bytes(content)
+        temporary.chmod(0o600)
+        temporary.replace(destination)
+        destination.chmod(0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def prune_backups(
@@ -78,7 +98,10 @@ def prune_backups(
     now: datetime,
 ) -> list[Path]:
     """Delete only managed backup files that exceed age or count limits."""
-    managed: dict[str, list[Path]] = {"wgbot.db": []}
+    managed: dict[str, list[Path]] = {
+        "wgbot.db": [],
+        "cascade_servers.json": [],
+    }
     removed: list[Path] = []
     for path in backup_dir.iterdir():
         if not path.is_file():
@@ -127,6 +150,13 @@ def create_runtime_backup(root: Path, label: str, now: datetime | None = None) -
     if database.is_file():
         destination = backup_dir / f"wgbot.db.{label}.{timestamp}"
         backup_sqlite(database, destination)
+        os.utime(destination, (now.timestamp(), now.timestamp()))
+        created.append(destination)
+
+    cascade_servers = root / "secrets" / "cascade_servers.json"
+    if cascade_servers.is_file():
+        destination = backup_dir / f"cascade_servers.json.{label}.{timestamp}"
+        backup_json(cascade_servers, destination)
         os.utime(destination, (now.timestamp(), now.timestamp()))
         created.append(destination)
 

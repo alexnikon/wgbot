@@ -73,7 +73,8 @@ jobs:
           VPS_PORT: ${{ vars.VPS_PORT }}
         run: |
           archive="/tmp/wgbot-runtime-${DEPLOY_SHA}.tgz"
-          tar -czf "$archive" docker-compose.yml scripts/backup_runtime.py
+          tar -czf "$archive" docker-compose.yml scripts/backup_runtime.py \
+            scripts/persist_runtime_image.py
           scp -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
             -i ~/.ssh/wgbot_deploy_key -P "$VPS_PORT" \
             "$archive" "$VPS_USER@$VPS_HOST:.wgbot-runtime-${DEPLOY_SHA}.tgz"
@@ -112,6 +113,7 @@ jobs:
           tar -xzf "$archive" -C "$staging"
           test -r "$staging/docker-compose.yml"
           test -r "$staging/scripts/backup_runtime.py"
+          test -r "$staging/scripts/persist_runtime_image.py"
 
           mkdir -p "$DEPLOY_PATH/DB" "$DEPLOY_PATH/backups" \
             "$DEPLOY_PATH/scripts" "$DEPLOY_PATH/secrets"
@@ -119,6 +121,8 @@ jobs:
           install -m 644 "$staging/docker-compose.yml" "$DEPLOY_PATH/docker-compose.yml"
           install -m 755 "$staging/scripts/backup_runtime.py" \
             "$DEPLOY_PATH/scripts/backup_runtime.py"
+          install -m 755 "$staging/scripts/persist_runtime_image.py" \
+            "$DEPLOY_PATH/scripts/persist_runtime_image.py"
 
           cd "$DEPLOY_PATH"
 
@@ -145,9 +149,10 @@ jobs:
             fi
             sleep 5
           done
-          WGBOT_IMAGE="$IMAGE" docker compose --project-name wgbot ps wgbot
-          WGBOT_IMAGE="$IMAGE" docker compose --project-name wgbot \
-            logs --tail=100 wgbot
+          python3 scripts/persist_runtime_image.py --env-file .env --image "$IMAGE"
+          docker compose --project-name wgbot config --quiet
+          docker compose --project-name wgbot ps wgbot
+          docker compose --project-name wgbot logs --tail=100 wgbot
           docker image prune -f --filter "until=168h"
           REMOTE
           } | ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \

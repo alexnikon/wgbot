@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import sqlite3
 import tempfile
@@ -36,6 +37,61 @@ class RuntimeBackupTests(unittest.TestCase):
             value = connection.execute("SELECT value FROM values_table").fetchone()[0]
         self.assertEqual(value, "saved")
         self.assertEqual(list((self.root / "backups").glob("*.tmp-*")), [])
+        self.assertEqual(created[0].stat().st_mode & 0o777, 0o600)
+
+    def test_backs_up_valid_cascade_registry_with_protected_permissions(self):
+        secrets = self.root / "secrets"
+        secrets.mkdir()
+        registry = secrets / "cascade_servers.json"
+        registry.write_text(
+            json.dumps({"servers": [{"server_key": "server-a"}]}),
+            encoding="utf-8",
+        )
+
+        created = backup_runtime.create_runtime_backup(
+            self.root,
+            "dev",
+            datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
+        )
+
+        self.assertEqual(
+            [path.name for path in created],
+            [
+                "wgbot.db.dev.20300102-030405",
+                "cascade_servers.json.dev.20300102-030405",
+            ],
+        )
+        registry_backup = created[1]
+        self.assertEqual(registry_backup.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(registry_backup.read_text()), json.loads(registry.read_text()))
+
+    def test_rejects_invalid_cascade_registry_without_partial_backup(self):
+        secrets = self.root / "secrets"
+        secrets.mkdir()
+        (secrets / "cascade_servers.json").write_text("{invalid", encoding="utf-8")
+
+        with self.assertRaises(json.JSONDecodeError):
+            backup_runtime.create_runtime_backup(
+                self.root,
+                "dev",
+                datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
+            )
+
+        self.assertEqual(
+            list((self.root / "backups").glob("cascade_servers.json*")), []
+        )
+
+    def test_rejects_registry_without_servers_list(self):
+        secrets = self.root / "secrets"
+        secrets.mkdir()
+        (secrets / "cascade_servers.json").write_text("{}", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "servers list"):
+            backup_runtime.create_runtime_backup(
+                self.root,
+                "dev",
+                datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
+            )
 
     def test_ignores_unmanaged_runtime_files(self):
         unmanaged = self.root / "runtime-notes.json"
@@ -78,6 +134,26 @@ class RuntimeBackupTests(unittest.TestCase):
         self.assertTrue(unmanaged.exists())
         self.assertFalse(temporary_sidecar.exists())
         self.assertEqual(len(list(backup_dir.glob("wgbot.db.*"))), 2)
+
+    def test_prunes_database_and_registry_backups_independently(self):
+        backup_dir = self.root / "backups"
+        backup_dir.mkdir()
+        now = datetime(2030, 1, 10, tzinfo=UTC)
+        for source in ("wgbot.db", "cascade_servers.json"):
+            for index in range(3):
+                path = backup_dir / f"{source}.dev.2030010{index + 1}-000000"
+                path.write_text(str(index), encoding="utf-8")
+                os.utime(path, (now.timestamp() + index, now.timestamp() + index))
+
+        backup_runtime.prune_backups(
+            backup_dir,
+            retention_days=0,
+            max_files=2,
+            now=now,
+        )
+
+        self.assertEqual(len(list(backup_dir.glob("wgbot.db.*"))), 2)
+        self.assertEqual(len(list(backup_dir.glob("cascade_servers.json.*"))), 2)
 
     def test_zero_disables_retention_rule(self):
         values = {

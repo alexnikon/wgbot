@@ -20,7 +20,8 @@ Set the Telegram bot, YooKassa, webhook, tariff, support, and admin values in `.
 Set `PAYMENT_RETURN_URL` to the matching production or development Telegram bot URL.
 Deployment backups use SQLite's online backup API. `BACKUP_RETENTION_DAYS=30`
 removes older managed backups, while `BACKUP_MAX_FILES=20` keeps at most that many
-database backups. Set either value to `0` to disable that limit.
+backups for each protected source: the database and Cascade server registry. Backup
+files are created with mode `600`. Set either value to `0` to disable that limit.
 Deploy workflows run the backup automatically. For daily backups between deployments,
 add a host cron entry and replace the path with the runtime directory:
 
@@ -112,15 +113,16 @@ Use `--exercise-peer` only on development interfaces. The temporary peer is dele
 - Rollback remains manual through the existing `Rollback` workflow.
 
 Production deployment is artifact-only: GitHub builds the image and uploads only
-`docker-compose.yml` and `scripts/backup_runtime.py`. The VPS does not need a Git
-checkout after the first successful runtime deployment.
+`docker-compose.yml` and the runtime backup/image helper scripts. The VPS does not
+need a Git checkout after the first successful runtime deployment.
 
 Repository variables for the production GitHub Environment: `VPS_HOST`, `VPS_USER`,
 `VPS_PORT`, and `DEPLOY_PATH`. Set `DEPLOY_PATH=/home/alex/wgbot`. The runtime directory
 must contain `.env`, `DB/wgbot.db`, and `secrets/cascade_servers.json`; deployments upload
-the Compose file and backup script automatically. Environment secrets: `VPS_SSH_KEY`
-and `VPS_KNOWN_HOSTS`. Generate the pinned host entry from a trusted workstation and
-verify its fingerprint before saving it:
+the Compose file and helper scripts automatically. After a successful health check,
+the deployed immutable image is stored as `WGBOT_IMAGE` in `.env`, allowing safe manual
+Compose operations. Environment secrets: `VPS_SSH_KEY` and `VPS_KNOWN_HOSTS`. Generate
+the pinned host entry from a trusted workstation and verify its fingerprint before saving it:
 
 ```bash
 ssh-keyscan -p 22 example.com

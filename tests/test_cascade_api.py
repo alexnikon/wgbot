@@ -396,6 +396,77 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
                 except FileNotFoundError:
                     pass
 
+    async def test_admin_download_allows_paid_disabled_config_without_enabling_it(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.ensure_subscription(
+            10, "alice", "2000-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        db.save_client_peer(
+            10,
+            "server-a",
+            "if-a",
+            "peer-a",
+            "key-a",
+            "alice",
+            "additional",
+            enabled=False,
+            config_name="Old phone",
+            admin_enabled=False,
+        )
+        peer_id = db.get_managed_client_configs(10)[0]["id"]
+
+        class DownloadAPI:
+            async def download_config(self, cascade_peer_id, interface_id=None):
+                self.request = (cascade_peer_id, interface_id)
+                return b"paid-config"
+
+        router = CascadeRouter(db, servers=[])
+        api = DownloadAPI()
+        router.apis = {"server-a": api}
+        try:
+            peer, content = await router.get_admin_managed_config(10, peer_id)
+            self.assertEqual(content, b"paid-config")
+            self.assertEqual(api.request, ("peer-a", "if-a"))
+            self.assertEqual(peer["admin_enabled"], 0)
+            self.assertEqual(db.get_client_peer(peer_id, 10)["enabled"], 0)
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_admin_download_marks_missing_peer_unavailable_without_restoring(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.ensure_subscription(
+            10, "alice", "2030-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        db.save_client_peer(
+            10, "server-a", "if-a", "peer-a", "key-a", "alice", "primary"
+        )
+        peer_id = db.get_managed_client_configs(10)[0]["id"]
+
+        class MissingAPI:
+            async def download_config(self, cascade_peer_id, interface_id=None):
+                raise CascadeNotFound("missing")
+
+        router = CascadeRouter(db, servers=[])
+        router.apis = {"server-a": MissingAPI()}
+        try:
+            with self.assertRaises(CascadeNotFound):
+                await router.get_admin_managed_config(10, peer_id)
+            self.assertEqual(db.get_client_peer(peer_id, 10)["enabled"], 0)
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
     async def test_sync_does_not_reenable_admin_disabled_config(self):
         handle, path = tempfile.mkstemp(suffix=".db")
         os.close(handle)

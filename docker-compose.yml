@@ -6,7 +6,7 @@ x-logging: &default-logging
 
 services:
   wgbot:
-    image: ${WGBOT_IMAGE:-wgbot:local}
+    image: ${WGBOT_IMAGE:?WGBOT_IMAGE must be set in .env or the environment}
     build:
       context: .
     container_name: wgbot

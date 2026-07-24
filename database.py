@@ -596,6 +596,28 @@ class Database:
             row = conn.execute(sql, params).fetchone()
             return dict(row) if row else None
 
+    def get_admin_managed_config(
+        self, peer_id: int, user_id: int
+    ) -> dict[str, Any] | None:
+        """Return a managed peer with the owner's current payment status."""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT cp.*, s.payment_status
+                FROM client_peers cp
+                LEFT JOIN subscriptions s USING(telegram_user_id)
+                WHERE cp.id=? AND cp.telegram_user_id=?
+                  AND cp.role IN ('primary', 'additional')
+                  AND cp.server_key IS NOT NULL
+                  AND cp.interface_id IS NOT NULL
+                  AND cp.cascade_peer_id IS NOT NULL
+                LIMIT 1
+                """,
+                (peer_id, user_id),
+            ).fetchone()
+            return dict(row) if row else None
+
     def get_client_peer_by_cascade_id(
         self, server_key: str, interface_id: str, cascade_peer_id: str
     ) -> dict[str, Any] | None:

@@ -208,6 +208,38 @@ class DatabaseTests(unittest.TestCase):
             len(self.db.get_managed_client_configs(10, available_only=True)), 1
         )
 
+    def test_admin_managed_config_includes_paid_expired_and_disabled_peer(self):
+        self.db.ensure_subscription(
+            10,
+            "alice",
+            "2000-01-01 00:00:00",
+            "paid",
+            "30_days",
+            "stars",
+        )
+        self.assertTrue(
+            self.db.save_client_peer(
+                10,
+                "server-a",
+                "if-a",
+                "peer-a",
+                "key-a",
+                "alice",
+                "additional",
+                enabled=False,
+                config_name="Old phone",
+                admin_enabled=False,
+            )
+        )
+        peer_id = self.db.get_managed_client_configs(10)[0]["id"]
+
+        config = self.db.get_admin_managed_config(peer_id, 10)
+
+        self.assertEqual(config["payment_status"], "paid")
+        self.assertEqual(config["enabled"], 0)
+        self.assertEqual(config["admin_enabled"], 0)
+        self.assertIsNone(self.db.get_admin_managed_config(peer_id, 11))
+
     def test_schema_migration_names_primary_but_not_manual_peer(self):
         handle, legacy_path = tempfile.mkstemp(suffix=".db")
         os.close(handle)

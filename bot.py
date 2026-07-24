@@ -706,6 +706,7 @@ async def main(services: AppServices):
             bot,
             allowed_updates=dp.resolve_used_update_types(),
             tasks_concurrency_limit=TELEGRAM_TASKS_CONCURRENCY_LIMIT,
+            handle_signals=False,
         )
 
     except Exception as e:

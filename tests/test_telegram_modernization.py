@@ -1,8 +1,10 @@
 import asyncio
 import os
+import sqlite3
 import tempfile
 import unittest
 import uuid
+from contextlib import closing
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -17,6 +19,7 @@ from aiogram.exceptions import (
 
 import bot as bot_module
 from callbacks import (
+    AdminConfigCallback,
     ClientConfigCallback,
     PaymentMethod,
     PaymentMethodCallback,
@@ -34,8 +37,11 @@ from handlers.admin import (
     admin_dashboard_keyboard,
     client_card_keyboard,
     client_list_keyboard,
+    config_details_keyboard,
     config_error_back_keyboard,
     config_list_keyboard,
+    download_paid_client_config,
+    format_config,
 )
 from handlers.fallback import handle_unknown
 from handlers.navigation import _last_start_sent_at, cmd_start
@@ -519,6 +525,120 @@ class TelegramDatabaseTests(unittest.TestCase):
         )
         error_keyboard = config_error_back_keyboard(10, 20)
         self.assertEqual(error_keyboard.inline_keyboard[0][0].text, "⬅️ Назад")
+
+    def test_paid_config_details_include_download_and_display_location(self):
+        config = {
+            "telegram_user_id": 10,
+            "id": 20,
+            "role": "additional",
+            "admin_enabled": 0,
+            "enabled": 0,
+            "config_name": "Old phone",
+            "server_key": "fin-1",
+            "interface_id": "if-a",
+            "payment_status": "paid",
+        }
+
+        labels = [
+            button.text
+            for row in config_details_keyboard(config).inline_keyboard
+            for button in row
+        ]
+
+        self.assertIn("📥 Скачать конфиг", labels)
+        self.assertIn("Сервер: Finland (fin-1)", format_config(config, "Finland"))
+
+    def test_admin_download_sends_file_privately_and_audits(self):
+        self.db.ensure_subscription(
+            10, "alice", "2000-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        self.db.save_client_peer(
+            10,
+            "fin-1",
+            "if-a",
+            "peer-a",
+            "key-a",
+            "alice",
+            "additional",
+            enabled=False,
+            config_name="Old / phone",
+            admin_enabled=False,
+        )
+        peer_id = self.db.get_managed_client_configs(10)[0]["id"]
+        callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=99),
+            message=SimpleNamespace(edit_text=AsyncMock(), chat=SimpleNamespace(id=-100)),
+        )
+        telegram_bot = SimpleNamespace(send_document=AsyncMock())
+        router = SimpleNamespace(
+            get_admin_managed_config=AsyncMock(
+                return_value=(
+                    self.db.get_admin_managed_config(peer_id, 10),
+                    b"config",
+                )
+            ),
+            get_server_name=lambda _server_key: "Finland",
+        )
+
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                download_paid_client_config(
+                    callback,
+                    telegram_bot,
+                    self.db,
+                    router,
+                    AsyncMock(),
+                    AdminConfigCallback(
+                        action="download", user_id=10, peer_id=peer_id
+                    ),
+                )
+            )
+
+        self.assertEqual(
+            telegram_bot.send_document.await_args.kwargs["chat_id"], 99
+        )
+        self.assertEqual(
+            telegram_bot.send_document.await_args.kwargs["document"].filename,
+            "10-Old _ phone.conf",
+        )
+        callback.message.edit_text.assert_not_awaited()
+        with closing(sqlite3.connect(self.path)) as connection:
+            operation = connection.execute(
+                "SELECT operation FROM operation_logs ORDER BY id DESC LIMIT 1"
+            ).fetchone()[0]
+        self.assertEqual(operation, "admin_download_config")
+
+    def test_admin_download_rejects_unpaid_client_before_cascade(self):
+        self.db.ensure_subscription(10, "alice", None, "unpaid")
+        self.db.save_client_peer(
+            10, "fin-1", "if-a", "peer-a", "key-a", "alice", "primary"
+        )
+        peer_id = self.db.get_managed_client_configs(10)[0]["id"]
+        callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=99),
+            message=SimpleNamespace(edit_text=AsyncMock()),
+        )
+        router = SimpleNamespace(get_admin_managed_config=AsyncMock())
+
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                download_paid_client_config(
+                    callback,
+                    SimpleNamespace(send_document=AsyncMock()),
+                    self.db,
+                    router,
+                    AsyncMock(),
+                    AdminConfigCallback(
+                        action="download", user_id=10, peer_id=peer_id
+                    ),
+                )
+            )
+
+        router.get_admin_managed_config.assert_not_awaited()
+        self.assertIn(
+            "подтверждённой оплатой",
+            callback.message.edit_text.await_args.args[0],
+        )
 
     def test_daily_legacy_callback_counter_and_zero_streak(self):
         self.db.ensure_telegram_daily_metrics_day()

@@ -91,9 +91,10 @@ jobs:
             fi
             sleep 5
           done
-          WGBOT_IMAGE="$IMAGE" docker compose --project-name wgbot ps wgbot
-          WGBOT_IMAGE="$IMAGE" docker compose --project-name wgbot \
-            logs --tail=100 wgbot
+          python3 scripts/persist_runtime_image.py --env-file .env --image "$IMAGE"
+          docker compose --project-name wgbot config --quiet
+          docker compose --project-name wgbot ps wgbot
+          docker compose --project-name wgbot logs --tail=100 wgbot
           docker image prune -f --filter "until=168h"
           REMOTE
           } | ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \

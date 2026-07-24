@@ -7,7 +7,7 @@ from callbacks import ClientConfigCallback
 from cascade_api import CascadeNotFound, CascadeRouter
 from database import Database
 from payment import PaymentManager
-from utils import format_date_for_user, parse_date_flexible
+from utils import config_filename, format_date_for_user, parse_date_flexible
 
 logger = logging.getLogger(__name__)
 router = Router(name="access")
@@ -51,14 +51,6 @@ def client_config_keyboard(
         rows.append(navigation)
     rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main")])
     return InlineKeyboardMarkup(inline_keyboard=rows), len(configs)
-
-
-def config_filename(config_name: str) -> str:
-    safe = "".join(
-        character if character.isalnum() or character in " ._-" else "_"
-        for character in config_name
-    ).strip(" .")
-    return f"{(safe or 'nikonVPN')[:48]}.conf"
 
 
 def config_file_back_keyboard(page: int = 0) -> InlineKeyboardMarkup:
