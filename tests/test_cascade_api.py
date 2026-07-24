@@ -12,6 +12,7 @@ from cascade_api import (
     CascadeNotFound,
     CascadeRouter,
     CascadeServer,
+    ManualPeerPresence,
     load_cascade_servers,
 )
 from database import Database
@@ -631,6 +632,150 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(peers["primary"]["enabled"], 1)
             self.assertEqual(peers["manual"]["enabled"], 0)
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_reconcile_manual_configs_promotes_only_exact_matches(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        for user_id in (10, 11, 12):
+            db.ensure_subscription(
+                user_id,
+                f"user-{user_id}",
+                "2030-01-01 00:00:00",
+                "paid",
+                "30_days",
+                "stars",
+            )
+            db.save_client_peer(
+                user_id,
+                "server-a",
+                "if-a",
+                f"primary-{user_id}",
+                f"primary-key-{user_id}",
+                f"user-{user_id}",
+                "primary",
+            )
+            db.save_client_peer(
+                user_id,
+                "server-a",
+                "if-a",
+                f"manual-{user_id}",
+                f"manual-key-{user_id}",
+                f"phone-{user_id}",
+                "manual",
+            )
+
+        class ReconciliationAPI:
+            async def list_peers(self, interface_id=None):
+                self.interface_id = interface_id
+                return [
+                    {
+                        "id": "manual-10",
+                        "publicKey": "manual-key-10",
+                        "enabled": True,
+                    },
+                    {
+                        "id": "manual-11",
+                        "publicKey": "changed-key",
+                        "enabled": True,
+                    },
+                ]
+
+        api = ReconciliationAPI()
+        router = CascadeRouter(db, servers=[])
+        router.apis = {"server-a": api}
+        try:
+            result = await router.reconcile_manual_configs()
+
+            self.assertEqual(
+                result,
+                {
+                    "total": 3,
+                    "promoted": 1,
+                    "missing": 1,
+                    "mismatch": 1,
+                    "unavailable": 0,
+                    "skipped": 0,
+                },
+            )
+            self.assertEqual(api.interface_id, "if-a")
+            self.assertEqual(
+                db.get_client_peer(
+                    next(
+                        peer["id"]
+                        for peer in db.get_client_peers(10)
+                        if peer["cascade_peer_id"] == "manual-10"
+                    )
+                )["role"],
+                "additional",
+            )
+            for user_id in (11, 12):
+                manual = next(
+                    peer
+                    for peer in db.get_client_peers(user_id)
+                    if peer["role"] == "manual"
+                )
+                self.assertEqual(manual["enabled"], 0)
+            self.assertEqual(
+                await router.inspect_manual_peer(
+                    next(
+                        peer
+                        for peer in db.get_client_peers(11)
+                        if peer["role"] == "manual"
+                    )
+                ),
+                ManualPeerPresence.MISMATCH,
+            )
+            with db._connect() as conn:
+                audit = conn.execute(
+                    """
+                    SELECT operation, details FROM operation_logs
+                    WHERE operation='system_promote_manual_config'
+                    """
+                ).fetchall()
+            self.assertEqual(len(audit), 1)
+            self.assertNotIn("manual-key", audit[0][1])
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_reconcile_manual_configs_tolerates_unavailable_server(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.ensure_subscription(
+            10, "alice", "2030-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        db.save_client_peer(
+            10, "server-a", "if-a", "primary", "primary-key", "alice", "primary"
+        )
+        db.save_client_peer(
+            10, "server-a", "if-a", "manual", "manual-key", "phone", "manual"
+        )
+
+        class UnavailableAPI:
+            async def list_peers(self, interface_id=None):
+                raise CascadeError("unavailable")
+
+        router = CascadeRouter(db, servers=[])
+        router.apis = {"server-a": UnavailableAPI()}
+        try:
+            result = await router.reconcile_manual_configs()
+
+            self.assertEqual(result["unavailable"], 1)
+            manual = next(
+                peer for peer in db.get_client_peers(10) if peer["role"] == "manual"
+            )
+            self.assertEqual(manual["enabled"], 1)
         finally:
             for suffix in ("", "-wal", "-shm"):
                 try:

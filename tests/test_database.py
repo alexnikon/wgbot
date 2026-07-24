@@ -240,6 +240,105 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(config["admin_enabled"], 0)
         self.assertIsNone(self.db.get_admin_managed_config(peer_id, 11))
 
+    def test_manual_peer_promotion_preserves_identity_and_is_idempotent(self):
+        self.db.ensure_subscription(
+            10, "alice", "2030-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        self.assertTrue(
+            self.db.save_client_peer(
+                10, "server-a", "if-a", "primary", "primary-key", "alice", "primary"
+            )
+        )
+        self.assertTrue(
+            self.db.save_client_peer(
+                10,
+                "server-a",
+                "if-a",
+                "manual-peer",
+                "manual-key",
+                "  Alice   phone  ",
+                "manual",
+                enabled=False,
+            )
+        )
+        manual = next(
+            peer for peer in self.db.get_client_peers(10) if peer["role"] == "manual"
+        )
+
+        promoted = self.db.promote_manual_peer(manual["id"])
+
+        self.assertEqual(promoted["role"], "additional")
+        self.assertEqual(promoted["config_name"], "Alice phone")
+        self.assertEqual(promoted["cascade_peer_id"], "manual-peer")
+        self.assertEqual(promoted["public_key"], "manual-key")
+        self.assertEqual(promoted["server_key"], "server-a")
+        self.assertEqual(promoted["interface_id"], "if-a")
+        self.assertEqual(promoted["enabled"], 0)
+        self.assertEqual(promoted["admin_enabled"], 1)
+        self.assertIsNone(self.db.promote_manual_peer(manual["id"]))
+        self.assertEqual(len(self.db.get_managed_client_configs(10)), 2)
+
+    def test_manual_peer_promotion_uses_deterministic_unique_suffixes(self):
+        self.db.ensure_subscription(
+            10, "alice", "2030-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        self.db.save_client_peer(
+            10, "server-a", "if-a", "primary", "primary-key", "alice", "primary"
+        )
+        self.db.rename_managed_config(
+            self.db.get_primary_client_peer(10)["id"], 10, "Phone"
+        )
+        for number in (1, 2):
+            self.assertTrue(
+                self.db.save_client_peer(
+                    10,
+                    "server-a",
+                    "if-a",
+                    f"manual-{number}",
+                    f"manual-key-{number}",
+                    "phone",
+                    "manual",
+                )
+            )
+
+        manual_ids = [
+            peer["id"]
+            for peer in self.db.get_client_peers(10)
+            if peer["role"] == "manual"
+        ]
+        names = [
+            self.db.promote_manual_peer(peer_id)["config_name"]
+            for peer_id in manual_ids
+        ]
+
+        self.assertEqual(names, ["phone (2)", "phone (3)"])
+
+    def test_manual_peer_requires_primary_and_expiry_for_promotion(self):
+        self.db.upsert_client(10, "alice")
+        self.db.save_client_peer(
+            10, "server-a", "if-a", "manual", "manual-key", "phone", "manual"
+        )
+        manual = self.db.get_manual_client_peers()[0]
+
+        self.assertIsNone(self.db.promote_manual_peer(manual["id"]))
+        self.assertEqual(self.db.get_client_peer(manual["id"])["role"], "manual")
+
+    def test_admin_lists_manual_while_client_list_hides_and_delete_is_scoped(self):
+        self.db.upsert_client(10, "alice")
+        self.db.save_client_peer(
+            10, "server-a", "if-a", "manual", "manual-key", "phone", "manual"
+        )
+        manual = self.db.get_manual_client_peers()[0]
+
+        self.assertEqual(
+            [config["role"] for config in self.db.get_admin_client_configs(10)],
+            ["manual"],
+        )
+        self.assertEqual(self.db.get_managed_client_configs(10), [])
+        self.assertFalse(self.db.delete_manual_peer_record(manual["id"], 11))
+        self.assertTrue(self.db.delete_manual_peer_record(manual["id"], 10))
+        self.assertIsNone(self.db.get_client_peer(manual["id"]))
+
     def test_schema_migration_names_primary_but_not_manual_peer(self):
         handle, legacy_path = tempfile.mkstemp(suffix=".db")
         os.close(handle)

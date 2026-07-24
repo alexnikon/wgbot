@@ -25,6 +25,7 @@ from callbacks import (
     PaymentMethodCallback,
     RefundConfirmationCallback,
 )
+from cascade_api import ManualPeerPresence
 from database import Database
 from handlers.access import (
     client_config_keyboard,
@@ -40,6 +41,8 @@ from handlers.admin import (
     config_details_keyboard,
     config_error_back_keyboard,
     config_list_keyboard,
+    confirm_stale_manual_cleanup,
+    delete_stale_manual_record,
     download_paid_client_config,
     format_config,
 )
@@ -454,7 +457,7 @@ class TelegramDatabaseTests(unittest.TestCase):
         self.db.set_admin_workflow(1, "input", "waiting", {}, ttl_hours=0)
         self.assertIsNone(self.db.get_admin_workflow(1, "input"))
 
-    def test_named_config_keyboards_hide_manual_and_deactivated_peers(self):
+    def test_named_config_keyboards_hide_manual_from_client_but_show_admin(self):
         self.db.save_client_peer(
             10, "server-a", "if-a", "primary", "key-a", "alice", "primary"
         )
@@ -504,7 +507,128 @@ class TelegramDatabaseTests(unittest.TestCase):
             for button in row
         ]
         self.assertTrue(any("Планшет" in label for label in admin_labels))
-        self.assertFalse(any("legacy" in label for label in admin_labels))
+        self.assertTrue(any("legacy" in label for label in admin_labels))
+
+    def test_stale_manual_config_has_cleanup_action(self):
+        config = {
+            "telegram_user_id": 10,
+            "id": 20,
+            "role": "manual",
+            "admin_enabled": 1,
+            "enabled": 0,
+            "config_name": None,
+            "peer_name": "Legacy phone",
+            "server_key": "fin-1",
+            "interface_id": "if-a",
+            "payment_status": "expired",
+        }
+
+        labels = [
+            button.text
+            for row in config_details_keyboard(config).inline_keyboard
+            for button in row
+        ]
+
+        self.assertIn("🧹 Удалить устаревшую запись", labels)
+        self.assertNotIn("📥 Скачать конфиг", labels)
+        self.assertNotIn("✏️ Переименовать", labels)
+        self.assertIn("Тип: ручной", format_config(config, "Finland"))
+
+    def test_stale_manual_cleanup_rechecks_cascade_and_deletes_only_local_row(self):
+        self.db.upsert_client(10, "alice")
+        self.db.save_client_peer(
+            10, "fin-1", "if-a", "manual", "manual-key", "Legacy phone", "manual"
+        )
+        manual = self.db.get_manual_client_peers()[0]
+        callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=99),
+            message=SimpleNamespace(edit_text=AsyncMock()),
+        )
+        router = SimpleNamespace(
+            inspect_manual_peer=AsyncMock(
+                return_value=ManualPeerPresence.MISSING
+            )
+        )
+
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                confirm_stale_manual_cleanup(
+                    callback,
+                    self.db,
+                    AsyncMock(),
+                    AdminConfigCallback(
+                        action="delete_manual", user_id=10, peer_id=manual["id"]
+                    ),
+                )
+            )
+            asyncio.run(
+                delete_stale_manual_record(
+                    callback,
+                    self.db,
+                    router,
+                    AsyncMock(),
+                    AdminConfigCallback(
+                        action="delete_manual_confirm",
+                        user_id=10,
+                        peer_id=manual["id"],
+                    ),
+                )
+            )
+
+        router.inspect_manual_peer.assert_awaited_once()
+        self.assertIsNone(self.db.get_client_peer(manual["id"]))
+        with closing(sqlite3.connect(self.path)) as connection:
+            operation = connection.execute(
+                "SELECT operation FROM operation_logs ORDER BY id DESC LIMIT 1"
+            ).fetchone()[0]
+        self.assertEqual(operation, "admin_delete_stale_manual_config")
+
+    def test_stale_manual_cleanup_rejects_live_or_forged_peer(self):
+        self.db.upsert_client(10, "alice")
+        self.db.save_client_peer(
+            10, "fin-1", "if-a", "manual", "manual-key", "Legacy phone", "manual"
+        )
+        manual = self.db.get_manual_client_peers()[0]
+        callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=99),
+            message=SimpleNamespace(edit_text=AsyncMock()),
+        )
+        router = SimpleNamespace(
+            inspect_manual_peer=AsyncMock(
+                return_value=ManualPeerPresence.EXACT
+            )
+        )
+
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                delete_stale_manual_record(
+                    callback,
+                    self.db,
+                    router,
+                    AsyncMock(),
+                    AdminConfigCallback(
+                        action="delete_manual_confirm",
+                        user_id=10,
+                        peer_id=manual["id"],
+                    ),
+                )
+            )
+            asyncio.run(
+                delete_stale_manual_record(
+                    callback,
+                    self.db,
+                    router,
+                    AsyncMock(),
+                    AdminConfigCallback(
+                        action="delete_manual_confirm",
+                        user_id=11,
+                        peer_id=manual["id"],
+                    ),
+                )
+            )
+
+        self.assertIsNotNone(self.db.get_client_peer(manual["id"]))
+        self.assertEqual(router.inspect_manual_peer.await_count, 1)
 
     def test_client_card_exposes_discount_and_config_management(self):
         labels = [

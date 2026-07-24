@@ -599,7 +599,7 @@ class Database:
     def get_admin_managed_config(
         self, peer_id: int, user_id: int
     ) -> dict[str, Any] | None:
-        """Return a managed peer with the owner's current payment status."""
+        """Return an admin-visible peer with the owner's current payment status."""
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
@@ -608,7 +608,7 @@ class Database:
                 FROM client_peers cp
                 LEFT JOIN subscriptions s USING(telegram_user_id)
                 WHERE cp.id=? AND cp.telegram_user_id=?
-                  AND cp.role IN ('primary', 'additional')
+                  AND cp.role IN ('primary', 'additional', 'manual')
                   AND cp.server_key IS NOT NULL
                   AND cp.interface_id IS NOT NULL
                   AND cp.cascade_peer_id IS NOT NULL
@@ -617,6 +617,138 @@ class Database:
                 (peer_id, user_id),
             ).fetchone()
             return dict(row) if row else None
+
+    def get_manual_client_peers(self) -> list[dict[str, Any]]:
+        """Return bound historical manual peers for startup reconciliation."""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT * FROM client_peers
+                WHERE role='manual'
+                  AND server_key IS NOT NULL
+                  AND interface_id IS NOT NULL
+                  AND cascade_peer_id IS NOT NULL
+                  AND public_key != ''
+                ORDER BY server_key, interface_id, id
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_admin_client_configs(self, user_id: int) -> list[dict[str, Any]]:
+        """Return managed and historical configs visible to administrators."""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT cp.*, s.payment_status
+                FROM client_peers cp
+                LEFT JOIN subscriptions s USING(telegram_user_id)
+                WHERE cp.telegram_user_id=?
+                  AND cp.role IN ('primary', 'additional', 'manual')
+                  AND cp.server_key IS NOT NULL
+                  AND cp.interface_id IS NOT NULL
+                  AND cp.cascade_peer_id IS NOT NULL
+                ORDER BY CASE cp.role
+                    WHEN 'primary' THEN 0
+                    WHEN 'additional' THEN 1
+                    ELSE 2
+                END, cp.id
+                """,
+                (user_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def promote_manual_peer(self, peer_id: int) -> dict[str, Any] | None:
+        """Atomically promote a historical manual peer to a named additional config."""
+        try:
+            with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                conn.execute("BEGIN IMMEDIATE")
+                peer = conn.execute(
+                    "SELECT * FROM client_peers WHERE id=? AND role='manual'",
+                    (peer_id,),
+                ).fetchone()
+                if not peer:
+                    return None
+                user_id = int(peer["telegram_user_id"])
+                has_primary = conn.execute(
+                    """
+                    SELECT 1 FROM client_peers
+                    WHERE telegram_user_id=? AND role='primary'
+                    LIMIT 1
+                    """,
+                    (user_id,),
+                ).fetchone()
+                expiry = conn.execute(
+                    """
+                    SELECT expire_date FROM subscriptions
+                    WHERE telegram_user_id=?
+                    """,
+                    (user_id,),
+                ).fetchone()
+                if not has_primary or not expiry or not expiry[0]:
+                    return None
+
+                raw_name = " ".join(str(peer["peer_name"] or "").split())
+                if any(
+                    ord(character) < 32 or ord(character) == 127
+                    for character in str(peer["peer_name"] or "")
+                ):
+                    return None
+                base_name = raw_name[:48].strip() or "Дополнительный конфиг"
+                base_name = normalize_config_name(base_name)
+                existing = {
+                    str(row[0]).casefold()
+                    for row in conn.execute(
+                        """
+                        SELECT config_name FROM client_peers
+                        WHERE telegram_user_id=?
+                          AND role IN ('primary', 'additional')
+                          AND config_name IS NOT NULL
+                        """,
+                        (user_id,),
+                    ).fetchall()
+                }
+                config_name = base_name
+                suffix_number = 2
+                while config_name.casefold() in existing:
+                    suffix = f" ({suffix_number})"
+                    config_name = f"{base_name[: 48 - len(suffix)].rstrip()}{suffix}"
+                    suffix_number += 1
+
+                cursor = conn.execute(
+                    """
+                    UPDATE client_peers
+                    SET role='additional', config_name=?, admin_enabled=1,
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE id=? AND role='manual'
+                    """,
+                    (config_name, peer_id),
+                )
+                if cursor.rowcount != 1:
+                    return None
+                updated = conn.execute(
+                    "SELECT * FROM client_peers WHERE id=?", (peer_id,)
+                ).fetchone()
+                conn.commit()
+                return dict(updated) if updated else None
+        except (sqlite3.IntegrityError, ValueError):
+            logger.exception("Failed to promote manual peer %s", peer_id)
+            return None
+
+    def delete_manual_peer_record(self, peer_id: int, user_id: int) -> bool:
+        """Delete only a specifically owned historical manual peer record."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM client_peers
+                WHERE id=? AND telegram_user_id=? AND role='manual'
+                """,
+                (peer_id, user_id),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
 
     def get_client_peer_by_cascade_id(
         self, server_key: str, interface_id: str, cascade_peer_id: str
@@ -714,6 +846,19 @@ class Database:
             )
             conn.commit()
 
+    def set_client_peer_enabled_by_id(self, peer_id: int, enabled: bool) -> None:
+        """Update one local peer state by its database identity."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE client_peers
+                SET enabled=?, updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+                """,
+                (int(enabled), peer_id),
+            )
+            conn.commit()
+
     def log_admin_config_change(
         self,
         admin_id: int,
@@ -726,6 +871,31 @@ class Database:
         details = json.dumps(
             {
                 "admin_id": admin_id,
+                "client_id": user_id,
+                "peer_id": peer_id,
+                "server_key": server_key,
+            },
+            sort_keys=True,
+        )
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                (f"telegram:{user_id}", operation, details),
+            )
+            conn.commit()
+
+    def log_system_config_change(
+        self,
+        user_id: int,
+        peer_id: int,
+        operation: str,
+        *,
+        server_key: str | None = None,
+    ) -> None:
+        """Audit an automatic configuration operation without sensitive peer data."""
+        details = json.dumps(
+            {
+                "actor": "system",
                 "client_id": user_id,
                 "peer_id": peer_id,
                 "server_key": server_key,
