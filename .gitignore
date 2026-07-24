@@ -7,13 +7,8 @@ Docs/
 clients.json
 promo.txt
 custom_clients.txt
-migration.sh
-clients.migrated.json
-migration-output/
-migration-import-receipt.json
 api_yookassa.txt
 webhook_yookassa_doc.txt
-wgdashboard_doc.txt
 
 # C extensions
 *.so

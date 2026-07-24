@@ -156,6 +156,25 @@ class DatabaseTests(unittest.TestCase):
         self.assertTrue(success)
         self.assertGreater(after, before)
 
+    def test_expiration_sync_updates_subscription_and_local_peer_state(self):
+        self.db.activate_new_access(10, "alice", 30, "30_days", "stars")
+        self.assertTrue(
+            self.db.save_client_peer(
+                10, "server-a", "if-a", "peer-a", "key-a", "alice", "primary"
+            )
+        )
+        with closing(sqlite3.connect(self.path)) as conn, conn:
+            conn.execute(
+                "UPDATE subscriptions SET expire_date='2000-01-01 00:00:00' "
+                "WHERE telegram_user_id=10"
+            )
+
+        self.assertEqual(self.db.sync_expired_access_statuses(), 1)
+
+        subscription = self.db.get_peer_by_telegram_id(10)
+        self.assertEqual(subscription["payment_status"], "expired")
+        self.assertEqual(subscription["enabled"], 0)
+
     def test_runtime_stats_report_queue_and_subscription_gauges(self):
         self.db.activate_new_access(10, "alice", 30, "30_days", "stars")
         self.db.create_reservation(11, "server-a", "interface-a", 30)
@@ -171,52 +190,6 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(stats["provisioning_running"], 0)
         self.assertEqual(stats["provisioning_failed"], 0)
         self.assertEqual(stats["active_reservations"], 1)
-
-
-class LegacyDatabaseMigrationTests(unittest.TestCase):
-    def test_legacy_peer_is_migrated_without_deleting_source_table(self):
-        handle, path = tempfile.mkstemp(suffix=".db")
-        os.close(handle)
-        try:
-            with closing(sqlite3.connect(path)) as conn, conn:
-                conn.execute(
-                    """
-                    CREATE TABLE peers (
-                        id INTEGER PRIMARY KEY,
-                        telegram_user_id INTEGER,
-                        telegram_username TEXT,
-                        peer_name TEXT,
-                        peer_id TEXT,
-                        expire_date TEXT,
-                        payment_status TEXT
-                    )
-                    """
-                )
-                conn.execute(
-                    """
-                    INSERT INTO peers(
-                        telegram_user_id, telegram_username, peer_name, peer_id,
-                        expire_date, payment_status
-                    ) VALUES (10, 'alice', 'legacy-alice', 'public-key',
-                              '2030-01-01 00:00:00', 'paid')
-                    """
-                )
-            db = Database(path)
-            migrated = db.get_peer_by_telegram_id(10)
-            self.assertEqual(migrated["telegram_username"], "alice")
-            self.assertEqual(migrated["legacy_public_key"], "public-key")
-            with closing(sqlite3.connect(path)) as conn, conn:
-                self.assertIsNotNone(
-                    conn.execute(
-                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='peers'"
-                    ).fetchone()
-                )
-        finally:
-            for suffix in ("", "-wal", "-shm"):
-                try:
-                    os.remove(path + suffix)
-                except FileNotFoundError:
-                    pass
 
 
 if __name__ == "__main__":

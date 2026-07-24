@@ -322,7 +322,12 @@ class PaymentManager:
             if payment_message_id is not None:
                 metadata["payment_message_id"] = str(payment_message_id)
             
-            logger.info(f"Creating YooKassa payment for user {user_id}, tariff {tariff_key}, amount {amount} kopeks, metadata: {metadata}")
+            logger.debug(
+                "Creating YooKassa payment for user %s, tariff %s, amount %s kopeks",
+                user_id,
+                tariff_key,
+                amount,
+            )
             
             # Create YooKassa payment
             payment_data = await self.yookassa_client.create_payment(
@@ -334,7 +339,11 @@ class PaymentManager:
             )
             
             if payment_data:
-                logger.info(f"Payment created: ID={payment_data.get('id')}, status={payment_data.get('status')}, metadata in response={payment_data.get('metadata', {})}")
+                logger.debug(
+                    "YooKassa payment response received: ID=%s, status=%s",
+                    payment_data.get("id"),
+                    payment_data.get("status"),
+                )
             
             if not payment_data:
                 logger.error("Failed to create YooKassa payment")

@@ -150,7 +150,7 @@ class OperationLoggingMiddleware:
             user_id = event.from_user.id if event.from_user else "unknown"
             chat_id = event.chat.id if event.chat else "unknown"
             text = event.text or event.caption or ""
-            logger.info(
+            logger.debug(
                 "Incoming message operation: user_id=%s, chat_id=%s, "
                 "content_type=%s, length=%s",
                 user_id,
@@ -169,7 +169,7 @@ class OperationLoggingMiddleware:
             message = event.message
             chat_id = message.chat.id if message and message.chat else "unknown"
             callback_type = (event.data or "").split(":", 1)[0].split("_", 1)[0]
-            logger.info(
+            logger.debug(
                 "Incoming callback operation: user_id=%s, chat_id=%s, type=%s",
                 user_id,
                 chat_id,

@@ -63,6 +63,22 @@ vpn-bot.example.com {
 
 Do not expose port `8001` publicly. Allow public inbound traffic only to Caddy on ports `80/443`.
 
+Subscription state is stored in `clients`, `subscriptions`, and `client_peers`. To
+inspect current access state, query those tables rather than the retired `peers`
+migration source:
+
+```bash
+sqlite3 -header -table DB/wgbot.db "
+SELECT cp.peer_name AS user, s.expire_date,
+       CAST(julianday(s.expire_date) - julianday('now') AS INTEGER) AS days_left,
+       s.payment_status
+FROM subscriptions s
+JOIN clients c USING (telegram_user_id)
+LEFT JOIN client_peers cp
+  ON cp.telegram_user_id=c.telegram_user_id AND cp.role='primary'
+ORDER BY s.expire_date;"
+```
+
 Set `INTERNAL_METRICS_TOKEN` to a long random value to enable protected operational
 diagnostics. The endpoint contains counters and queue gauges, but no API tokens or payment
 data:
@@ -73,17 +89,6 @@ curl -H "Authorization: Bearer $INTERNAL_METRICS_TOKEN" \
 ```
 
 Leave `INTERNAL_METRICS_TOKEN` empty to disable the endpoint with a `404` response.
-
-## Existing Client Migration
-
-The staged migration CLI reads WGDashboard, its jobs database, the legacy bot
-database, `clients.json`, and the original AWG2 server configuration. It supports
-`analyze`, `prepare`, `import`, `bind`, and `verify`. Source databases are opened
-read-only during analysis, while every mutating stage requires an explicit `--apply`.
-
-Follow [the production migration runbook](runbooks/production-cascade-migration.md).
-Generated native Cascade imports contain private keys and must remain outside the
-repository with mode `0600`.
 
 ## Development Validation
 
@@ -147,6 +152,10 @@ LOG_TELEGRAM_CONTENT=false
 
 Keep `LOG_TELEGRAM_CONTENT` disabled in production. When enabled, debug previews are
 still passed through credential redaction.
+
+`INFO` contains lifecycle events, completed business operations, warnings, and errors.
+Per-update Telegram activity and verbose provider diagnostics use `DEBUG`; set
+`LOG_LEVEL=DEBUG` only while investigating an issue.
 
 Administrative Telegram flows are persisted in SQLite for 24 hours. Telegram Stars
 payments use a local intent before an invoice is sent, and the hourly reconciliation

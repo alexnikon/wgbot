@@ -345,22 +345,6 @@ class TelegramDatabaseTests(unittest.TestCase):
         self.assertEqual(self.db.count_star_discrepancies(), 0)
         self.assertIsNone(self.db.get_peer_by_telegram_id(31))
 
-    def test_daily_star_summary_separates_receipts_refunds_and_discrepancies(self):
-        self.db.record_star_transaction(
-            "received", "incoming", 100, 1, status="applied"
-        )
-        self.db.record_star_transaction(
-            "refunded", "outgoing", -40, 2, status="refund_pending_review"
-        )
-        self.db.record_star_transaction(
-            "unknown", "incoming", 20, 3, status="discrepancy"
-        )
-        summary = self.db.get_star_daily_summary()
-        self.assertEqual(summary["received_stars"], 120)
-        self.assertEqual(summary["refunded_stars"], 40)
-        self.assertEqual(summary["applied"], 1)
-        self.assertEqual(summary["discrepancies"], 1)
-
     def test_unreachable_clients_are_excluded_and_can_return(self):
         self.db.upsert_client(1, "one")
         self.db.upsert_client(2, "two")
@@ -753,6 +737,25 @@ class PreCheckoutTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_periodic_reconciliation_does_not_send_daily_report(self):
+        notify_admins = AsyncMock()
+        reconciler = StarsReconciler(
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(),
+            notify_admins,
+            3600,
+        )
+        reconciler.run_once = AsyncMock()
+        with (
+            patch("stars.asyncio.sleep", side_effect=asyncio.CancelledError),
+            self.assertRaises(asyncio.CancelledError),
+        ):
+            await reconciler.run()
+        reconciler.run_once.assert_awaited_once()
+        notify_admins.assert_not_awaited()
+
     async def test_reconciliation_reads_multiple_pages(self):
         handle, path = tempfile.mkstemp(suffix=".db")
         os.close(handle)

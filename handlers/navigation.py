@@ -23,7 +23,7 @@ async def cmd_start(
     now_monotonic = time.monotonic()
     last_start = _last_start_sent_at.get(user_id, 0.0)
     if now_monotonic - last_start < START_DEBOUNCE_SECONDS:
-        logger.info(
+        logger.debug(
             "Skipping duplicate hidden start for user %s within %ss",
             user_id,
             START_DEBOUNCE_SECONDS,

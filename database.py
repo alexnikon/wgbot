@@ -59,9 +59,7 @@ class Database:
                     payment_method TEXT,
                     notification_sent INTEGER NOT NULL DEFAULT 0,
                     hour_notification_sent INTEGER NOT NULL DEFAULT 0,
-                    expired_notification_sent INTEGER NOT NULL DEFAULT 0,
-                    legacy_peer_name TEXT,
-                    legacy_public_key TEXT
+                    expired_notification_sent INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS client_peers (
@@ -175,12 +173,6 @@ class Database:
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
-                CREATE TABLE IF NOT EXISTS schema_migrations (
-                    version INTEGER PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
-
                 CREATE INDEX IF NOT EXISTS idx_subscriptions_expiry
                     ON subscriptions(is_active, payment_status, expire_date);
                 CREATE INDEX IF NOT EXISTS idx_client_peers_user_role
@@ -250,15 +242,6 @@ class Database:
                 WHERE provider_payment_charge_id IS NOT NULL
                 """
             )
-            legacy_migration = conn.execute(
-                "SELECT 1 FROM schema_migrations WHERE version=1"
-            ).fetchone()
-            if not legacy_migration:
-                self._migrate_legacy_peers(conn)
-                conn.execute(
-                    "INSERT INTO schema_migrations(version, name) VALUES (1, ?)",
-                    ("legacy_business_data",),
-                )
             conn.commit()
         logger.info("Cascade database schema initialized")
 
@@ -269,60 +252,6 @@ class Database:
         columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
         if column not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-
-    def _migrate_legacy_peers(self, conn: sqlite3.Connection) -> None:
-        """Copy legacy business data without mutating the old table."""
-        table = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='peers'"
-        ).fetchone()
-        if not table:
-            return
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT * FROM peers WHERE telegram_user_id IS NOT NULL ORDER BY id"
-        ).fetchall()
-        for row in rows:
-            item = dict(row)
-            user_id = int(item["telegram_user_id"])
-            conn.execute(
-                """
-                INSERT INTO clients(telegram_user_id, telegram_username, created_at, updated_at)
-                VALUES (?, ?, COALESCE(?, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP)
-                ON CONFLICT(telegram_user_id) DO UPDATE SET
-                    telegram_username=CASE
-                        WHEN clients.telegram_username='' THEN excluded.telegram_username
-                        ELSE clients.telegram_username END,
-                    updated_at=CURRENT_TIMESTAMP
-                """,
-                (user_id, item.get("telegram_username") or "", item.get("created_at")),
-            )
-            conn.execute(
-                """
-                INSERT INTO subscriptions(
-                    telegram_user_id, expire_date, is_active, payment_status,
-                    stars_paid, rub_paid, last_payment_date, tariff_key, payment_method,
-                    notification_sent, hour_notification_sent, expired_notification_sent,
-                    legacy_peer_name, legacy_public_key
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(telegram_user_id) DO NOTHING
-                """,
-                (
-                    user_id,
-                    item.get("expire_date"),
-                    int(bool(item.get("is_active", 1))),
-                    item.get("payment_status") or "unpaid",
-                    int(item.get("stars_paid") or 0),
-                    int(item.get("rub_paid") or 0),
-                    item.get("last_payment_date"),
-                    item.get("tariff_key"),
-                    item.get("payment_method"),
-                    int(bool(item.get("notification_sent", 0))),
-                    int(bool(item.get("hour_notification_sent", 0))),
-                    int(bool(item.get("expired_notification_sent", 0))),
-                    item.get("peer_name"),
-                    item.get("peer_id"),
-                ),
-            )
 
     def upsert_client(self, user_id: int, username: str | None = None) -> None:
         with self._connect() as conn:
@@ -1308,7 +1237,7 @@ class Database:
 
     def get_expired_peers(self) -> list[dict[str, Any]]:
         return self._subscription_query(
-            "s.is_active=1 AND s.expire_date < datetime('now') AND s.expired_notification_sent=0"
+            "s.is_active=1 AND s.expire_date <= datetime('now') AND s.expired_notification_sent=0"
         )
 
     def sync_expired_access_statuses(self) -> int:
@@ -1317,7 +1246,17 @@ class Database:
                 """
                 UPDATE subscriptions SET payment_status='expired'
                 WHERE is_active=1 AND payment_status='paid'
-                  AND expire_date IS NOT NULL AND expire_date < datetime('now')
+                  AND expire_date IS NOT NULL AND expire_date <= datetime('now')
+                """
+            )
+            conn.execute(
+                """
+                UPDATE client_peers SET enabled=0, updated_at=CURRENT_TIMESTAMP
+                WHERE enabled=1 AND telegram_user_id IN (
+                    SELECT telegram_user_id FROM subscriptions
+                    WHERE is_active=1 AND payment_status='expired'
+                      AND expire_date IS NOT NULL AND expire_date <= datetime('now')
+                )
                 """
             )
             conn.commit()
@@ -1781,62 +1720,6 @@ class Database:
             )
             conn.commit()
             return True
-
-    def get_star_daily_summary(self) -> dict[str, int]:
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT COUNT(*),
-                       COALESCE(SUM(CASE WHEN direction='incoming' THEN amount ELSE 0 END), 0),
-                       COALESCE(SUM(CASE WHEN direction='outgoing' THEN ABS(amount) ELSE 0 END), 0),
-                       COALESCE(SUM(CASE WHEN status='applied' THEN 1 ELSE 0 END), 0),
-                       COALESCE(SUM(CASE WHEN status='discrepancy' THEN 1 ELSE 0 END), 0)
-                FROM star_transactions
-                WHERE observed_at >= datetime('now', '-1 day')
-                """
-            ).fetchone()
-        return {
-            "observed": int(row[0]),
-            "received_stars": int(row[1]),
-            "refunded_stars": int(row[2]),
-            "applied": int(row[3]),
-            "discrepancies": int(row[4]),
-        }
-
-    def get_legacy_migration_candidates(self) -> list[dict[str, Any]]:
-        with self._connect() as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                """
-                SELECT c.telegram_user_id, c.telegram_username,
-                       s.legacy_peer_name, s.legacy_public_key
-                FROM clients c JOIN subscriptions s USING(telegram_user_id)
-                WHERE s.legacy_public_key IS NOT NULL AND s.legacy_public_key != ''
-                ORDER BY c.telegram_user_id
-                """
-            ).fetchall()
-            return [dict(row) for row in rows]
-
-    def import_unbound_peer(
-        self, user_id: int, public_key: str, peer_name: str, role: str = "manual"
-    ) -> bool:
-        self.upsert_client(user_id)
-        try:
-            with self._connect() as conn:
-                conn.execute(
-                    """
-                    INSERT INTO client_peers(telegram_user_id, public_key, peer_name, role)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(telegram_user_id, public_key) DO UPDATE SET
-                        peer_name=excluded.peer_name, role=excluded.role,
-                        updated_at=CURRENT_TIMESTAMP
-                    """,
-                    (user_id, public_key, peer_name, role),
-                )
-                conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            return False
 
     def log_operation(self, peer_name: str, operation: str, details: str) -> None:
         with self._connect() as conn:

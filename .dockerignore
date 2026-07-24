@@ -50,9 +50,6 @@ Thumbs.db
 .env
 clients.json
 secrets/
-clients.migrated.json
-migration.sh
-migrate_to_cascade.py
 *.db
 *.sqlite
 *.sqlite3

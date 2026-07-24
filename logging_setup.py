@@ -33,7 +33,11 @@ def configure_logging() -> None:
     root_logger.addHandler(stream_handler)
 
     healthcheck_filter = HealthcheckAccessLogFilter()
-    logging.getLogger("uvicorn.access").addFilter(healthcheck_filter)
+    verbose_dependency_level = logging.DEBUG if level <= logging.DEBUG else logging.WARNING
+    logging.getLogger("aiogram.event").setLevel(verbose_dependency_level)
+    uvicorn_access_logger = logging.getLogger("uvicorn.access")
+    uvicorn_access_logger.setLevel(verbose_dependency_level)
+    uvicorn_access_logger.addFilter(healthcheck_filter)
 
     # HTTPX request logs include full URLs. Telegram API URLs contain the bot
     # token, so keep transport-level logs out of normal application output.

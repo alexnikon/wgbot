@@ -3,7 +3,6 @@ import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import date
 from typing import Any
 
 from aiogram import Bot
@@ -44,15 +43,11 @@ class StarsReconciler:
         self.notify_admins = notify_admins
         self.interval_seconds = interval_seconds
         self._run_lock = asyncio.Lock()
-        self._last_daily_report: date | None = None
 
     async def run(self) -> None:
         while True:
             try:
-                result = await self.run_once()
-                if self._last_daily_report != date.today():
-                    await self.notify_admins(self.format_report(result, daily=True))
-                    self._last_daily_report = date.today()
+                await self.run_once()
                 await asyncio.sleep(self.interval_seconds)
             except asyncio.CancelledError:
                 raise
@@ -299,13 +294,9 @@ class StarsReconciler:
         )
         return True, True
 
-    def format_report(self, result: ReconciliationResult, *, daily: bool = False) -> str:
-        title = "📊 Ежедневный отчет Telegram Stars" if daily else "📊 Сверка Telegram Stars"
-        if daily:
-            summary = self.db.get_star_daily_summary()
-            result = ReconciliationResult(**summary)
+    def format_report(self, result: ReconciliationResult) -> str:
         return (
-            f"{title}\n\n"
+            "📊 Сверка Telegram Stars\n\n"
             f"Новых операций: {result.observed}\n"
             f"Получено: {result.received_stars} Stars\n"
             f"Возвращено: {result.refunded_stars} Stars\n"
