@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -354,6 +355,15 @@ class CascadeRouter:
         except KeyError as exc:
             raise CascadeError(f"Unknown Cascade server: {server_key}") from exc
 
+    def get_enabled_servers(self) -> list[CascadeServer]:
+        return [server for server in self.servers if server.enabled]
+
+    async def list_server_interfaces(self, server_key: str) -> list[dict[str, Any]]:
+        server = self.get_server(server_key)
+        if not server.enabled:
+            raise CascadeError(f"Cascade server is disabled: {server_key}")
+        return await self.get_api(server_key).list_interfaces()
+
     async def validate(self) -> dict[str, str]:
         """Validate health, token, and interface on every configured server."""
         async def check(server: CascadeServer) -> tuple[str, str]:
@@ -545,6 +555,126 @@ class CascadeRouter:
             peer["cascade_peer_id"], peer["interface_id"]
         )
 
+    async def get_managed_config(self, user_id: int, peer_id: int) -> bytes:
+        peer = self.db.get_client_peer(peer_id, user_id)
+        if (
+            not peer
+            or peer["role"] not in {"primary", "additional"}
+            or not peer["admin_enabled"]
+        ):
+            raise CascadeNotFound(f"No available configuration {peer_id} for user {user_id}")
+        try:
+            return await self.get_api(peer["server_key"]).download_config(
+                peer["cascade_peer_id"], peer["interface_id"]
+            )
+        except CascadeNotFound:
+            self.db.set_client_peer_enabled(peer["cascade_peer_id"], False)
+            raise
+
+    async def create_additional_config(
+        self,
+        user_id: int,
+        config_name: str,
+        server_key: str,
+        interface_id: str,
+    ) -> dict[str, Any]:
+        primary = self.db.get_primary_client_peer(user_id)
+        expire_date = self.db.get_subscription_expiry(user_id)
+        if not primary or not expire_date:
+            raise CascadeError(
+                "An additional configuration requires a primary peer and expiration date"
+            )
+        server = self.get_server(server_key)
+        if not server.enabled:
+            raise CascadeError(f"Cascade server is disabled: {server_key}")
+        api = self.get_api(server_key)
+        interfaces = await api.list_interfaces()
+        if not any(str(item.get("id") or "") == interface_id for item in interfaces):
+            raise CascadeNotFound(
+                f"Interface {interface_id} was not found on {server_key}"
+            )
+        peer_total = 0
+        for interface in interfaces:
+            current_interface_id = str(interface.get("id") or "")
+            if current_interface_id:
+                peer_total += len(await api.list_peers(current_interface_id))
+        if peer_total >= server.max_peers:
+            raise CascadeCapacityError(f"Cascade server {server_key} is full")
+
+        peer: dict[str, Any] | None = None
+        saved = False
+        try:
+            peer_name = f"tg-{user_id}-cfg-{uuid.uuid4().hex[:8]}"
+            peer = await api.create_peer(peer_name, expire_date, interface_id)
+            public_key = str(peer.get("publicKey") or "").strip()
+            if not public_key:
+                raise CascadeError("Cascade create response has no public key")
+            await api.download_config(str(peer["id"]), interface_id)
+            is_future = (
+                datetime.fromisoformat(expire_date).replace(tzinfo=UTC)
+                > datetime.now(UTC)
+            )
+            if not is_future:
+                await api.disable_peer(str(peer["id"]), interface_id)
+            saved = self.db.save_client_peer(
+                user_id=user_id,
+                server_key=server_key,
+                interface_id=interface_id,
+                cascade_peer_id=str(peer["id"]),
+                public_key=public_key,
+                peer_name=str(peer.get("name") or peer_name),
+                role="additional",
+                enabled=is_future,
+                config_name=config_name,
+                admin_enabled=True,
+            )
+            if not saved:
+                raise CascadeError("Failed to persist the additional Cascade peer")
+            stored = self.db.get_client_peer_by_cascade_id(
+                server_key, interface_id, str(peer["id"])
+            )
+            if not stored:
+                raise CascadeError("Stored additional Cascade peer could not be read")
+            return stored
+        except Exception:
+            if peer and peer.get("id") and not saved:
+                try:
+                    await api.delete_peer(str(peer["id"]), interface_id)
+                except Exception:
+                    logger.exception("Failed to compensate additional peer creation")
+            raise
+
+    async def set_additional_config_active(
+        self, user_id: int, peer_id: int, active: bool
+    ) -> dict[str, Any]:
+        peer = self.db.get_client_peer(peer_id, user_id)
+        if not peer or peer["role"] != "additional":
+            raise CascadeNotFound(f"No additional configuration {peer_id}")
+        api = self.get_api(peer["server_key"])
+        try:
+            await api.get_peer(peer["cascade_peer_id"], peer["interface_id"])
+            expire_date = self.db.get_subscription_expiry(user_id)
+            is_future = bool(
+                expire_date
+                and datetime.fromisoformat(expire_date).replace(tzinfo=UTC)
+                > datetime.now(UTC)
+            )
+            enabled = active and is_future
+            if enabled:
+                await api.enable_peer(peer["cascade_peer_id"], peer["interface_id"])
+            else:
+                await api.disable_peer(peer["cascade_peer_id"], peer["interface_id"])
+        except CascadeNotFound:
+            self.db.set_client_peer_enabled(peer["cascade_peer_id"], False)
+            raise
+        if not self.db.set_config_admin_enabled(peer_id, user_id, active):
+            raise CascadeError("Failed to persist configuration state")
+        self.db.set_client_peer_enabled(peer["cascade_peer_id"], enabled)
+        updated = self.db.get_client_peer(peer_id, user_id)
+        if not updated:
+            raise CascadeError("Updated configuration could not be read")
+        return updated
+
     async def primary_peer_exists(self, user_id: int) -> bool:
         peer = self.db.get_primary_client_peer(user_id)
         if not peer:
@@ -565,14 +695,15 @@ class CascadeRouter:
             try:
                 api = self.get_api(peer["server_key"])
                 await api.update_expiry(peer["cascade_peer_id"], expire_date, peer["interface_id"])
-                if is_future:
+                should_enable = is_future and bool(peer.get("admin_enabled", 1))
+                if should_enable:
                     await api.enable_peer(peer["cascade_peer_id"], peer["interface_id"])
                 else:
                     await api.disable_peer(peer["cascade_peer_id"], peer["interface_id"])
-                self.db.set_client_peer_enabled(peer["cascade_peer_id"], is_future)
+                self.db.set_client_peer_enabled(peer["cascade_peer_id"], should_enable)
                 result["updated"] += 1
             except CascadeNotFound as exc:
-                if peer["role"] != "manual":
+                if peer["role"] == "primary":
                     result["failed"] += 1
                     logger.error(
                         "Primary Cascade peer %s is missing: %s",

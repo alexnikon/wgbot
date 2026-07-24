@@ -1,7 +1,9 @@
 import logging
 
 from aiogram import F, Router, types
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from callbacks import ClientConfigCallback
 from cascade_api import CascadeNotFound, CascadeRouter
 from database import Database
 from payment import PaymentManager
@@ -9,108 +11,202 @@ from utils import format_date_for_user, parse_date_flexible
 
 logger = logging.getLogger(__name__)
 router = Router(name="access")
+CLIENT_CONFIGS_PAGE_SIZE = 8
+
+
+def client_config_keyboard(
+    db: Database, user_id: int, page: int = 0
+) -> tuple[InlineKeyboardMarkup, int]:
+    configs = db.get_managed_client_configs(user_id, available_only=True)
+    pages = max(1, (len(configs) + CLIENT_CONFIGS_PAGE_SIZE - 1) // CLIENT_CONFIGS_PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    start = page * CLIENT_CONFIGS_PAGE_SIZE
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=str(config["config_name"]),
+                callback_data=ClientConfigCallback(
+                    action="download", peer_id=int(config["id"])
+                ).pack(),
+            )
+        ]
+        for config in configs[start : start + CLIENT_CONFIGS_PAGE_SIZE]
+    ]
+    navigation: list[InlineKeyboardButton] = []
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                text="⬅️",
+                callback_data=ClientConfigCallback(action="page", page=page - 1).pack(),
+            )
+        )
+    if page + 1 < pages:
+        navigation.append(
+            InlineKeyboardButton(
+                text="➡️",
+                callback_data=ClientConfigCallback(action="page", page=page + 1).pack(),
+            )
+        )
+    if navigation:
+        rows.append(navigation)
+    rows.append([InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows), len(configs)
+
+
+def config_filename(config_name: str) -> str:
+    safe = "".join(
+        character if character.isalnum() or character in " ._-" else "_"
+        for character in config_name
+    ).strip(" .")
+    return f"{(safe or 'nikonVPN')[:48]}.conf"
+
 
 @router.callback_query(F.data == "get_config")
 async def handle_get_config_callback(
     callback_query: types.CallbackQuery,
     db: Database,
+    safe_answer_callback,
+    safe_edit_callback_message,
+    create_main_menu_keyboard,
+    is_access_active,
+    user_action_locks,
+):
+    """Show the list of configurations available to the current user."""
+    await safe_answer_callback(callback_query)
+    user_id = callback_query.from_user.id
+    async with user_action_locks.hold(user_id):
+        existing_peer = db.get_peer_by_telegram_id(user_id)
+        if not existing_peer:
+            await safe_edit_callback_message(
+                callback_query.message,
+                "❌ У тебя нет VPN доступа.",
+                reply_markup=create_main_menu_keyboard(user_id),
+            )
+            return
+        if not is_access_active(existing_peer):
+            if existing_peer.get("payment_status") == "paid":
+                expire_date = existing_peer.get("expire_date", "Неизвестно")
+                formatted = (
+                    format_date_for_user(expire_date)
+                    if expire_date != "Неизвестно"
+                    else "Неизвестно"
+                )
+                text = f"""
+⚠️ Твой доступ к VPN истек!
+
+📅 Дата истечения: {formatted}
+
+⚠️ Для продолжения пользования сервисом, необходимо продлить доступ.
+                """
+            else:
+                text = """
+❌ У тебя нет активного доступа.
+
+💎 Чтобы получить конфиг, нужно оплатить доступ.
+                """
+            await safe_edit_callback_message(
+                callback_query.message,
+                text,
+                reply_markup=create_main_menu_keyboard(user_id),
+            )
+            return
+        keyboard, count = client_config_keyboard(db, user_id)
+        if not count:
+            await safe_edit_callback_message(
+                callback_query.message,
+                "❌ Сейчас нет доступных конфигов. Обратись в поддержку.",
+                reply_markup=create_main_menu_keyboard(user_id),
+            )
+            return
+        await safe_edit_callback_message(
+            callback_query.message,
+            "📥 Выбери конфиг для скачивания.",
+            reply_markup=keyboard,
+        )
+
+
+@router.callback_query(ClientConfigCallback.filter(F.action == "page"))
+async def change_client_config_page(
+    callback_query: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    safe_edit_callback_message,
+    create_main_menu_keyboard,
+    is_access_active,
+    callback_data: ClientConfigCallback,
+) -> None:
+    await safe_answer_callback(callback_query)
+    user_id = callback_query.from_user.id
+    existing_peer = db.get_peer_by_telegram_id(user_id)
+    if not existing_peer or not is_access_active(existing_peer):
+        await safe_edit_callback_message(
+            callback_query.message,
+            "❌ Доступ больше не активен.",
+            reply_markup=create_main_menu_keyboard(user_id),
+        )
+        return
+    keyboard, _ = client_config_keyboard(db, user_id, callback_data.page)
+    await safe_edit_callback_message(
+        callback_query.message,
+        "📥 Выбери конфиг для скачивания.",
+        reply_markup=keyboard,
+    )
+
+
+@router.callback_query(ClientConfigCallback.filter(F.action == "download"))
+async def download_client_config(
+    callback_query: types.CallbackQuery,
+    db: Database,
     cascade_router: CascadeRouter,
     safe_answer_callback,
     safe_edit_callback_message,
-    show_menu_from_callback,
     create_back_to_menu_keyboard,
     create_main_menu_keyboard,
     create_or_restore_peer_for_user,
     send_config_with_confirmation,
     is_access_active,
     user_action_locks,
-):
-    """Handle the 'Get config' button."""
+    callback_data: ClientConfigCallback,
+) -> None:
     await safe_answer_callback(callback_query)
-
     user_id = callback_query.from_user.id
-
     async with user_action_locks.hold(user_id):
-        return await _handle_get_config_locked(
-            callback_query,
-            db,
-            cascade_router,
-            safe_edit_callback_message,
-            show_menu_from_callback,
-            create_back_to_menu_keyboard,
-            create_main_menu_keyboard,
-            create_or_restore_peer_for_user,
-            send_config_with_confirmation,
-            is_access_active,
-        )
-
-
-async def _handle_get_config_locked(
-    callback_query,
-    db,
-    cascade_router,
-    safe_edit_callback_message,
-    show_menu_from_callback,
-    create_back_to_menu_keyboard,
-    create_main_menu_keyboard,
-    create_or_restore_peer_for_user,
-    send_config_with_confirmation,
-    is_access_active,
-):
-    user_id = callback_query.from_user.id
-    username = callback_query.from_user.username
-    existing_peer = db.get_peer_by_telegram_id(user_id)
-    if existing_peer:
-        # Check if access is active (paid and not expired)
-        if not is_access_active(existing_peer):
-            # Access expired or not paid
-            if existing_peer.get("payment_status") == "paid":
-                # Access was paid, but expired
-                expire_date_str = existing_peer.get("expire_date", "Неизвестно")
-                expire_date_formatted = (
-                    format_date_for_user(expire_date_str)
-                    if expire_date_str != "Неизвестно"
-                    else "Неизвестно"
-                )
-                error_text = f"""
-⚠️ Твой доступ к VPN истек!
-
-📅 Дата истечения: {expire_date_formatted}
-
-⚠️ Для продолжения пользования сервисом, необходимо продлить доступ.
-
-Выбери действие с помощью кнопок ниже:
-                """
-            else:
-                # Access not paid
-                error_text = """
-❌ У тебя нет активного доступа.
-
-💎 Чтобы получить конфиг, нужно оплатить доступ.
-
-Выбери действие с помощью кнопок ниже:
-                """
+        existing_peer = db.get_peer_by_telegram_id(user_id)
+        config = db.get_client_peer(callback_data.peer_id, user_id)
+        if (
+            not existing_peer
+            or not is_access_active(existing_peer)
+            or not config
+            or config["role"] not in {"primary", "additional"}
+            or not config["admin_enabled"]
+            or (config["role"] == "additional" and not config["enabled"])
+        ):
             await safe_edit_callback_message(
                 callback_query.message,
-                error_text,
+                "❌ Этот конфиг больше недоступен.",
                 reply_markup=create_main_menu_keyboard(user_id),
             )
             return
-
-        # User has active access: try to send config or restore if missing
+        await safe_edit_callback_message(
+            callback_query.message,
+            "⏳ Скачиваю конфигурацию...",
+            reply_markup=create_back_to_menu_keyboard(),
+        )
         try:
-            await safe_edit_callback_message(
-                callback_query.message,
-                "⏳ Скачиваю конфигурацию...",
-                reply_markup=create_back_to_menu_keyboard(),
-            )
-
             try:
-                peer_config = await cascade_router.get_primary_config(user_id)
+                peer_config = await cascade_router.get_managed_config(
+                    user_id, callback_data.peer_id
+                )
             except CascadeNotFound:
-                logger.warning("Primary Cascade peer is explicitly missing for user %s", user_id)
+                if config["role"] != "primary":
+                    raise
+                logger.warning(
+                    "Primary Cascade peer is explicitly missing for user %s", user_id
+                )
                 ok, err, new_config = await create_or_restore_peer_for_user(
-                    user_id, username, existing_peer.get("tariff_key")
+                    user_id,
+                    callback_query.from_user.username,
+                    existing_peer.get("tariff_key"),
                 )
                 if not ok:
                     await safe_edit_callback_message(
@@ -119,15 +215,13 @@ async def _handle_get_config_locked(
                         reply_markup=create_main_menu_keyboard(user_id),
                     )
                     return
-
-                # Use the received config
                 peer_config = new_config
-
             sent = await send_config_with_confirmation(
                 callback_query.message.chat.id,
                 peer_config,
                 source_message=callback_query.message,
                 caption=None,
+                filename=config_filename(str(config["config_name"])),
             )
             if not sent:
                 await safe_edit_callback_message(
@@ -142,27 +236,19 @@ async def _handle_get_config_locked(
                     "Открой её через AmneziaWG и добавь новый туннель.",
                     reply_markup=create_main_menu_keyboard(user_id),
                 )
-        except Exception as e:
-            logger.error(f"Error while fetching/restoring configuration: {e}", exc_info=True)
+        except CascadeNotFound:
+            await safe_edit_callback_message(
+                callback_query.message,
+                "❌ Конфиг отсутствует на сервере. Администратор должен создать новый.",
+                reply_markup=create_main_menu_keyboard(user_id),
+            )
+        except Exception:
+            logger.exception("Error while fetching/restoring configuration")
             await safe_edit_callback_message(
                 callback_query.message,
                 "❌ Ошибка при получении конфигурации. Попробуй позже или обратись в поддержку.\n\nИспользуй кнопку ниже, чтобы вернуться в меню:",
                 reply_markup=create_back_to_menu_keyboard(),
             )
-    else:
-        # User has no peer
-        error_text = """
-❌ У тебя нет VPN доступа.
-
-💎 Чтобы получить конфиг, нужно оплатить доступ.
-
-Выбери действие с помощью кнопок ниже:
-        """
-        await show_menu_from_callback(
-            callback_query,
-            error_text,
-            create_main_menu_keyboard(user_id),
-        )
 
 
 @router.callback_query(F.data == "extend")

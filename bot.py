@@ -263,6 +263,7 @@ async def send_config_file(
     config_content: bytes | str | None,
     caption: str | None = "📁 Твой файл конфигурации",
     reply_markup: InlineKeyboardMarkup | None = None,
+    filename: str = "nikonVPN.conf",
 ) -> bool:
     if not config_content:
         return False
@@ -276,7 +277,7 @@ async def send_config_file(
         )
         await bot.send_document(
             chat_id=chat_id,
-            document=types.BufferedInputFile(file=config_bytes, filename="nikonVPN.conf"),
+            document=types.BufferedInputFile(file=config_bytes, filename=filename),
             caption=caption,
             reply_markup=reply_markup,
         )
@@ -292,6 +293,7 @@ async def send_config_with_confirmation(
     config_content: bytes | str | None,
     source_message: types.Message | None = None,
     caption: str | None = None,
+    filename: str = "nikonVPN.conf",
 ) -> bool:
     """Send a configuration document with its import instructions."""
     effective_caption = caption or (
@@ -303,6 +305,7 @@ async def send_config_with_confirmation(
         config_content,
         caption=effective_caption,
         reply_markup=None,
+        filename=filename,
     )
     return sent
 

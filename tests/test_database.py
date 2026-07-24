@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from contextlib import closing
 
-from database import Database
+from database import DEFAULT_PRIMARY_CONFIG_NAME, Database
 
 
 class DatabaseTests(unittest.TestCase):
@@ -148,6 +148,93 @@ class DatabaseTests(unittest.TestCase):
                 10, "server-b", "if-b", "peer-b", "key-b", "phone", "manual"
             )
         )
+
+    def test_named_additional_configs_can_span_servers_and_remain_unique(self):
+        self.assertTrue(
+            self.db.save_client_peer(
+                10, "server-a", "if-a", "peer-a", "key-a", "alice", "primary"
+            )
+        )
+        self.assertTrue(
+            self.db.save_client_peer(
+                10,
+                "server-b",
+                "if-b",
+                "peer-b",
+                "key-b",
+                "phone",
+                "additional",
+                config_name="Телефон",
+            )
+        )
+        self.assertFalse(
+            self.db.save_client_peer(
+                10,
+                "server-c",
+                "if-c",
+                "peer-c",
+                "key-c",
+                "tablet",
+                "additional",
+                config_name="телефон",
+            )
+        )
+        configs = self.db.get_managed_client_configs(10)
+        self.assertEqual(
+            [config["config_name"] for config in configs],
+            [DEFAULT_PRIMARY_CONFIG_NAME, "Телефон"],
+        )
+        additional = configs[1]
+        self.assertTrue(
+            self.db.set_config_admin_enabled(additional["id"], 10, False)
+        )
+        self.db.set_client_peer_enabled("peer-b", False)
+        self.assertEqual(len(self.db.get_managed_client_configs(10)), 2)
+        self.assertEqual(
+            len(self.db.get_managed_client_configs(10, available_only=True)), 1
+        )
+
+    def test_schema_migration_names_primary_but_not_manual_peer(self):
+        handle, legacy_path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        self.addCleanup(
+            lambda: [
+                os.path.exists(legacy_path + suffix)
+                and os.remove(legacy_path + suffix)
+                for suffix in ("", "-wal", "-shm")
+            ]
+        )
+        with closing(sqlite3.connect(legacy_path)) as conn, conn:
+            conn.executescript(
+                """
+                CREATE TABLE client_peers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_user_id INTEGER NOT NULL,
+                    server_key TEXT,
+                    interface_id TEXT,
+                    cascade_peer_id TEXT,
+                    public_key TEXT NOT NULL DEFAULT '',
+                    peer_name TEXT NOT NULL DEFAULT '',
+                    role TEXT NOT NULL DEFAULT 'manual',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(server_key, interface_id, cascade_peer_id),
+                    UNIQUE(telegram_user_id, public_key)
+                );
+                INSERT INTO client_peers(
+                    telegram_user_id, server_key, interface_id, cascade_peer_id,
+                    public_key, peer_name, role
+                ) VALUES
+                    (10, 'server-a', 'if-a', 'primary', 'key-a', 'alice', 'primary'),
+                    (10, 'server-a', 'if-a', 'manual', 'key-b', 'phone', 'manual');
+                """
+            )
+        migrated = Database(legacy_path)
+        peers = {peer["role"]: peer for peer in migrated.get_client_peers(10)}
+        self.assertEqual(peers["primary"]["config_name"], DEFAULT_PRIMARY_CONFIG_NAME)
+        self.assertIsNone(peers["manual"]["config_name"])
+        self.assertEqual(peers["primary"]["admin_enabled"], 1)
 
     def test_extension_uses_current_expiry_for_active_subscription(self):
         self.db.activate_new_access(10, "alice", 30, "30_days", "stars")

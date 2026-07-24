@@ -9,17 +9,20 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from callbacks import (
     AdminClientCallback,
+    AdminConfigCallback,
     AdminDiscountCallback,
     AdminPageCallback,
     RefundConfirmationCallback,
 )
+from cascade_api import CascadeError, CascadeNotFound, CascadeRouter
 from config import get_admin_telegram_ids
-from database import Database
+from database import Database, normalize_config_name
 from utils import format_date_for_user
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin")
 ADMIN_CLIENTS_PAGE_SIZE = 8
+ADMIN_CONFIGS_PAGE_SIZE = 6
 ADMIN_WORKFLOW_TYPE = "admin_flow"
 
 
@@ -166,7 +169,7 @@ def client_list_keyboard(
         )
     if navigation:
         rows.append(navigation)
-    if view == "discount":
+    if view in {"discount", "details"}:
         rows.append(
             [InlineKeyboardButton(text="🔎 Найти клиента", callback_data="admin_search_client")]
         )
@@ -207,11 +210,160 @@ def discount_keyboard(user_id: int) -> InlineKeyboardMarkup:
     rows.append(
         [
             InlineKeyboardButton(
-                text="⬅️ Управление клиентами", callback_data="admin_manage_clients"
+                text="⬅️ К клиенту",
+                callback_data=AdminClientCallback(
+                    action="details", user_id=user_id
+                ).pack(),
             )
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def client_card_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💸 Скидка",
+                    callback_data=AdminClientCallback(
+                        action="discount", user_id=user_id
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text="🗂 Конфиги",
+                    callback_data=AdminConfigCallback(
+                        action="list", user_id=user_id
+                    ).pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ К списку", callback_data="admin_client_list"
+                )
+            ],
+        ]
+    )
+
+
+def config_list_keyboard(
+    db: Database, user_id: int, page: int = 0
+) -> tuple[InlineKeyboardMarkup, int]:
+    configs = db.get_managed_client_configs(user_id)
+    pages = max(1, (len(configs) + ADMIN_CONFIGS_PAGE_SIZE - 1) // ADMIN_CONFIGS_PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    start = page * ADMIN_CONFIGS_PAGE_SIZE
+    rows: list[list[InlineKeyboardButton]] = []
+    for config in configs[start : start + ADMIN_CONFIGS_PAGE_SIZE]:
+        active = bool(config["admin_enabled"])
+        status = "✅" if active and config["enabled"] else ("⏸" if not active else "⚠️")
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{status} {config['config_name']}",
+                    callback_data=AdminConfigCallback(
+                        action="view",
+                        user_id=user_id,
+                        peer_id=int(config["id"]),
+                    ).pack(),
+                )
+            ]
+        )
+    navigation: list[InlineKeyboardButton] = []
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                text="⬅️",
+                callback_data=AdminConfigCallback(
+                    action="page", user_id=user_id, value=page - 1
+                ).pack(),
+            )
+        )
+    if page + 1 < pages:
+        navigation.append(
+            InlineKeyboardButton(
+                text="➡️",
+                callback_data=AdminConfigCallback(
+                    action="page", user_id=user_id, value=page + 1
+                ).pack(),
+            )
+        )
+    if navigation:
+        rows.append(navigation)
+    rows.extend(
+        [
+            [
+                InlineKeyboardButton(
+                    text="➕ Добавить конфиг",
+                    callback_data=AdminConfigCallback(
+                        action="add", user_id=user_id
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ К клиенту",
+                    callback_data=AdminClientCallback(
+                        action="details", user_id=user_id
+                    ).pack(),
+                )
+            ],
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows), page
+
+
+def config_details_keyboard(config: dict[str, Any]) -> InlineKeyboardMarkup:
+    user_id = int(config["telegram_user_id"])
+    peer_id = int(config["id"])
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="✏️ Переименовать",
+                callback_data=AdminConfigCallback(
+                    action="rename", user_id=user_id, peer_id=peer_id
+                ).pack(),
+            )
+        ]
+    ]
+    if config["role"] == "additional":
+        action = "deactivate" if config["admin_enabled"] else "restore"
+        text = "🗑 Деактивировать" if config["admin_enabled"] else "♻️ Восстановить"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=AdminConfigCallback(
+                        action=action, user_id=user_id, peer_id=peer_id
+                    ).pack(),
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ К конфигам",
+                callback_data=AdminConfigCallback(action="list", user_id=user_id).pack(),
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def format_config(config: dict[str, Any]) -> str:
+    if not config["admin_enabled"]:
+        status = "деактивирован"
+    elif config["enabled"]:
+        status = "активен"
+    else:
+        status = "недоступен или срок истёк"
+    return (
+        f"🗂 {config['config_name']}\n\n"
+        f"Тип: {'основной' if config['role'] == 'primary' else 'дополнительный'}\n"
+        f"Сервер: {config['server_key']}\n"
+        f"Интерфейс: {config['interface_id']}\n"
+        f"Состояние: {status}"
+    )
 
 
 def format_client(client: dict[str, Any]) -> str:
@@ -259,7 +411,7 @@ async def open_client_list(
         await safe_answer_callback(callback, "❌ Недостаточно прав.")
         return
     await safe_answer_callback(callback)
-    keyboard, total = client_list_keyboard(db, view="discount", page=0)
+    keyboard, total = client_list_keyboard(db, view="details", page=0)
     await callback.message.edit_text(
         f"👥 Клиенты и скидки\n\nНайдено: {total}", reply_markup=keyboard
     )
@@ -318,7 +470,7 @@ async def change_page(
         view, page = callback_data.view, callback_data.page
     else:
         data = callback.data or ""
-        view = "message" if data.startswith("admin_clients_page_") else "discount"
+        view = "message" if data.startswith("admin_clients_page_") else "details"
         try:
             page = int(data.rsplit("_", 1)[1])
         except ValueError:
@@ -326,6 +478,27 @@ async def change_page(
     keyboard, total = client_list_keyboard(db, view=view, page=page)
     await callback.message.edit_text(
         f"👥 Клиенты\n\nНайдено: {total}", reply_markup=keyboard
+    )
+
+
+@router.callback_query(AdminClientCallback.filter(F.action == "details"))
+async def show_client_details(
+    callback: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    callback_data: AdminClientCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    client = db.get_admin_client_details(callback_data.user_id)
+    if not client:
+        await callback.message.edit_text(
+            "❌ Клиент не найден.", reply_markup=admin_dashboard_keyboard()
+        )
+        return
+    await callback.message.edit_text(
+        format_client(client), reply_markup=client_card_keyboard(callback_data.user_id)
     )
 
 
@@ -412,7 +585,7 @@ async def set_discount(
     )
     await callback.message.edit_text(
         f"✅ Скидка {value}% сохранена.",
-        reply_markup=admin_dashboard_keyboard(),
+        reply_markup=client_card_keyboard(user_id),
     )
 
 
@@ -484,21 +657,492 @@ async def start_stars_refund(
     )
 
 
+@router.callback_query(AdminConfigCallback.filter(F.action.in_({"list", "page"})))
+async def show_client_configs(
+    callback: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    callback_data: AdminConfigCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    if not db.get_admin_client_details(callback_data.user_id):
+        await callback.message.edit_text("❌ Клиент не найден.")
+        return
+    page = callback_data.value if callback_data.action == "page" else 0
+    keyboard, current_page = config_list_keyboard(db, callback_data.user_id, page)
+    configs = db.get_managed_client_configs(callback_data.user_id)
+    await callback.message.edit_text(
+        f"🗂 Конфиги клиента {callback_data.user_id}\n\n"
+        f"Всего: {len(configs)} · Страница: {current_page + 1}",
+        reply_markup=keyboard,
+    )
+
+
+@router.callback_query(AdminConfigCallback.filter(F.action == "view"))
+async def show_config_details(
+    callback: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    callback_data: AdminConfigCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    config = db.get_client_peer(callback_data.peer_id, callback_data.user_id)
+    if not config or config["role"] not in {"primary", "additional"}:
+        await callback.message.edit_text("❌ Конфиг не найден.")
+        return
+    await callback.message.edit_text(
+        format_config(config), reply_markup=config_details_keyboard(config)
+    )
+
+
+@router.callback_query(AdminConfigCallback.filter(F.action == "add"))
+async def start_additional_config(
+    callback: types.CallbackQuery,
+    db: Database,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+    callback_data: AdminConfigCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    if not db.get_primary_client_peer(
+        callback_data.user_id
+    ) or not db.get_subscription_expiry(callback_data.user_id):
+        await callback.message.edit_text(
+            "❌ Для создания нужен основной конфиг и установленный срок доступа.",
+            reply_markup=client_card_keyboard(callback_data.user_id),
+        )
+        return
+    admin_workflows.set(
+        callback.from_user.id,
+        "await_config_name",
+        user_id=callback_data.user_id,
+        service_chat_id=callback.message.chat.id,
+        service_message_id=callback.message.message_id,
+    )
+    await callback.message.edit_text(
+        "Введи название нового конфига (1–48 символов).",
+        reply_markup=cancel_keyboard(),
+    )
+
+
+@router.callback_query(AdminConfigCallback.filter(F.action == "server"))
+async def select_config_server(
+    callback: types.CallbackQuery,
+    cascade_router: CascadeRouter,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+    callback_data: AdminConfigCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    flow = admin_workflows.get(callback.from_user.id)
+    servers = flow.get("servers", []) if flow else []
+    if (
+        not flow
+        or flow.get("state") != "select_config_server"
+        or int(flow.get("user_id", 0)) != callback_data.user_id
+        or not 0 <= callback_data.value < len(servers)
+    ):
+        await callback.message.edit_text("❌ Сценарий создания устарел.")
+        return
+    server_key = str(servers[callback_data.value])
+    try:
+        interfaces = await cascade_router.list_server_interfaces(server_key)
+    except CascadeError:
+        logger.exception("Failed to list Cascade interfaces for %s", server_key)
+        await callback.message.edit_text(
+            "❌ Не удалось получить интерфейсы сервера.",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    options = [
+        {
+            "id": str(item.get("id") or ""),
+            "name": str(item.get("name") or item.get("address") or "Интерфейс"),
+        }
+        for item in interfaces
+        if item.get("id")
+    ]
+    if not options:
+        await callback.message.edit_text(
+            "❌ На сервере нет доступных интерфейсов.",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    admin_workflows.set(
+        callback.from_user.id,
+        "select_config_interface",
+        **{key: value for key, value in flow.items() if key not in {"state", "servers"}},
+        server_key=server_key,
+        interfaces=options,
+    )
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"{item['name']} · {item['id'][:8]}",
+                callback_data=AdminConfigCallback(
+                    action="interface",
+                    user_id=callback_data.user_id,
+                    value=index,
+                ).pack(),
+            )
+        ]
+        for index, item in enumerate(options)
+    ]
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="admin_flow_cancel")])
+    await callback.message.edit_text(
+        f"Выбери интерфейс на сервере {server_key}.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@router.callback_query(AdminConfigCallback.filter(F.action == "interface"))
+async def select_config_interface(
+    callback: types.CallbackQuery,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+    callback_data: AdminConfigCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    flow = admin_workflows.get(callback.from_user.id)
+    interfaces = flow.get("interfaces", []) if flow else []
+    if (
+        not flow
+        or flow.get("state") != "select_config_interface"
+        or int(flow.get("user_id", 0)) != callback_data.user_id
+        or not 0 <= callback_data.value < len(interfaces)
+    ):
+        await callback.message.edit_text("❌ Сценарий создания устарел.")
+        return
+    interface = interfaces[callback_data.value]
+    admin_workflows.set(
+        callback.from_user.id,
+        "confirm_config_create",
+        **{
+            key: value
+            for key, value in flow.items()
+            if key not in {"state", "interfaces"}
+        },
+        interface_id=interface["id"],
+        interface_name=interface["name"],
+    )
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Создать",
+                    callback_data=AdminConfigCallback(
+                        action="create",
+                        user_id=callback_data.user_id,
+                    ).pack(),
+                )
+            ],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_flow_cancel")],
+        ]
+    )
+    await callback.message.edit_text(
+        "Создать дополнительный конфиг?\n\n"
+        f"Название: {flow['config_name']}\n"
+        f"Сервер: {flow['server_key']}\n"
+        f"Интерфейс: {interface['name']} · {interface['id'][:8]}",
+        reply_markup=keyboard,
+    )
+
+
+@router.callback_query(AdminConfigCallback.filter(F.action == "create"))
+async def confirm_config_create(
+    callback: types.CallbackQuery,
+    db: Database,
+    cascade_router: CascadeRouter,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+    callback_data: AdminConfigCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    flow = admin_workflows.get(callback.from_user.id)
+    if (
+        not flow
+        or flow.get("state") != "confirm_config_create"
+        or int(flow.get("user_id", 0)) != callback_data.user_id
+    ):
+        await callback.message.edit_text("❌ Сценарий создания устарел.")
+        return
+    try:
+        config = await cascade_router.create_additional_config(
+            callback_data.user_id,
+            str(flow["config_name"]),
+            str(flow["server_key"]),
+            str(flow["interface_id"]),
+        )
+    except CascadeError:
+        logger.exception("Failed to create an additional configuration")
+        await callback.message.edit_text(
+            "❌ Не удалось создать конфиг. Проверь сервер, интерфейс и ёмкость.",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    admin_workflows.clear(callback.from_user.id)
+    db.log_admin_config_change(
+        callback.from_user.id,
+        callback_data.user_id,
+        int(config["id"]),
+        "admin_create_config",
+        server_key=str(config["server_key"]),
+    )
+    keyboard, _ = config_list_keyboard(db, callback_data.user_id)
+    await callback.message.edit_text(
+        f"✅ Конфиг «{config['config_name']}» создан.", reply_markup=keyboard
+    )
+
+
+@router.callback_query(AdminConfigCallback.filter(F.action == "rename"))
+async def start_config_rename(
+    callback: types.CallbackQuery,
+    db: Database,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+    callback_data: AdminConfigCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    config = db.get_client_peer(callback_data.peer_id, callback_data.user_id)
+    if not config or config["role"] not in {"primary", "additional"}:
+        await callback.message.edit_text("❌ Конфиг не найден.")
+        return
+    admin_workflows.set(
+        callback.from_user.id,
+        "await_config_rename",
+        user_id=callback_data.user_id,
+        peer_id=callback_data.peer_id,
+        service_chat_id=callback.message.chat.id,
+        service_message_id=callback.message.message_id,
+    )
+    await callback.message.edit_text(
+        "Введи новое название конфига (1–48 символов).",
+        reply_markup=cancel_keyboard(),
+    )
+
+
+@router.callback_query(AdminConfigCallback.filter(F.action == "deactivate"))
+async def confirm_config_deactivation(
+    callback: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    callback_data: AdminConfigCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    config = db.get_client_peer(callback_data.peer_id, callback_data.user_id)
+    if not config or config["role"] != "additional":
+        await callback.message.edit_text("❌ Дополнительный конфиг не найден.")
+        return
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🗑 Подтвердить",
+                    callback_data=AdminConfigCallback(
+                        action="deactivate_confirm",
+                        user_id=callback_data.user_id,
+                        peer_id=callback_data.peer_id,
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=AdminConfigCallback(
+                        action="view",
+                        user_id=callback_data.user_id,
+                        peer_id=callback_data.peer_id,
+                    ).pack(),
+                )
+            ],
+        ]
+    )
+    await callback.message.edit_text(
+        f"Деактивировать конфиг «{config['config_name']}»?\n"
+        "Peer останется в Cascade и сможет быть восстановлен.",
+        reply_markup=keyboard,
+    )
+
+
+@router.callback_query(
+    AdminConfigCallback.filter(F.action.in_({"deactivate_confirm", "restore"}))
+)
+async def change_config_state(
+    callback: types.CallbackQuery,
+    db: Database,
+    cascade_router: CascadeRouter,
+    safe_answer_callback,
+    callback_data: AdminConfigCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    active = callback_data.action == "restore"
+    try:
+        config = await cascade_router.set_additional_config_active(
+            callback_data.user_id, callback_data.peer_id, active
+        )
+    except CascadeNotFound:
+        await callback.message.edit_text(
+            "❌ Peer не найден в Cascade. Создай новый дополнительный конфиг."
+        )
+        return
+    except CascadeError:
+        logger.exception("Failed to change additional configuration state")
+        await callback.message.edit_text("❌ Не удалось изменить состояние конфига.")
+        return
+    operation = "admin_restore_config" if active else "admin_deactivate_config"
+    db.log_admin_config_change(
+        callback.from_user.id,
+        callback_data.user_id,
+        callback_data.peer_id,
+        operation,
+        server_key=str(config["server_key"]),
+    )
+    await callback.message.edit_text(
+        "✅ Конфиг восстановлен." if active else "✅ Конфиг деактивирован.",
+        reply_markup=config_details_keyboard(config),
+    )
+
+
 @router.message(ActiveAdminWorkflow())
 async def capture_admin_input(
     message: types.Message,
     bot: Bot,
     db: Database,
+    cascade_router: CascadeRouter,
     admin_workflows: AdminWorkflowService,
 ) -> None:
     flow = admin_workflows.get(message.from_user.id)
     if not flow:
         return
     state = flow["state"]
-    if state == "await_search":
+    if state in {"await_config_name", "await_config_rename"}:
+        try:
+            config_name = normalize_config_name(message.text or "")
+        except ValueError:
+            await bot.edit_message_text(
+                chat_id=flow["service_chat_id"],
+                message_id=flow["service_message_id"],
+                text="Название должно содержать от 1 до 48 символов без управляющих знаков.",
+                reply_markup=cancel_keyboard(),
+            )
+            with suppress(Exception):
+                await message.delete()
+            return
+        existing = db.get_managed_client_configs(int(flow["user_id"]))
+        duplicate = next(
+            (
+                item
+                for item in existing
+                if str(item.get("config_name") or "").casefold()
+                == config_name.casefold()
+                and int(item["id"]) != int(flow.get("peer_id", 0))
+            ),
+            None,
+        )
+        if duplicate:
+            await bot.edit_message_text(
+                chat_id=flow["service_chat_id"],
+                message_id=flow["service_message_id"],
+                text="У этого клиента уже есть конфиг с таким названием.",
+                reply_markup=cancel_keyboard(),
+            )
+            with suppress(Exception):
+                await message.delete()
+            return
+        if state == "await_config_rename":
+            peer_id = int(flow["peer_id"])
+            if not db.rename_managed_config(peer_id, int(flow["user_id"]), config_name):
+                await bot.edit_message_text(
+                    chat_id=flow["service_chat_id"],
+                    message_id=flow["service_message_id"],
+                    text="❌ Не удалось переименовать конфиг.",
+                    reply_markup=cancel_keyboard(),
+                )
+                with suppress(Exception):
+                    await message.delete()
+                return
+            config = db.get_client_peer(peer_id, int(flow["user_id"]))
+            admin_workflows.clear(message.from_user.id)
+            db.log_admin_config_change(
+                message.from_user.id,
+                int(flow["user_id"]),
+                peer_id,
+                "admin_rename_config",
+                server_key=str(config["server_key"]) if config else None,
+            )
+            await bot.edit_message_text(
+                chat_id=flow["service_chat_id"],
+                message_id=flow["service_message_id"],
+                text=f"✅ Конфиг переименован в «{config_name}».",
+                reply_markup=config_details_keyboard(config)
+                if config
+                else admin_dashboard_keyboard(),
+            )
+        else:
+            servers = [
+                server.server_key for server in cascade_router.get_enabled_servers()
+            ]
+            if not servers:
+                await bot.edit_message_text(
+                    chat_id=flow["service_chat_id"],
+                    message_id=flow["service_message_id"],
+                    text="❌ Нет активных Cascade-серверов.",
+                    reply_markup=cancel_keyboard(),
+                )
+                with suppress(Exception):
+                    await message.delete()
+                return
+            admin_workflows.set(
+                message.from_user.id,
+                "select_config_server",
+                **{key: value for key, value in flow.items() if key != "state"},
+                config_name=config_name,
+                servers=servers,
+            )
+            rows = [
+                [
+                    InlineKeyboardButton(
+                        text=server_key,
+                        callback_data=AdminConfigCallback(
+                            action="server",
+                            user_id=int(flow["user_id"]),
+                            value=index,
+                        ).pack(),
+                    )
+                ]
+                for index, server_key in enumerate(servers)
+            ]
+            rows.append(
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_flow_cancel")]
+            )
+            await bot.edit_message_text(
+                chat_id=flow["service_chat_id"],
+                message_id=flow["service_message_id"],
+                text=f"Название: {config_name}\n\nВыбери сервер.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+            )
+    elif state == "await_search":
         query = (message.text or "").strip()[:100]
         keyboard, total = client_list_keyboard(
-            db, view="discount", page=0, query=query
+            db, view="details", page=0, query=query
         )
         admin_workflows.clear(message.from_user.id)
         await bot.edit_message_text(
@@ -536,7 +1180,7 @@ async def capture_admin_input(
             chat_id=flow["service_chat_id"],
             message_id=flow["service_message_id"],
             text=f"✅ Скидка {value}% сохранена.",
-            reply_markup=admin_dashboard_keyboard(),
+            reply_markup=client_card_keyboard(int(flow["user_id"])),
         )
     elif state == "await_refund_charge":
         charge_id = (message.text or "").strip()[:200]
@@ -623,8 +1267,11 @@ async def cancel_flow(
             await callback.bot.delete_message(
                 flow["source_chat_id"], flow["source_message_id"]
             )
+    reply_markup = admin_dashboard_keyboard()
+    if flow and flow.get("user_id") and "config" in str(flow.get("state", "")):
+        reply_markup = client_card_keyboard(int(flow["user_id"]))
     await callback.message.edit_text(
-        "Действие отменено.", reply_markup=admin_dashboard_keyboard()
+        "Действие отменено.", reply_markup=reply_markup
     )
 
 

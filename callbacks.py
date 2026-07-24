@@ -42,6 +42,19 @@ class AdminDiscountCallback(CallbackData, prefix="adiscount"):
     value: int
 
 
+class AdminConfigCallback(CallbackData, prefix="acfg"):
+    action: str
+    user_id: int
+    peer_id: int = 0
+    value: int = 0
+
+
+class ClientConfigCallback(CallbackData, prefix="cfg"):
+    action: str
+    peer_id: int = 0
+    page: int = 0
+
+
 class RefundConfirmationCallback(CallbackData, prefix="refund"):
     payment_id: str
 

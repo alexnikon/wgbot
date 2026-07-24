@@ -18,7 +18,14 @@ from aiogram.exceptions import (
 import bot as bot_module
 from callbacks import PaymentMethod, PaymentMethodCallback, RefundConfirmationCallback
 from database import Database
-from handlers.admin import AdminWorkflowService, admin_dashboard_keyboard
+from handlers.access import client_config_keyboard, config_filename
+from handlers.admin import (
+    AdminWorkflowService,
+    admin_dashboard_keyboard,
+    client_card_keyboard,
+    client_list_keyboard,
+    config_list_keyboard,
+)
 from handlers.fallback import handle_unknown
 from handlers.navigation import _last_start_sent_at, cmd_start
 from handlers.payments import (
@@ -319,6 +326,76 @@ class TelegramDatabaseTests(unittest.TestCase):
     def test_expired_admin_workflow_is_removed(self):
         self.db.set_admin_workflow(1, "input", "waiting", {}, ttl_hours=0)
         self.assertIsNone(self.db.get_admin_workflow(1, "input"))
+
+    def test_named_config_keyboards_hide_manual_and_deactivated_peers(self):
+        self.db.save_client_peer(
+            10, "server-a", "if-a", "primary", "key-a", "alice", "primary"
+        )
+        self.db.save_client_peer(
+            10,
+            "server-b",
+            "if-b",
+            "active",
+            "key-b",
+            "phone",
+            "additional",
+            config_name="Телефон",
+        )
+        self.db.save_client_peer(
+            10,
+            "server-b",
+            "if-b",
+            "disabled",
+            "key-c",
+            "tablet",
+            "additional",
+            enabled=False,
+            config_name="Планшет",
+            admin_enabled=False,
+        )
+        self.assertTrue(
+            self.db.save_client_peer(
+                10, "server-a", "if-a", "manual", "key-d", "legacy", "manual"
+            )
+        )
+
+        client_keyboard, count = client_config_keyboard(self.db, 10)
+        client_labels = [
+            button.text
+            for row in client_keyboard.inline_keyboard
+            for button in row
+        ]
+        self.assertEqual(count, 2)
+        self.assertIn("Основной конфиг", client_labels)
+        self.assertIn("Телефон", client_labels)
+        self.assertNotIn("Планшет", client_labels)
+
+        admin_keyboard, _ = config_list_keyboard(self.db, 10)
+        admin_labels = [
+            button.text
+            for row in admin_keyboard.inline_keyboard
+            for button in row
+        ]
+        self.assertTrue(any("Планшет" in label for label in admin_labels))
+        self.assertFalse(any("legacy" in label for label in admin_labels))
+
+    def test_client_card_exposes_discount_and_config_management(self):
+        labels = [
+            button.text
+            for row in client_card_keyboard(10).inline_keyboard
+            for button in row
+        ]
+        self.assertIn("💸 Скидка", labels)
+        self.assertIn("🗂 Конфиги", labels)
+        self.assertEqual(config_filename("Дом / Mac"), "Дом _ Mac.conf")
+        empty_keyboard, total = client_list_keyboard(
+            self.db, view="details", page=0
+        )
+        self.assertEqual(total, 0)
+        self.assertEqual(
+            empty_keyboard.inline_keyboard[-1][0].text,
+            "⬅️ Управление клиентами",
+        )
 
     def test_daily_legacy_callback_counter_and_zero_streak(self):
         self.db.ensure_telegram_daily_metrics_day()

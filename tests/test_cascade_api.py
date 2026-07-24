@@ -281,6 +281,8 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
         db.save_client_peer(
             10, "server-a", "if-a", "old-peer", "old-key", "alice", "primary"
         )
+        old_primary = db.get_primary_client_peer(10)
+        db.rename_managed_config(old_primary["id"], 10, "Ноутбук")
         servers = [
             CascadeServer("server-a", "https://a.test/admin", "a", "if-a", 1, 2),
             CascadeServer("server-b", "https://b.test/admin", "b", "if-b", 2, 3),
@@ -299,7 +301,197 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
             primary = db.get_primary_client_peer(10)
             self.assertEqual(primary["server_key"], "server-a")
             self.assertEqual(primary["cascade_peer_id"], "new-peer")
+            self.assertEqual(primary["config_name"], "Ноутбук")
             self.assertEqual(db.get_peer_count(10), 1)
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_additional_config_is_created_on_selected_interface(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.activate_new_access(10, "alice", 30, "30_days", "stars")
+        db.save_client_peer(
+            10, "server-a", "if-a", "primary", "primary-key", "alice", "primary"
+        )
+
+        class AdditionalAPI:
+            def __init__(self):
+                self.created_interface = None
+                self.disabled = []
+                self.deleted = []
+
+            async def list_interfaces(self):
+                return [
+                    {"id": "if-b", "name": "Mobile"},
+                    {"id": "if-c", "name": "Tablet"},
+                ]
+
+            async def list_peers(self, interface_id=None):
+                return []
+
+            async def create_peer(self, name, expired_at, interface_id=None):
+                self.created_interface = interface_id
+                return {
+                    "id": "additional",
+                    "name": name,
+                    "publicKey": "additional-key",
+                }
+
+            async def download_config(self, peer_id, interface_id=None):
+                return b"config"
+
+            async def disable_peer(self, peer_id, interface_id=None):
+                self.disabled.append(peer_id)
+
+            async def delete_peer(self, peer_id, interface_id=None):
+                self.deleted.append(peer_id)
+
+        server = CascadeServer(
+            "server-b", "https://b.test/admin", "token", "if-b", 1, 10
+        )
+        api = AdditionalAPI()
+        router = CascadeRouter(db, servers=[])
+        router.servers = [server]
+        router.apis = {"server-b": api}
+        try:
+            config = await router.create_additional_config(
+                10, "Телефон", "server-b", "if-c"
+            )
+            self.assertEqual(api.created_interface, "if-c")
+            self.assertEqual(config["role"], "additional")
+            self.assertEqual(config["config_name"], "Телефон")
+            self.assertEqual(config["server_key"], "server-b")
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_sync_does_not_reenable_admin_disabled_config(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.upsert_client(10, "alice")
+        db.save_client_peer(
+            10, "server-a", "if-a", "primary", "primary-key", "alice", "primary"
+        )
+        db.save_client_peer(
+            10,
+            "server-b",
+            "if-b",
+            "additional",
+            "additional-key",
+            "phone",
+            "additional",
+            enabled=False,
+            config_name="Телефон",
+            admin_enabled=False,
+        )
+
+        class AccessSyncAPI:
+            def __init__(self):
+                self.enabled = []
+                self.disabled = []
+
+            async def update_expiry(self, peer_id, expire_date, interface_id=None):
+                return None
+
+            async def enable_peer(self, peer_id, interface_id=None):
+                self.enabled.append(peer_id)
+
+            async def disable_peer(self, peer_id, interface_id=None):
+                self.disabled.append(peer_id)
+
+        api_a = AccessSyncAPI()
+        api_b = AccessSyncAPI()
+        router = CascadeRouter(db, servers=[])
+        router.apis = {"server-a": api_a, "server-b": api_b}
+        try:
+            result = await router.sync_user_access(10, "2030-01-01 00:00:00")
+            self.assertEqual(result["updated"], 2)
+            self.assertEqual(api_a.enabled, ["primary"])
+            self.assertEqual(api_b.enabled, [])
+            self.assertEqual(api_b.disabled, ["additional"])
+            additional = db.get_managed_client_configs(10)[1]
+            self.assertEqual(additional["admin_enabled"], 0)
+            self.assertEqual(additional["enabled"], 0)
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_expired_additional_is_disabled_and_duplicate_is_compensated(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.activate_new_access(10, "alice", 30, "30_days", "stars")
+        db.save_client_peer(
+            10, "server-a", "if-a", "primary", "primary-key", "alice", "primary"
+        )
+        with db._connect() as conn:
+            conn.execute(
+                "UPDATE subscriptions SET expire_date='2000-01-01 00:00:00' "
+                "WHERE telegram_user_id=10"
+            )
+
+        class ExpiredAPI:
+            def __init__(self):
+                self.created = 0
+                self.disabled = []
+                self.deleted = []
+
+            async def list_interfaces(self):
+                return [{"id": "if-b", "name": "Mobile"}]
+
+            async def list_peers(self, interface_id=None):
+                return []
+
+            async def create_peer(self, name, expired_at, interface_id=None):
+                self.created += 1
+                return {
+                    "id": f"additional-{self.created}",
+                    "name": name,
+                    "publicKey": f"key-{self.created}",
+                }
+
+            async def download_config(self, peer_id, interface_id=None):
+                return b"config"
+
+            async def disable_peer(self, peer_id, interface_id=None):
+                self.disabled.append(peer_id)
+
+            async def delete_peer(self, peer_id, interface_id=None):
+                self.deleted.append(peer_id)
+
+        server = CascadeServer(
+            "server-b", "https://b.test/admin", "token", "if-b", 1, 10
+        )
+        api = ExpiredAPI()
+        router = CascadeRouter(db, servers=[])
+        router.servers = [server]
+        router.apis = {"server-b": api}
+        try:
+            config = await router.create_additional_config(
+                10, "Телефон", "server-b", "if-b"
+            )
+            self.assertEqual(config["enabled"], 0)
+            self.assertEqual(api.disabled, ["additional-1"])
+            with self.assertRaisesRegex(
+                CascadeError, "Failed to persist the additional"
+            ):
+                await router.create_additional_config(
+                    10, "телефон", "server-b", "if-b"
+                )
+            self.assertEqual(api.deleted, ["additional-2"])
+            self.assertEqual(len(db.get_managed_client_configs(10)), 2)
         finally:
             for suffix in ("", "-wal", "-shm"):
                 try:

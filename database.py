@@ -10,6 +10,20 @@ from typing import Any
 from config import DATABASE_FILE
 
 logger = logging.getLogger(__name__)
+DEFAULT_PRIMARY_CONFIG_NAME = "Основной конфиг"
+MAX_CONFIG_NAME_LENGTH = 48
+
+
+def normalize_config_name(value: str) -> str:
+    """Normalize and validate a user-facing configuration name."""
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError("Configuration name contains control characters")
+    normalized = " ".join(value.split())
+    if not normalized or len(normalized) > MAX_CONFIG_NAME_LENGTH:
+        raise ValueError(
+            f"Configuration name must contain 1-{MAX_CONFIG_NAME_LENGTH} characters"
+        )
+    return normalized
 
 
 class Database:
@@ -72,6 +86,8 @@ class Database:
                     peer_name TEXT NOT NULL DEFAULT '',
                     role TEXT NOT NULL DEFAULT 'manual',
                     enabled INTEGER NOT NULL DEFAULT 1,
+                    config_name TEXT,
+                    admin_enabled INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(server_key, interface_id, cascade_peer_id),
@@ -192,6 +208,24 @@ class Database:
             self._ensure_column(conn, "clients", "last_telegram_error", "TEXT")
             self._ensure_column(
                 conn, "clients", "telegram_reachability_updated_at", "TEXT"
+            )
+            self._ensure_column(conn, "client_peers", "config_name", "TEXT")
+            self._ensure_column(
+                conn, "client_peers", "admin_enabled", "INTEGER NOT NULL DEFAULT 1"
+            )
+            conn.execute(
+                """
+                UPDATE client_peers SET config_name=?
+                WHERE role='primary' AND (config_name IS NULL OR trim(config_name)='')
+                """,
+                (DEFAULT_PRIMARY_CONFIG_NAME,),
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_client_peers_config_name
+                ON client_peers(telegram_user_id, config_name COLLATE NOCASE)
+                WHERE config_name IS NOT NULL AND role IN ('primary', 'additional')
+                """
             )
             self._ensure_column(conn, "star_transactions", "review_token", "TEXT")
             conn.execute(
@@ -431,26 +465,61 @@ class Database:
         peer_name: str,
         role: str = "primary",
         enabled: bool = True,
+        config_name: str | None = None,
+        admin_enabled: bool = True,
     ) -> bool:
         self.upsert_client(user_id)
         try:
             with self._connect() as conn:
-                other_assignment = conn.execute(
-                    """
-                    SELECT server_key, interface_id FROM client_peers
-                    WHERE telegram_user_id=? AND server_key IS NOT NULL
-                      AND (server_key != ? OR interface_id != ?) LIMIT 1
-                    """,
-                    (user_id, server_key, interface_id),
-                ).fetchone()
-                if other_assignment:
-                    logger.error(
-                        "User %s is already assigned to Cascade server %s interface %s",
-                        user_id,
-                        other_assignment[0],
-                        other_assignment[1],
+                conn.execute("BEGIN IMMEDIATE")
+                if role != "additional":
+                    other_assignment = conn.execute(
+                        """
+                        SELECT server_key, interface_id FROM client_peers
+                        WHERE telegram_user_id=? AND server_key IS NOT NULL
+                          AND role != 'additional'
+                          AND (server_key != ? OR interface_id != ?) LIMIT 1
+                        """,
+                        (user_id, server_key, interface_id),
+                    ).fetchone()
+                    if other_assignment:
+                        logger.error(
+                            "User %s is already assigned to Cascade server %s interface %s",
+                            user_id,
+                            other_assignment[0],
+                            other_assignment[1],
+                        )
+                        return False
+                if role == "primary":
+                    current = conn.execute(
+                        """
+                        SELECT config_name FROM client_peers
+                        WHERE telegram_user_id=? AND role='primary' LIMIT 1
+                        """,
+                        (user_id,),
+                    ).fetchone()
+                    config_name = (
+                        config_name
+                        or (current[0] if current and current[0] else None)
+                        or DEFAULT_PRIMARY_CONFIG_NAME
                     )
-                    return False
+                if config_name is not None:
+                    config_name = normalize_config_name(config_name)
+                    existing_names = conn.execute(
+                        """
+                        SELECT config_name, role FROM client_peers
+                        WHERE telegram_user_id=? AND role IN ('primary', 'additional')
+                          AND config_name IS NOT NULL
+                          AND public_key != ?
+                        """,
+                        (user_id, public_key),
+                    ).fetchall()
+                    if any(
+                        str(row[0]).casefold() == config_name.casefold()
+                        and not (role == "primary" and row[1] == "primary")
+                        for row in existing_names
+                    ):
+                        return False
                 if role == "primary":
                     conn.execute(
                         "DELETE FROM client_peers WHERE telegram_user_id=? AND role='primary'",
@@ -460,8 +529,8 @@ class Database:
                     """
                     INSERT INTO client_peers(
                         telegram_user_id, server_key, interface_id, cascade_peer_id,
-                        public_key, peer_name, role, enabled
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        public_key, peer_name, role, enabled, config_name, admin_enabled
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(telegram_user_id, public_key) DO UPDATE SET
                         server_key=excluded.server_key,
                         interface_id=excluded.interface_id,
@@ -469,6 +538,8 @@ class Database:
                         peer_name=excluded.peer_name,
                         role=excluded.role,
                         enabled=excluded.enabled,
+                        config_name=COALESCE(excluded.config_name, client_peers.config_name),
+                        admin_enabled=excluded.admin_enabled,
                         updated_at=CURRENT_TIMESTAMP
                     """,
                     (
@@ -480,6 +551,8 @@ class Database:
                         peer_name,
                         role,
                         int(enabled),
+                        config_name,
+                        int(admin_enabled),
                     ),
                 )
                 conn.commit()
@@ -512,11 +585,135 @@ class Database:
             ).fetchone()
             return dict(row) if row else None
 
+    def get_client_peer(self, peer_id: int, user_id: int | None = None) -> dict[str, Any] | None:
+        sql = "SELECT * FROM client_peers WHERE id=?"
+        params: tuple[Any, ...] = (peer_id,)
+        if user_id is not None:
+            sql += " AND telegram_user_id=?"
+            params = (peer_id, user_id)
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(sql, params).fetchone()
+            return dict(row) if row else None
+
+    def get_client_peer_by_cascade_id(
+        self, server_key: str, interface_id: str, cascade_peer_id: str
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT * FROM client_peers
+                WHERE server_key=? AND interface_id=? AND cascade_peer_id=?
+                LIMIT 1
+                """,
+                (server_key, interface_id, cascade_peer_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_managed_client_configs(
+        self, user_id: int, *, available_only: bool = False
+    ) -> list[dict[str, Any]]:
+        sql = """
+            SELECT * FROM client_peers
+            WHERE telegram_user_id=? AND role IN ('primary', 'additional')
+              AND server_key IS NOT NULL AND interface_id IS NOT NULL
+              AND cascade_peer_id IS NOT NULL
+        """
+        if available_only:
+            sql += (
+                " AND admin_enabled=1"
+                " AND (role='primary' OR (role='additional' AND enabled=1))"
+            )
+        sql += " ORDER BY CASE role WHEN 'primary' THEN 0 ELSE 1 END, id"
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            return [dict(row) for row in conn.execute(sql, (user_id,)).fetchall()]
+
+    def rename_managed_config(self, peer_id: int, user_id: int, name: str) -> bool:
+        normalized = normalize_config_name(name)
+        try:
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                existing_names = conn.execute(
+                    """
+                    SELECT config_name FROM client_peers
+                    WHERE telegram_user_id=? AND id != ?
+                      AND role IN ('primary', 'additional')
+                      AND config_name IS NOT NULL
+                    """,
+                    (user_id, peer_id),
+                ).fetchall()
+                if any(
+                    str(row[0]).casefold() == normalized.casefold()
+                    for row in existing_names
+                ):
+                    return False
+                cursor = conn.execute(
+                    """
+                    UPDATE client_peers SET config_name=?, updated_at=CURRENT_TIMESTAMP
+                    WHERE id=? AND telegram_user_id=?
+                      AND role IN ('primary', 'additional')
+                    """,
+                    (normalized, peer_id, user_id),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+        except sqlite3.IntegrityError:
+            return False
+
+    def set_config_admin_enabled(
+        self, peer_id: int, user_id: int, admin_enabled: bool
+    ) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE client_peers SET admin_enabled=?, updated_at=CURRENT_TIMESTAMP
+                WHERE id=? AND telegram_user_id=? AND role='additional'
+                """,
+                (int(admin_enabled), peer_id, user_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def get_subscription_expiry(self, user_id: int) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT expire_date FROM subscriptions WHERE telegram_user_id=?",
+                (user_id,),
+            ).fetchone()
+            return str(row[0]) if row and row[0] else None
+
     def set_client_peer_enabled(self, cascade_peer_id: str, enabled: bool) -> None:
         with self._connect() as conn:
             conn.execute(
                 "UPDATE client_peers SET enabled=?, updated_at=CURRENT_TIMESTAMP WHERE cascade_peer_id=?",
                 (int(enabled), cascade_peer_id),
+            )
+            conn.commit()
+
+    def log_admin_config_change(
+        self,
+        admin_id: int,
+        user_id: int,
+        peer_id: int,
+        operation: str,
+        *,
+        server_key: str | None = None,
+    ) -> None:
+        details = json.dumps(
+            {
+                "admin_id": admin_id,
+                "client_id": user_id,
+                "peer_id": peer_id,
+                "server_key": server_key,
+            },
+            sort_keys=True,
+        )
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                (f"telegram:{user_id}", operation, details),
             )
             conn.commit()
 
