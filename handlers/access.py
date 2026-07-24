@@ -7,7 +7,7 @@ from callbacks import ClientConfigCallback
 from cascade_api import CascadeNotFound, CascadeRouter
 from database import Database
 from payment import PaymentManager
-from utils import config_filename, format_date_for_user, parse_date_flexible
+from utils import format_date_for_user, location_config_filename, parse_date_flexible
 
 logger = logging.getLogger(__name__)
 router = Router(name="access")
@@ -255,15 +255,16 @@ async def download_client_config(
                     )
                     return
                 peer_config = new_config
+            server_name = cascade_router.get_server_name(
+                str(config["server_key"])
+            )
             sent = await send_config_with_confirmation(
                 callback_query.message.chat.id,
                 peer_config,
                 source_message=callback_query.message,
                 caption=None,
-                filename=config_filename(str(config["config_name"])),
-                server_name=cascade_router.get_server_name(
-                    str(config["server_key"])
-                ),
+                filename=location_config_filename(server_name),
+                server_name=server_name,
                 reply_markup=config_file_back_keyboard(callback_data.page),
             )
             if not sent:

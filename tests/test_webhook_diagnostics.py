@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from starlette.requests import Request
 
@@ -52,3 +52,22 @@ class WebhookDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         payload = response
         self.assertTrue(payload["ready"])
         self.assertEqual(payload["database"]["clients"], 2)
+
+    async def test_config_document_uses_location_filename(self):
+        client = SimpleNamespace(
+            post=AsyncMock(return_value=SimpleNamespace(is_success=True))
+        )
+        with patch.object(
+            webhook_server, "get_telegram_http_client", return_value=client
+        ):
+            sent = await webhook_server.send_config_with_confirmation(
+                10,
+                b"config",
+                filename="USA-NY.conf",
+            )
+
+        self.assertTrue(sent)
+        self.assertEqual(
+            client.post.await_args.kwargs["files"]["document"][0],
+            "USA-NY.conf",
+        )

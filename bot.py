@@ -55,6 +55,7 @@ from telegram_runtime import (
 from utils import (
     format_date_for_user,
     generate_peer_name,
+    location_config_filename,
     parse_date_flexible,
 )
 from yookassa_client import YooKassaClient
@@ -664,7 +665,16 @@ async def retry_provisioning_tasks() -> None:
     """Run the durable Cascade provisioning worker."""
 
     async def send_worker_config(user_id: int, config: bytes) -> bool:
-        return await send_config_with_confirmation(user_id, config, caption=None)
+        primary = db.get_primary_client_peer(user_id)
+        if not primary:
+            return await send_config_with_confirmation(user_id, config, caption=None)
+        server_name = cascade_router.get_server_name(str(primary["server_key"]))
+        return await send_config_with_confirmation(
+            user_id,
+            config,
+            caption=None,
+            filename=location_config_filename(server_name),
+        )
 
     worker = ProvisioningWorker(
         db,
@@ -689,8 +699,6 @@ async def main(services: AppServices):
         logger.info("Cascade startup validation: %s", cascade_status)
         if not any(status.startswith("ok") for status in cascade_status.values()):
             raise RuntimeError("No healthy Cascade server is configured")
-        manual_reconciliation = await cascade_router.reconcile_manual_configs()
-        logger.info("Manual config reconciliation: %s", manual_reconciliation)
         services.runtime_ready = True
 
         # Start background checks for expired peers and notifications

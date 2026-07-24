@@ -42,6 +42,8 @@ chmod 600 secrets/cascade_servers.json
 
 Each server entry requires a stable `server_key`, Cascade URL including the hidden admin path, API token, target interface UUID, priority, `max_peers`, and `client_group`. `server_key` is an immutable internal identifier persisted in SQLite (`client_peers` and `server_reservations`); renaming it only in the JSON registry breaks existing assignments. Use `server_name` for the client-facing location name. It may be changed without a database migration and falls back to `server_key` when omitted. New peers are assigned to the configured client group (`Basic` by default). Servers are tried in ascending priority order. Tokens and real server data must not be committed.
 
+Downloaded configuration files use the current `server_name` as their filename. Whitespace and punctuation are normalized to hyphens, for example `USA NY` becomes `USA-NY.conf`.
+
 Keep disabled server entries in the registry while any client is assigned to them. `enabled: false` stops new placement but still allows existing clients to download configs and synchronize expiration.
 
 ## Run

@@ -5,7 +5,6 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import StrEnum
 from pathlib import Path
 from typing import Any
 from weakref import WeakValueDictionary
@@ -33,12 +32,6 @@ class CascadeNotFound(CascadeError):
 
 class CascadeCapacityError(CascadeError):
     """No configured Cascade server has free peer capacity."""
-
-
-class ManualPeerPresence(StrEnum):
-    EXACT = "exact"
-    MISMATCH = "mismatch"
-    MISSING = "missing"
 
 
 @dataclass(frozen=True)
@@ -616,102 +609,6 @@ class CascadeRouter:
             raise
         return peer, content
 
-    async def inspect_manual_peer(
-        self, peer: dict[str, Any]
-    ) -> ManualPeerPresence:
-        """Compare a manual database record with its Cascade interface."""
-        peers = await self.get_api(str(peer["server_key"])).list_peers(
-            str(peer["interface_id"])
-        )
-        expected_id = str(peer["cascade_peer_id"])
-        expected_key = str(peer["public_key"])
-        matched_id = next(
-            (item for item in peers if str(item.get("id") or "") == expected_id),
-            None,
-        )
-        if matched_id and str(matched_id.get("publicKey") or "") == expected_key:
-            return ManualPeerPresence.EXACT
-        if matched_id or any(
-            str(item.get("publicKey") or "") == expected_key for item in peers
-        ):
-            return ManualPeerPresence.MISMATCH
-        return ManualPeerPresence.MISSING
-
-    async def reconcile_manual_configs(self) -> dict[str, int]:
-        """Promote exact historical peers without changing Cascade state."""
-        manual_peers = self.db.get_manual_client_peers()
-        result = {
-            "total": len(manual_peers),
-            "promoted": 0,
-            "missing": 0,
-            "mismatch": 0,
-            "unavailable": 0,
-            "skipped": 0,
-        }
-        grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        for peer in manual_peers:
-            key = (str(peer["server_key"]), str(peer["interface_id"]))
-            grouped.setdefault(key, []).append(peer)
-
-        for (server_key, interface_id), peers in grouped.items():
-            try:
-                cascade_peers = await self.get_api(server_key).list_peers(interface_id)
-            except CascadeError:
-                result["unavailable"] += len(peers)
-                logger.exception(
-                    "Manual config reconciliation could not read %s/%s",
-                    server_key,
-                    interface_id,
-                )
-                continue
-            by_id = {
-                str(item.get("id") or ""): item
-                for item in cascade_peers
-                if item.get("id")
-            }
-            by_public_key = {
-                str(item.get("publicKey") or ""): item
-                for item in cascade_peers
-                if item.get("publicKey")
-            }
-            for peer in peers:
-                peer_id = int(peer["id"])
-                expected_id = str(peer["cascade_peer_id"])
-                expected_key = str(peer["public_key"])
-                matched = by_id.get(expected_id)
-                exact = (
-                    matched is not None
-                    and str(matched.get("publicKey") or "") == expected_key
-                )
-                if exact:
-                    promoted = self.db.promote_manual_peer(peer_id)
-                    if not promoted:
-                        result["skipped"] += 1
-                        continue
-                    self.db.log_system_config_change(
-                        int(peer["telegram_user_id"]),
-                        peer_id,
-                        "system_promote_manual_config",
-                        server_key=server_key,
-                    )
-                    result["promoted"] += 1
-                    continue
-
-                self.db.set_client_peer_enabled_by_id(peer_id, False)
-                if matched is not None or expected_key in by_public_key:
-                    result["mismatch"] += 1
-                    logger.warning(
-                        "Manual peer identity mismatch for database peer %s",
-                        peer_id,
-                    )
-                else:
-                    result["missing"] += 1
-                    logger.warning(
-                        "Manual peer is missing for database peer %s",
-                        peer_id,
-                    )
-        return result
-
     async def create_additional_config(
         self,
         user_id: int,
@@ -855,7 +752,7 @@ class CascadeRouter:
                 self.db.set_client_peer_enabled(peer["cascade_peer_id"], False)
                 result["missing"] += 1
                 logger.warning(
-                    "Skipping missing manual Cascade peer %s for user %s",
+                    "Skipping missing additional Cascade peer %s for user %s",
                     peer["cascade_peer_id"],
                     user_id,
                 )

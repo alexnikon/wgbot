@@ -20,7 +20,7 @@ from config import (
 from database import Database
 from logging_setup import configure_logging
 from services import AppServices
-from utils import format_date_for_user, generate_peer_name
+from utils import format_date_for_user, generate_peer_name, location_config_filename
 from yookassa_client import (
     YooKassaClient,
     YooKassaError,
@@ -128,11 +128,13 @@ async def send_telegram_document(
     return False
 
 
-async def send_config_with_confirmation(chat_id: int, config: bytes | str) -> bool:
+async def send_config_with_confirmation(
+    chat_id: int, config: bytes | str, filename: str = "nikonVPN.conf"
+) -> bool:
     try:
         response = await get_telegram_http_client().post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
-            files={"document": ("nikonVPN.conf", config, "application/octet-stream")},
+            files={"document": (filename, config, "application/octet-stream")},
             data={
                 "chat_id": str(chat_id),
                 "caption": (
@@ -254,7 +256,17 @@ async def process_successful_payment(payment_data: dict) -> None:
             _, config = await cascade_router.create_user_peer(
                 user_id, username, peer_name, expire_date
             )
-            if not await send_config_with_confirmation(user_id, config):
+            primary_peer = await asyncio.to_thread(db.get_primary_client_peer, user_id)
+            server_name = (
+                cascade_router.get_server_name(str(primary_peer["server_key"]))
+                if primary_peer
+                else ""
+            )
+            if not await send_config_with_confirmation(
+                user_id,
+                config,
+                filename=location_config_filename(server_name),
+            ):
                 await send_telegram_message(
                     user_id,
                     "✅ Доступ активирован, но конфиг не удалось отправить. Используй /connect.",

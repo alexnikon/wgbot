@@ -14,15 +14,10 @@ from callbacks import (
     AdminPageCallback,
     RefundConfirmationCallback,
 )
-from cascade_api import (
-    CascadeError,
-    CascadeNotFound,
-    CascadeRouter,
-    ManualPeerPresence,
-)
+from cascade_api import CascadeError, CascadeNotFound, CascadeRouter
 from config import get_admin_telegram_ids
 from database import Database, normalize_config_name
-from utils import config_filename, format_date_for_user
+from utils import format_date_for_user, location_config_filename
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin")
@@ -321,9 +316,7 @@ def config_list_keyboard(
 def config_details_keyboard(config: dict[str, Any]) -> InlineKeyboardMarkup:
     user_id = int(config["telegram_user_id"])
     peer_id = int(config["id"])
-    can_download = config.get("payment_status") == "paid" and (
-        config["role"] != "manual" or bool(config["enabled"])
-    )
+    can_download = config.get("payment_status") == "paid"
     rows = [
         *(
             [
@@ -367,19 +360,6 @@ def config_details_keyboard(config: dict[str, Any]) -> InlineKeyboardMarkup:
                 )
             ]
         )
-    elif config["role"] == "manual" and not config["enabled"]:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="🧹 Удалить устаревшую запись",
-                    callback_data=AdminConfigCallback(
-                        action="delete_manual",
-                        user_id=user_id,
-                        peer_id=peer_id,
-                    ).pack(),
-                )
-            ]
-        )
     rows.append(
         [
             InlineKeyboardButton(
@@ -411,7 +391,7 @@ def config_display_name(config: dict[str, Any]) -> str:
     return str(
         config.get("config_name")
         or config.get("peer_name")
-        or "Ручной конфиг"
+        or "Конфиг"
     )
 
 
@@ -431,7 +411,6 @@ def format_config(config: dict[str, Any], server_name: str | None = None) -> str
     role_label = {
         "primary": "основной",
         "additional": "дополнительный",
-        "manual": "ручной",
     }.get(str(config["role"]), str(config["role"]))
     return (
         f"🗂 {config_display_name(config)}\n\n"
@@ -823,10 +802,7 @@ async def download_paid_client_config(
             chat_id=callback.from_user.id,
             document=types.BufferedInputFile(
                 file=content,
-                filename=config_filename(
-                    str(config["config_name"]),
-                    prefix=f"{callback_data.user_id}-",
-                ),
+                filename=location_config_filename(server_name),
             ),
             caption=(
                 f"Клиент: {callback_data.user_id}\n"
@@ -866,111 +842,6 @@ async def download_paid_client_config(
         callback_data.peer_id,
         "admin_download_config",
         server_key=str(config["server_key"]),
-    )
-
-
-@router.callback_query(AdminConfigCallback.filter(F.action == "delete_manual"))
-async def confirm_stale_manual_cleanup(
-    callback: types.CallbackQuery,
-    db: Database,
-    safe_answer_callback,
-    callback_data: AdminConfigCallback,
-) -> None:
-    await safe_answer_callback(callback)
-    if not is_admin(callback.from_user.id):
-        return
-    config = db.get_admin_managed_config(
-        callback_data.peer_id, callback_data.user_id
-    )
-    if not config or config["role"] != "manual":
-        await callback.message.edit_text("❌ Ручной конфиг не найден.")
-        return
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🧹 Подтвердить очистку",
-                    callback_data=AdminConfigCallback(
-                        action="delete_manual_confirm",
-                        user_id=callback_data.user_id,
-                        peer_id=callback_data.peer_id,
-                    ).pack(),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Назад",
-                    callback_data=AdminConfigCallback(
-                        action="view",
-                        user_id=callback_data.user_id,
-                        peer_id=callback_data.peer_id,
-                    ).pack(),
-                )
-            ],
-        ]
-    )
-    await callback.message.edit_text(
-        f"Удалить локальную запись «{config_display_name(config)}»?\n\n"
-        "Перед удалением бот повторно проверит, что peer отсутствует в Cascade. "
-        "Сам peer в Cascade удаляться не будет.",
-        reply_markup=keyboard,
-    )
-
-
-@router.callback_query(
-    AdminConfigCallback.filter(F.action == "delete_manual_confirm")
-)
-async def delete_stale_manual_record(
-    callback: types.CallbackQuery,
-    db: Database,
-    cascade_router: CascadeRouter,
-    safe_answer_callback,
-    callback_data: AdminConfigCallback,
-) -> None:
-    await safe_answer_callback(callback)
-    if not is_admin(callback.from_user.id):
-        return
-    config = db.get_admin_managed_config(
-        callback_data.peer_id, callback_data.user_id
-    )
-    if not config or config["role"] != "manual":
-        await callback.message.edit_text("❌ Ручной конфиг не найден.")
-        return
-    try:
-        presence = await cascade_router.inspect_manual_peer(config)
-    except CascadeError:
-        logger.exception("Failed to verify a stale manual peer before cleanup")
-        await callback.message.edit_text(
-            "❌ Сервер недоступен. Очистка отменена.",
-            reply_markup=config_error_back_keyboard(
-                callback_data.user_id, callback_data.peer_id
-            ),
-        )
-        return
-    if presence != ManualPeerPresence.MISSING:
-        await callback.message.edit_text(
-            "❌ Peer или его public key всё ещё найден в Cascade. Очистка отменена.",
-            reply_markup=config_error_back_keyboard(
-                callback_data.user_id, callback_data.peer_id
-            ),
-        )
-        return
-    if not db.delete_manual_peer_record(
-        callback_data.peer_id, callback_data.user_id
-    ):
-        await callback.message.edit_text("❌ Не удалось удалить локальную запись.")
-        return
-    db.log_admin_config_change(
-        callback.from_user.id,
-        callback_data.user_id,
-        callback_data.peer_id,
-        "admin_delete_stale_manual_config",
-        server_key=str(config["server_key"]),
-    )
-    keyboard, _ = config_list_keyboard(db, callback_data.user_id)
-    await callback.message.edit_text(
-        "✅ Устаревшая локальная запись удалена.",
-        reply_markup=keyboard,
     )
 
 

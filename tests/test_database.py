@@ -113,7 +113,14 @@ class DatabaseTests(unittest.TestCase):
         )
         self.assertTrue(
             self.db.save_client_peer(
-                10, "server-a", "if-a", "peer-b", "key-b", "phone", "manual"
+                10,
+                "server-a",
+                "if-a",
+                "peer-b",
+                "key-b",
+                "phone",
+                "additional",
+                config_name="Phone",
             )
         )
         clients, total = self.db.get_admin_clients_page(0, 8, "alice")
@@ -159,7 +166,7 @@ class DatabaseTests(unittest.TestCase):
         )
         self.assertFalse(
             self.db.save_client_peer(
-                10, "server-b", "if-b", "peer-b", "key-b", "phone", "manual"
+                10, "server-b", "if-b", "peer-b", "key-b", "phone", "primary"
             )
         )
 
@@ -240,106 +247,7 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(config["admin_enabled"], 0)
         self.assertIsNone(self.db.get_admin_managed_config(peer_id, 11))
 
-    def test_manual_peer_promotion_preserves_identity_and_is_idempotent(self):
-        self.db.ensure_subscription(
-            10, "alice", "2030-01-01 00:00:00", "paid", "30_days", "stars"
-        )
-        self.assertTrue(
-            self.db.save_client_peer(
-                10, "server-a", "if-a", "primary", "primary-key", "alice", "primary"
-            )
-        )
-        self.assertTrue(
-            self.db.save_client_peer(
-                10,
-                "server-a",
-                "if-a",
-                "manual-peer",
-                "manual-key",
-                "  Alice   phone  ",
-                "manual",
-                enabled=False,
-            )
-        )
-        manual = next(
-            peer for peer in self.db.get_client_peers(10) if peer["role"] == "manual"
-        )
-
-        promoted = self.db.promote_manual_peer(manual["id"])
-
-        self.assertEqual(promoted["role"], "additional")
-        self.assertEqual(promoted["config_name"], "Alice phone")
-        self.assertEqual(promoted["cascade_peer_id"], "manual-peer")
-        self.assertEqual(promoted["public_key"], "manual-key")
-        self.assertEqual(promoted["server_key"], "server-a")
-        self.assertEqual(promoted["interface_id"], "if-a")
-        self.assertEqual(promoted["enabled"], 0)
-        self.assertEqual(promoted["admin_enabled"], 1)
-        self.assertIsNone(self.db.promote_manual_peer(manual["id"]))
-        self.assertEqual(len(self.db.get_managed_client_configs(10)), 2)
-
-    def test_manual_peer_promotion_uses_deterministic_unique_suffixes(self):
-        self.db.ensure_subscription(
-            10, "alice", "2030-01-01 00:00:00", "paid", "30_days", "stars"
-        )
-        self.db.save_client_peer(
-            10, "server-a", "if-a", "primary", "primary-key", "alice", "primary"
-        )
-        self.db.rename_managed_config(
-            self.db.get_primary_client_peer(10)["id"], 10, "Phone"
-        )
-        for number in (1, 2):
-            self.assertTrue(
-                self.db.save_client_peer(
-                    10,
-                    "server-a",
-                    "if-a",
-                    f"manual-{number}",
-                    f"manual-key-{number}",
-                    "phone",
-                    "manual",
-                )
-            )
-
-        manual_ids = [
-            peer["id"]
-            for peer in self.db.get_client_peers(10)
-            if peer["role"] == "manual"
-        ]
-        names = [
-            self.db.promote_manual_peer(peer_id)["config_name"]
-            for peer_id in manual_ids
-        ]
-
-        self.assertEqual(names, ["phone (2)", "phone (3)"])
-
-    def test_manual_peer_requires_primary_and_expiry_for_promotion(self):
-        self.db.upsert_client(10, "alice")
-        self.db.save_client_peer(
-            10, "server-a", "if-a", "manual", "manual-key", "phone", "manual"
-        )
-        manual = self.db.get_manual_client_peers()[0]
-
-        self.assertIsNone(self.db.promote_manual_peer(manual["id"]))
-        self.assertEqual(self.db.get_client_peer(manual["id"])["role"], "manual")
-
-    def test_admin_lists_manual_while_client_list_hides_and_delete_is_scoped(self):
-        self.db.upsert_client(10, "alice")
-        self.db.save_client_peer(
-            10, "server-a", "if-a", "manual", "manual-key", "phone", "manual"
-        )
-        manual = self.db.get_manual_client_peers()[0]
-
-        self.assertEqual(
-            [config["role"] for config in self.db.get_admin_client_configs(10)],
-            ["manual"],
-        )
-        self.assertEqual(self.db.get_managed_client_configs(10), [])
-        self.assertFalse(self.db.delete_manual_peer_record(manual["id"], 11))
-        self.assertTrue(self.db.delete_manual_peer_record(manual["id"], 10))
-        self.assertIsNone(self.db.get_client_peer(manual["id"]))
-
-    def test_schema_migration_names_primary_but_not_manual_peer(self):
+    def test_schema_migration_names_existing_primary_peer(self):
         handle, legacy_path = tempfile.mkstemp(suffix=".db")
         os.close(handle)
         self.addCleanup(
@@ -360,7 +268,7 @@ class DatabaseTests(unittest.TestCase):
                     cascade_peer_id TEXT,
                     public_key TEXT NOT NULL DEFAULT '',
                     peer_name TEXT NOT NULL DEFAULT '',
-                    role TEXT NOT NULL DEFAULT 'manual',
+                    role TEXT NOT NULL DEFAULT 'primary',
                     enabled INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -371,15 +279,13 @@ class DatabaseTests(unittest.TestCase):
                     telegram_user_id, server_key, interface_id, cascade_peer_id,
                     public_key, peer_name, role
                 ) VALUES
-                    (10, 'server-a', 'if-a', 'primary', 'key-a', 'alice', 'primary'),
-                    (10, 'server-a', 'if-a', 'manual', 'key-b', 'phone', 'manual');
+                    (10, 'server-a', 'if-a', 'primary', 'key-a', 'alice', 'primary');
                 """
             )
         migrated = Database(legacy_path)
-        peers = {peer["role"]: peer for peer in migrated.get_client_peers(10)}
-        self.assertEqual(peers["primary"]["config_name"], DEFAULT_PRIMARY_CONFIG_NAME)
-        self.assertIsNone(peers["manual"]["config_name"])
-        self.assertEqual(peers["primary"]["admin_enabled"], 1)
+        primary = migrated.get_primary_client_peer(10)
+        self.assertEqual(primary["config_name"], DEFAULT_PRIMARY_CONFIG_NAME)
+        self.assertEqual(primary["admin_enabled"], 1)
 
     def test_extension_uses_current_expiry_for_active_subscription(self):
         self.db.activate_new_access(10, "alice", 30, "30_days", "stars")

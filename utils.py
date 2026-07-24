@@ -4,14 +4,13 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def config_filename(config_name: str, *, prefix: str = "") -> str:
-    """Build a safe Telegram filename from a user-facing configuration name."""
-    safe = "".join(
-        character if character.isalnum() or character in " ._-" else "_"
-        for character in config_name
-    ).strip(" .")
-    stem = (safe or "nikonVPN")[:48]
-    return f"{prefix}{stem}.conf"
+def location_config_filename(server_name: str) -> str:
+    """Build a safe Telegram filename from a client-facing server location."""
+    normalized = "".join(
+        character if character.isalnum() else " " for character in server_name
+    )
+    stem = "-".join(normalized.split())[:48].strip("-") or "nikonVPN"
+    return f"{stem}.conf"
 
 
 def generate_peer_name(

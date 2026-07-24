@@ -17,7 +17,7 @@ from database import Database
 from payment import PaymentManager
 from stars import StarsReconciler
 from telegram_runtime import UserActionLocks, serialized_user_action
-from utils import generate_peer_name
+from utils import generate_peer_name, location_config_filename
 
 logger = logging.getLogger(__name__)
 router = Router(name="payments")
@@ -561,7 +561,18 @@ async def process_successful_payment(
                 f"⚠️ Оплата получена, provisioning отложен\n\nTelegram ID: {user_id}\nПричина: {error}"
             )
             return
-        if not await send_config_with_confirmation(message.chat.id, config, caption=None):
+        primary_peer = await asyncio.to_thread(db.get_primary_client_peer, user_id)
+        server_name = (
+            cascade_router.get_server_name(str(primary_peer["server_key"]))
+            if primary_peer
+            else ""
+        )
+        if not await send_config_with_confirmation(
+            message.chat.id,
+            config,
+            caption=None,
+            filename=location_config_filename(server_name),
+        ):
             await chat_panel.render(
                 message.chat.id,
                 user_id,
