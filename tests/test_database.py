@@ -122,6 +122,20 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(clients[0]["interface_id"], "if-a")
         self.assertEqual(clients[0]["peer_name"], "alice")
         self.assertEqual(clients[0]["device_count"], 2)
+        self.assertTrue(
+            self.db.save_client_peer(
+                10,
+                "server-b",
+                "if-b",
+                "peer-c",
+                "key-c",
+                "tablet",
+                "additional",
+                config_name="Tablet",
+            )
+        )
+        details = self.db.get_admin_client_details(10)
+        self.assertEqual(details["server_keys"], "server-a, server-b")
         by_id, total_by_id = self.db.get_admin_clients_page(0, 8, "10")
         self.assertEqual(total_by_id, 1)
         self.assertEqual(by_id[0]["telegram_user_id"], 10)

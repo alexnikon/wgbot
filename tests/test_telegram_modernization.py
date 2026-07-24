@@ -34,6 +34,7 @@ from handlers.admin import (
     admin_dashboard_keyboard,
     client_card_keyboard,
     client_list_keyboard,
+    config_error_back_keyboard,
     config_list_keyboard,
 )
 from handlers.fallback import handle_unknown
@@ -275,9 +276,28 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(arguments["reply_markup"])
 
     async def test_manual_config_includes_server_name_and_back_button(self):
-        fake_bot = SimpleNamespace(send_document=AsyncMock())
+        events = []
+        instruction_message = SimpleNamespace(
+            chat=SimpleNamespace(id=10), message_id=99
+        )
+
+        async def send_document(**_kwargs):
+            events.append("document")
+
+        async def send_message(**_kwargs):
+            events.append("text")
+            return instruction_message
+
+        fake_bot = SimpleNamespace(
+            send_document=AsyncMock(side_effect=send_document),
+            send_message=AsyncMock(side_effect=send_message),
+        )
+        fake_panel = SimpleNamespace(adopt=AsyncMock())
         keyboard = config_file_back_keyboard()
-        with patch.object(bot_module, "bot", fake_bot, create=True):
+        with (
+            patch.object(bot_module, "bot", fake_bot, create=True),
+            patch.object(bot_module, "chat_panel", fake_panel, create=True),
+        ):
             self.assertTrue(
                 await bot_module.send_config_with_confirmation(
                     10,
@@ -286,10 +306,15 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
                     reply_markup=keyboard,
                 )
             )
-        arguments = fake_bot.send_document.await_args.kwargs
-        self.assertIn("📁 Конфиг файл", arguments["caption"])
-        self.assertIn("🌍 Netherlands", arguments["caption"])
-        self.assertIs(arguments["reply_markup"], keyboard)
+        self.assertEqual(events, ["document", "text"])
+        document_arguments = fake_bot.send_document.await_args.kwargs
+        self.assertIsNone(document_arguments["caption"])
+        self.assertIsNone(document_arguments["reply_markup"])
+        text_arguments = fake_bot.send_message.await_args.kwargs
+        self.assertIn("🌍 Локация: Netherlands", text_arguments["text"])
+        self.assertIn("только на одном устройстве", text_arguments["text"])
+        self.assertIs(text_arguments["reply_markup"], keyboard)
+        fake_panel.adopt.assert_awaited_once_with(instruction_message, 10)
 
     async def test_hidden_start_deletes_input_and_restores_panel(self):
         _last_start_sent_at.clear()
@@ -492,6 +517,8 @@ class TelegramDatabaseTests(unittest.TestCase):
             empty_keyboard.inline_keyboard[-1][0].text,
             "⬅️ Управление клиентами",
         )
+        error_keyboard = config_error_back_keyboard(10, 20)
+        self.assertEqual(error_keyboard.inline_keyboard[0][0].text, "⬅️ Назад")
 
     def test_daily_legacy_callback_counter_and_zero_streak(self):
         self.db.ensure_telegram_daily_metrics_day()

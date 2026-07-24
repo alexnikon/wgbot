@@ -898,6 +898,16 @@ class Database:
                        s.expire_date, s.is_active, s.payment_status,
                        cp.server_key, cp.interface_id, cp.peer_name,
                        cp.cascade_peer_id,
+                       (
+                           SELECT group_concat(server_key, ', ')
+                           FROM (
+                               SELECT DISTINCT peers.server_key
+                               FROM client_peers peers
+                               WHERE peers.telegram_user_id=c.telegram_user_id
+                                 AND peers.server_key IS NOT NULL
+                               ORDER BY peers.server_key
+                           )
+                       ) AS server_keys,
                        (SELECT COUNT(*) FROM client_peers devices
                         WHERE devices.telegram_user_id=c.telegram_user_id) AS device_count
                 FROM clients c
@@ -922,6 +932,16 @@ class Database:
                        s.expire_date, s.is_active, s.payment_status,
                        cp.server_key, cp.interface_id, cp.peer_name,
                        cp.cascade_peer_id,
+                       (
+                           SELECT group_concat(server_key, ', ')
+                           FROM (
+                               SELECT DISTINCT peers.server_key
+                               FROM client_peers peers
+                               WHERE peers.telegram_user_id=c.telegram_user_id
+                                 AND peers.server_key IS NOT NULL
+                               ORDER BY peers.server_key
+                           )
+                       ) AS server_keys,
                        (SELECT COUNT(*) FROM client_peers devices
                         WHERE devices.telegram_user_id=c.telegram_user_id) AS device_count
                 FROM clients c

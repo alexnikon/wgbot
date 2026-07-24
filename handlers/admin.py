@@ -350,6 +350,21 @@ def config_details_keyboard(config: dict[str, Any]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def config_error_back_keyboard(user_id: int, peer_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=AdminConfigCallback(
+                        action="view", user_id=user_id, peer_id=peer_id
+                    ).pack(),
+                )
+            ]
+        ]
+    )
+
+
 def format_config(config: dict[str, Any]) -> str:
     if not config["admin_enabled"]:
         status = "деактивирован"
@@ -375,7 +390,7 @@ def format_client(client: dict[str, Any]) -> str:
         f"Telegram ID: {client['telegram_user_id']}\n"
         f"Username: {identity}\n"
         f"Скидка: {int(client.get('promo') or 0)}%\n"
-        f"Сервер: {client.get('server_key') or 'не назначен'}\n"
+        f"Сервер: {client.get('server_keys') or 'не назначен'}\n"
         f"Устройств: {int(client.get('device_count') or 0)}\n"
         f"Доступ до: {format_date_for_user(expiry) if expiry else 'нет'}"
     )
@@ -1000,12 +1015,20 @@ async def change_config_state(
         )
     except CascadeNotFound:
         await callback.message.edit_text(
-            "❌ Peer не найден в Cascade. Создай новый дополнительный конфиг."
+            "❌ Peer не найден в Cascade. Создай новый дополнительный конфиг.",
+            reply_markup=config_error_back_keyboard(
+                callback_data.user_id, callback_data.peer_id
+            ),
         )
         return
     except CascadeError:
         logger.exception("Failed to change additional configuration state")
-        await callback.message.edit_text("❌ Не удалось изменить состояние конфига.")
+        await callback.message.edit_text(
+            "❌ Не удалось изменить состояние конфига.",
+            reply_markup=config_error_back_keyboard(
+                callback_data.user_id, callback_data.peer_id
+            ),
+        )
         return
     operation = "admin_restore_config" if active else "admin_deactivate_config"
     db.log_admin_config_change(

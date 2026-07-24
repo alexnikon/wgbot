@@ -281,12 +281,7 @@ async def download_client_config(
                     reply_markup=create_back_to_menu_keyboard(),
                 )
             else:
-                await safe_edit_callback_message(
-                    callback_query.message,
-                    "✅ Конфигурация отправлена отдельным файлом.\n\n"
-                    "Открой её через AmneziaWG и добавь новый туннель.",
-                    reply_markup=create_main_menu_keyboard(user_id),
-                )
+                return
         except CascadeNotFound:
             await safe_edit_callback_message(
                 callback_query.message,

@@ -300,28 +300,44 @@ async def send_config_with_confirmation(
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> bool:
     """Send a configuration document with its import instructions."""
-    if caption:
-        effective_caption = caption
-    elif server_name:
-        effective_caption = (
-            "📁 Конфиг файл\n"
-            f"🌍 {server_name}\n\n"
-            "✅ Конфигурация nikonVPN готова.\n"
-            "Открой файл через AmneziaWG и добавь новый туннель."
+    if server_name:
+        sent = await send_config_file(
+            chat_id,
+            config_content,
+            caption=None,
+            reply_markup=None,
+            filename=filename,
         )
-    else:
-        effective_caption = (
-            "✅ Конфигурация nikonVPN готова.\n\n"
-            "Открой файл через AmneziaWG и добавь новый туннель."
-        )
-    sent = await send_config_file(
+        if not sent:
+            return False
+        try:
+            message = await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"🌍 Локация: {server_name}\n\n"
+                    "✅ Это твоя конфигурация для доступа к сервису.\n"
+                    "Добавь этот файл в приложение AmneziaWG.\n"
+                    "‼ Один конфиг может использоваться только на одном устройстве"
+                ),
+                reply_markup=reply_markup,
+            )
+            await chat_panel.adopt(message, chat_id)
+            return True
+        except Exception:
+            logger.exception("Failed to send configuration instructions to chat %s", chat_id)
+            return False
+
+    effective_caption = caption or (
+        "✅ Конфигурация nikonVPN готова.\n\n"
+        "Открой файл через AmneziaWG и добавь новый туннель."
+    )
+    return await send_config_file(
         chat_id,
         config_content,
         caption=effective_caption,
         reply_markup=reply_markup,
         filename=filename,
     )
-    return sent
 
 
 # Helper: create or restore a peer and return config
