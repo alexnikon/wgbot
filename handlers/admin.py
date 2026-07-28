@@ -1,7 +1,9 @@
 import asyncio
 import logging
 from contextlib import suppress
+from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, F, Router, types
 from aiogram.filters import BaseFilter
@@ -24,6 +26,39 @@ router = Router(name="admin")
 ADMIN_CLIENTS_PAGE_SIZE = 8
 ADMIN_CONFIGS_PAGE_SIZE = 6
 ADMIN_WORKFLOW_TYPE = "admin_flow"
+MOSCOW_TIMEZONE = ZoneInfo("Europe/Moscow")
+
+
+def parse_admin_expiry_input(value: str) -> str:
+    """Parse an administrator-entered Moscow date into the stored UTC format."""
+    normalized = " ".join(value.split())
+    for date_format, default_end_of_day in (
+        ("%d-%m-%Y %H:%M", False),
+        ("%d-%m-%Y", True),
+    ):
+        try:
+            parsed = datetime.strptime(normalized, date_format)
+            if default_end_of_day:
+                parsed = parsed.replace(hour=23, minute=59)
+            return (
+                parsed.replace(tzinfo=MOSCOW_TIMEZONE)
+                .astimezone(UTC)
+                .replace(tzinfo=None)
+                .strftime("%Y-%m-%d %H:%M:%S")
+            )
+        except (OverflowError, ValueError):
+            continue
+    raise ValueError("Unsupported expiry date format")
+
+
+def format_admin_expiry(value: str | None) -> str:
+    """Format a stored UTC expiry for an administrator in Moscow time."""
+    if not value:
+        return "нет"
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(MOSCOW_TIMEZONE).strftime("%d-%m-%Y %H:%M")
 
 
 def is_admin(user_id: int) -> bool:
@@ -56,6 +91,9 @@ class ActiveAdminWorkflow(BaseFilter):
     async def __call__(
         self, message: types.Message, admin_workflows: AdminWorkflowService
     ) -> bool:
+        command = (message.text or "").split(maxsplit=1)[0].casefold()
+        if command == "/start" or command.startswith("/start@"):
+            return False
         return bool(
             message.from_user
             and is_admin(message.from_user.id)
@@ -236,6 +274,14 @@ def client_card_keyboard(user_id: int) -> InlineKeyboardMarkup:
                         action="list", user_id=user_id
                     ).pack(),
                 ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📅 Срок доступа",
+                    callback_data=AdminClientCallback(
+                        action="expiry", user_id=user_id
+                    ).pack(),
+                )
             ],
             [
                 InlineKeyboardButton(
@@ -554,6 +600,47 @@ async def show_client_details(
         return
     await callback.message.edit_text(
         format_client(client), reply_markup=client_card_keyboard(callback_data.user_id)
+    )
+
+
+@router.callback_query(AdminClientCallback.filter(F.action == "expiry"))
+async def start_expiry_change(
+    callback: types.CallbackQuery,
+    db: Database,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+    callback_data: AdminClientCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    client = db.get_admin_client_details(callback_data.user_id)
+    subscription = db.get_peer_by_telegram_id(callback_data.user_id)
+    if not client:
+        await callback.message.edit_text(
+            "❌ Клиент не найден.", reply_markup=admin_dashboard_keyboard()
+        )
+        return
+    if not subscription or subscription.get("payment_status") is None:
+        await callback.message.edit_text(
+            "❌ У клиента нет подписки. Изменить срок доступа нельзя.",
+            reply_markup=client_card_keyboard(callback_data.user_id),
+        )
+        return
+    admin_workflows.set(
+        callback.from_user.id,
+        "await_expiry",
+        user_id=callback_data.user_id,
+        old_expire_date=subscription.get("expire_date"),
+        service_chat_id=callback.message.chat.id,
+        service_message_id=callback.message.message_id,
+    )
+    await callback.message.edit_text(
+        "Введи новый срок доступа:\n\n"
+        "• ДД-ММ-ГГГГ\n"
+        "• ДД-ММ-ГГГГ ЧЧ:ММ\n\n"
+        "Если время не указано, будет использовано 23:59 по Москве.",
+        reply_markup=cancel_keyboard(),
     )
 
 
@@ -1190,7 +1277,62 @@ async def capture_admin_input(
     if not flow:
         return
     state = flow["state"]
-    if state in {"await_config_name", "await_config_rename"}:
+    if state == "await_expiry":
+        try:
+            expire_date = parse_admin_expiry_input(message.text or "")
+        except ValueError:
+            await bot.edit_message_text(
+                chat_id=flow["service_chat_id"],
+                message_id=flow["service_message_id"],
+                text=(
+                    "❌ Неверный формат даты.\n\n"
+                    "Введи ДД-ММ-ГГГГ или ДД-ММ-ГГГГ ЧЧ:ММ."
+                ),
+                reply_markup=cancel_keyboard(),
+            )
+            with suppress(Exception):
+                await message.delete()
+            return
+        is_future = (
+            datetime.fromisoformat(expire_date)
+            > datetime.now(UTC).replace(tzinfo=None)
+        )
+        admin_workflows.set(
+            message.from_user.id,
+            "confirm_expiry",
+            **{key: value for key, value in flow.items() if key != "state"},
+            expire_date=expire_date,
+        )
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Применить",
+                        callback_data=AdminClientCallback(
+                            action="expiry_confirm",
+                            user_id=int(flow["user_id"]),
+                        ).pack(),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="❌ Отмена", callback_data="admin_flow_cancel"
+                    )
+                ],
+            ]
+        )
+        await bot.edit_message_text(
+            chat_id=flow["service_chat_id"],
+            message_id=flow["service_message_id"],
+            text=(
+                "Подтверди изменение срока доступа.\n\n"
+                f"Старый срок: {format_admin_expiry(flow.get('old_expire_date'))}\n"
+                f"Новый срок: {format_admin_expiry(expire_date)}\n"
+                f"Состояние: {'активен' if is_future else 'истёк'}"
+            ),
+            reply_markup=keyboard,
+        )
+    elif state in {"await_config_name", "await_config_rename"}:
         try:
             config_name = normalize_config_name(message.text or "")
         except ValueError:
@@ -1425,10 +1567,85 @@ async def cancel_flow(
                 flow["source_chat_id"], flow["source_message_id"]
             )
     reply_markup = admin_dashboard_keyboard()
-    if flow and flow.get("user_id") and "config" in str(flow.get("state", "")):
+    if flow and flow.get("user_id") and (
+        "config" in str(flow.get("state", ""))
+        or "expiry" in str(flow.get("state", ""))
+    ):
         reply_markup = client_card_keyboard(int(flow["user_id"]))
     await callback.message.edit_text(
         "Действие отменено.", reply_markup=reply_markup
+    )
+
+
+@router.callback_query(AdminClientCallback.filter(F.action == "expiry_confirm"))
+async def confirm_expiry_change(
+    callback: types.CallbackQuery,
+    db: Database,
+    cascade_router: CascadeRouter,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+    callback_data: AdminClientCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    flow = admin_workflows.get(callback.from_user.id)
+    if (
+        not flow
+        or flow.get("state") != "confirm_expiry"
+        or int(flow.get("user_id", 0)) != callback_data.user_id
+    ):
+        await callback.message.edit_text(
+            "❌ Изменение срока устарело или не соответствует клиенту.",
+            reply_markup=client_card_keyboard(callback_data.user_id),
+        )
+        return
+    if not db.get_admin_client_details(callback_data.user_id):
+        admin_workflows.clear(callback.from_user.id)
+        await callback.message.edit_text(
+            "❌ Клиент не найден.", reply_markup=admin_dashboard_keyboard()
+        )
+        return
+    result = db.set_admin_subscription_expiry(
+        callback.from_user.id,
+        callback_data.user_id,
+        str(flow["expire_date"]),
+    )
+    if not result:
+        admin_workflows.clear(callback.from_user.id)
+        await callback.message.edit_text(
+            "❌ У клиента нет подписки. Срок доступа не изменён.",
+            reply_markup=client_card_keyboard(callback_data.user_id),
+        )
+        return
+    admin_workflows.clear(callback.from_user.id)
+    sync_result = await cascade_router.sync_user_access(
+        callback_data.user_id, str(result["expire_date"])
+    )
+    warning = ""
+    if sync_result["failed"]:
+        db.add_provisioning_task(
+            callback_data.user_id,
+            "sync_access",
+            {"expire_date": result["expire_date"]},
+            f"Failed peers: {sync_result['failed']}",
+        )
+        warning = (
+            "\n\n⚠️ Часть конфигов не синхронизирована. "
+            "Создана задача автоматического повтора."
+        )
+    if sync_result["missing"]:
+        warning += (
+            f"\n\n⚠️ Недоступных дополнительных конфигов: "
+            f"{sync_result['missing']}."
+        )
+    await callback.message.edit_text(
+        "✅ Срок доступа изменён.\n\n"
+        f"Новый срок: {format_admin_expiry(str(result['expire_date']))}\n"
+        f"Состояние: "
+        f"{'активен' if result['payment_status'] == 'paid' else 'истёк'}"
+        f"{warning}",
+        reply_markup=client_card_keyboard(callback_data.user_id),
     )
 
 

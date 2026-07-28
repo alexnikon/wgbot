@@ -1011,6 +1011,71 @@ class Database:
             conn.commit()
             return cursor.rowcount > 0
 
+    def set_admin_subscription_expiry(
+        self,
+        admin_id: int,
+        user_id: int,
+        expire_date: str,
+    ) -> dict[str, Any] | None:
+        """Set an existing subscription expiry and audit the administrative grant."""
+        target = datetime.fromisoformat(expire_date)
+        if target.tzinfo is not None:
+            target = target.astimezone(UTC).replace(tzinfo=None)
+        normalized_expiry = target.strftime("%Y-%m-%d %H:%M:%S")
+        is_future = target > datetime.now(UTC).replace(tzinfo=None)
+        payment_status = "paid" if is_future else "expired"
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                """
+                SELECT expire_date, is_active, payment_status
+                FROM subscriptions WHERE telegram_user_id=?
+                """,
+                (user_id,),
+            ).fetchone()
+            if not current:
+                conn.rollback()
+                return None
+            updated = conn.execute(
+                """
+                UPDATE subscriptions SET
+                    expire_date=?, is_active=?, payment_status=?,
+                    notification_sent=0, hour_notification_sent=0,
+                    expired_notification_sent=0
+                WHERE telegram_user_id=?
+                """,
+                (normalized_expiry, int(is_future), payment_status, user_id),
+            )
+            if updated.rowcount != 1:
+                conn.rollback()
+                return None
+            details = json.dumps(
+                {
+                    "admin_id": admin_id,
+                    "client_id": user_id,
+                    "old_expire_date": current["expire_date"],
+                    "new_expire_date": normalized_expiry,
+                    "old_payment_status": current["payment_status"],
+                    "new_payment_status": payment_status,
+                },
+                sort_keys=True,
+            )
+            conn.execute(
+                """
+                INSERT INTO operation_logs(peer_name, operation, details)
+                VALUES (?, 'admin_set_expire_date', ?)
+                """,
+                (f"telegram:{user_id}", details),
+            )
+            conn.commit()
+        return {
+            "old_expire_date": current["expire_date"],
+            "expire_date": normalized_expiry,
+            "is_active": int(is_future),
+            "payment_status": payment_status,
+        }
+
     def log_admin_promo_change(
         self,
         admin_id: int,

@@ -1,39 +1,30 @@
 import logging
-import time
 
 from aiogram import F, Router, types
 from aiogram.filters import CommandStart
 
 from database import Database
 from payment import PaymentManager
+from telegram_runtime import serialized_user_action
 from utils import format_date_for_user
 
 logger = logging.getLogger(__name__)
 router = Router(name="navigation")
-START_DEBOUNCE_SECONDS = 5.0
-_last_start_sent_at: dict[int, float] = {}
+
 
 @router.message(CommandStart())
+@serialized_user_action
 async def cmd_start(
     message: types.Message,
     create_main_menu_keyboard,
     chat_panel,
     clear_admin_state,
+    user_action_locks,
 ):
     """Reset transient UI state and restore the main control panel."""
     user_id = message.from_user.id
     await chat_panel.delete_user_message(message)
     clear_admin_state(user_id)
-    now_monotonic = time.monotonic()
-    last_start = _last_start_sent_at.get(user_id, 0.0)
-    if now_monotonic - last_start < START_DEBOUNCE_SECONDS:
-        logger.debug(
-            "Skipping duplicate hidden start for user %s within %ss",
-            user_id,
-            START_DEBOUNCE_SECONDS,
-        )
-        return
-    _last_start_sent_at[user_id] = now_monotonic
     welcome_text = (
         "👋🏻 Привет! Здесь ты можешь подключиться к быстрому и безопасному VPN.\n\n"
         "Чтобы начать пользоваться нашим VPN, скачай клиент AmneziaWG из своего "

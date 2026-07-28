@@ -19,6 +19,7 @@ from aiogram.exceptions import (
 
 import bot as bot_module
 from callbacks import (
+    AdminClientCallback,
     AdminConfigCallback,
     ClientConfigCallback,
     PaymentMethod,
@@ -32,6 +33,7 @@ from handlers.access import (
     return_to_client_configs,
 )
 from handlers.admin import (
+    ActiveAdminWorkflow,
     AdminWorkflowService,
     admin_dashboard_keyboard,
     client_card_keyboard,
@@ -39,11 +41,14 @@ from handlers.admin import (
     config_details_keyboard,
     config_error_back_keyboard,
     config_list_keyboard,
+    confirm_expiry_change,
     download_paid_client_config,
+    format_admin_expiry,
     format_config,
+    parse_admin_expiry_input,
 )
 from handlers.fallback import handle_unknown
-from handlers.navigation import _last_start_sent_at, cmd_start
+from handlers.navigation import cmd_start
 from handlers.payments import (
     _parse_legacy_method,
     confirm_stars_refund,
@@ -328,7 +333,6 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
         fake_panel.adopt.assert_awaited_once_with(instruction_message, 10)
 
     async def test_hidden_start_deletes_input_and_restores_panel(self):
-        _last_start_sent_at.clear()
         panel = SimpleNamespace(
             delete_user_message=AsyncMock(), restore_or_create=AsyncMock()
         )
@@ -342,11 +346,62 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
             lambda _user_id: keyboard,
             panel,
             clear_admin_state,
+            user_action_locks=UserActionLocks(),
         )
         panel.delete_user_message.assert_awaited_once_with(message)
         panel.restore_or_create.assert_awaited_once()
         self.assertIs(panel.restore_or_create.await_args.args[3], keyboard)
         clear_admin_state.assert_called_once_with(42)
+
+    async def test_start_is_not_debounced_and_bypasses_admin_workflow(self):
+        active_restores = 0
+        maximum_active_restores = 0
+
+        async def restore_or_create(*_args):
+            nonlocal active_restores, maximum_active_restores
+            active_restores += 1
+            maximum_active_restores = max(maximum_active_restores, active_restores)
+            await asyncio.sleep(0)
+            active_restores -= 1
+
+        panel = SimpleNamespace(
+            delete_user_message=AsyncMock(),
+            restore_or_create=AsyncMock(side_effect=restore_or_create),
+        )
+        clear_admin_state = unittest.mock.Mock()
+        message = SimpleNamespace(
+            from_user=SimpleNamespace(id=42),
+            chat=SimpleNamespace(id=42),
+        )
+        locks = UserActionLocks()
+        await asyncio.gather(
+            cmd_start(
+                message,
+                lambda _user_id: SimpleNamespace(),
+                panel,
+                clear_admin_state,
+                user_action_locks=locks,
+            ),
+            cmd_start(
+                message,
+                lambda _user_id: SimpleNamespace(),
+                panel,
+                clear_admin_state,
+                user_action_locks=locks,
+            ),
+        )
+        self.assertEqual(panel.restore_or_create.await_count, 2)
+        self.assertEqual(maximum_active_restores, 1)
+
+        workflow = SimpleNamespace(get=lambda _user_id: {"state": "await_expiry"})
+        with patch("handlers.admin.is_admin", return_value=True):
+            for text in ("/start", "/start payload", "/start@TestBot payload"):
+                command_message = SimpleNamespace(
+                    text=text, from_user=SimpleNamespace(id=42)
+                )
+                self.assertFalse(
+                    await ActiveAdminWorkflow()(command_message, workflow)
+                )
 
     async def test_document_callback_is_not_adopted_as_panel(self):
         middleware = bot_module.PanelTrackingMiddleware()
@@ -512,6 +567,7 @@ class TelegramDatabaseTests(unittest.TestCase):
         ]
         self.assertIn("💸 Скидка", labels)
         self.assertIn("🗂 Конфиги", labels)
+        self.assertIn("📅 Срок доступа", labels)
         self.assertEqual(location_config_filename("USA NY"), "USA-NY.conf")
         self.assertEqual(location_config_filename("Finland / Helsinki"), "Finland-Helsinki.conf")
         empty_keyboard, total = client_list_keyboard(
@@ -524,6 +580,99 @@ class TelegramDatabaseTests(unittest.TestCase):
         )
         error_keyboard = config_error_back_keyboard(10, 20)
         self.assertEqual(error_keyboard.inline_keyboard[0][0].text, "⬅️ Назад")
+
+    def test_admin_expiry_input_uses_moscow_time(self):
+        self.assertEqual(
+            parse_admin_expiry_input("01-01-2030"),
+            "2030-01-01 20:59:00",
+        )
+        self.assertEqual(
+            parse_admin_expiry_input("01-01-2030 12:30"),
+            "2030-01-01 09:30:00",
+        )
+        self.assertEqual(
+            format_admin_expiry("2030-01-01 09:30:00"),
+            "01-01-2030 12:30",
+        )
+        with self.assertRaises(ValueError):
+            parse_admin_expiry_input("2030/01/01")
+
+    def test_expiry_confirmation_syncs_and_queues_partial_failure(self):
+        self.db.ensure_subscription(
+            10, "alice", "2030-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        workflow = AdminWorkflowService(self.db)
+        workflow.set(
+            99,
+            "confirm_expiry",
+            user_id=10,
+            expire_date="2031-01-01 00:00:00",
+            service_chat_id=99,
+            service_message_id=1,
+        )
+        callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=99),
+            message=SimpleNamespace(edit_text=AsyncMock()),
+        )
+        cascade_router = SimpleNamespace(
+            sync_user_access=AsyncMock(
+                return_value={"total": 1, "updated": 0, "missing": 0, "failed": 1}
+            )
+        )
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                confirm_expiry_change(
+                    callback,
+                    self.db,
+                    cascade_router,
+                    workflow,
+                    AsyncMock(),
+                    AdminClientCallback(action="expiry_confirm", user_id=10),
+                )
+            )
+        self.assertEqual(
+            self.db.get_subscription_expiry(10), "2031-01-01 00:00:00"
+        )
+        self.assertIsNone(workflow.get(99))
+        self.assertIn(
+            "автоматического повтора",
+            callback.message.edit_text.await_args.args[0],
+        )
+        self.assertEqual(
+            self.db.get_runtime_stats()["provisioning_pending"], 1
+        )
+
+    def test_expiry_confirmation_rejects_mismatched_client(self):
+        self.db.ensure_subscription(
+            10, "alice", "2030-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        workflow = AdminWorkflowService(self.db)
+        workflow.set(
+            99,
+            "confirm_expiry",
+            user_id=10,
+            expire_date="2031-01-01 00:00:00",
+        )
+        callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=99),
+            message=SimpleNamespace(edit_text=AsyncMock()),
+        )
+        cascade_router = SimpleNamespace(sync_user_access=AsyncMock())
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                confirm_expiry_change(
+                    callback,
+                    self.db,
+                    cascade_router,
+                    workflow,
+                    AsyncMock(),
+                    AdminClientCallback(action="expiry_confirm", user_id=11),
+                )
+            )
+        cascade_router.sync_user_access.assert_not_awaited()
+        self.assertEqual(
+            self.db.get_subscription_expiry(10), "2030-01-01 00:00:00"
+        )
 
     def test_paid_config_details_include_download_and_display_location(self):
         config = {

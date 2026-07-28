@@ -158,6 +158,67 @@ class DatabaseTests(unittest.TestCase):
         self.assertIn('"admin_id": 99', details)
         self.assertIn('"new_promo": 30', details)
 
+    def test_admin_expiry_change_updates_state_resets_flags_and_audits(self):
+        self.db.ensure_subscription(
+            10, "alice", "2000-01-01 00:00:00", "expired", "30_days", "stars"
+        )
+        with closing(sqlite3.connect(self.path)) as conn, conn:
+            conn.execute(
+                """
+                UPDATE subscriptions SET notification_sent=1,
+                    hour_notification_sent=1, expired_notification_sent=1
+                WHERE telegram_user_id=10
+                """
+            )
+            payments_before = conn.execute("SELECT COUNT(*) FROM payments").fetchone()[0]
+
+        result = self.db.set_admin_subscription_expiry(
+            99, 10, "2099-01-01 00:00:00"
+        )
+
+        self.assertEqual(result["payment_status"], "paid")
+        with closing(sqlite3.connect(self.path)) as conn:
+            subscription = conn.execute(
+                """
+                SELECT expire_date, is_active, payment_status,
+                       notification_sent, hour_notification_sent,
+                       expired_notification_sent
+                FROM subscriptions WHERE telegram_user_id=10
+                """
+            ).fetchone()
+            payments_after = conn.execute("SELECT COUNT(*) FROM payments").fetchone()[0]
+            operation, details = conn.execute(
+                "SELECT operation, details FROM operation_logs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        self.assertEqual(
+            subscription,
+            ("2099-01-01 00:00:00", 1, "paid", 0, 0, 0),
+        )
+        self.assertEqual(payments_after, payments_before)
+        self.assertEqual(operation, "admin_set_expire_date")
+        self.assertIn('"admin_id": 99', details)
+        self.assertIn('"old_expire_date": "2000-01-01 00:00:00"', details)
+
+    def test_admin_expiry_change_expires_and_requires_subscription(self):
+        self.db.upsert_client(10, "alice")
+        self.assertIsNone(
+            self.db.set_admin_subscription_expiry(
+                99, 10, "2099-01-01 00:00:00"
+            )
+        )
+        self.db.ensure_subscription(
+            10, "alice", "2099-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+
+        result = self.db.set_admin_subscription_expiry(
+            99, 10, "2000-01-01 00:00:00"
+        )
+
+        self.assertEqual(result["payment_status"], "expired")
+        subscription = self.db.get_peer_by_telegram_id(10)
+        self.assertEqual(subscription["is_active"], 0)
+        self.assertEqual(subscription["payment_status"], "expired")
+
     def test_user_peers_cannot_span_multiple_servers(self):
         self.assertTrue(
             self.db.save_client_peer(
