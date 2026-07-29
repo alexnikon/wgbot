@@ -27,6 +27,10 @@ class PaymentActionCallback(CallbackData, prefix="pact"):
     user_id: int
 
 
+class YooKassaCancelCallback(CallbackData, prefix="yc"):
+    payment_id: str
+
+
 class AdminPageCallback(CallbackData, prefix="apage"):
     view: str
     page: int

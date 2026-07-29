@@ -11,6 +11,7 @@ from callbacks import (
     PaymentMethodCallback,
     RefundConfirmationCallback,
     StarApprovalCallback,
+    YooKassaCancelCallback,
 )
 from cascade_api import CascadeCapacityError, CascadeRouter
 from database import Database
@@ -261,6 +262,7 @@ async def handle_pay_yookassa_disabled_callback(
     )
 
 
+@router.callback_query(YooKassaCancelCallback.filter())
 @router.callback_query(PaymentActionCallback.filter(F.action == PaymentAction.CANCEL_YOOKASSA))
 @router.callback_query(F.data.startswith("cancel_yookassa_"))
 async def handle_cancel_yookassa_callback(
@@ -268,23 +270,60 @@ async def handle_cancel_yookassa_callback(
     payment_manager: PaymentManager,
     safe_answer_callback,
     safe_edit_callback_message,
-    callback_data: PaymentActionCallback | None = None,
+    callback_data: YooKassaCancelCallback | PaymentActionCallback | None = None,
 ):
-    """Return from the YooKassa payment screen to tariff selection."""
-    try:
-        user_id = (
-            callback_data.user_id
-            if callback_data
-            else int((callback_query.data or "").removeprefix("cancel_yookassa_"))
+    """Cancel a pending YooKassa attempt and return to tariff selection."""
+    payment_id = (
+        callback_data.payment_id
+        if isinstance(callback_data, YooKassaCancelCallback)
+        else None
+    )
+    if payment_id:
+        payment = await asyncio.to_thread(
+            payment_manager.db.get_payment_by_id,
+            payment_id,
         )
-    except ValueError:
-        await safe_answer_callback(callback_query, "❌ Некорректная кнопка")
-        return
+        if not payment or payment.get("payment_method") != "yookassa":
+            await safe_answer_callback(callback_query, "❌ Платеж не найден")
+            return
+        user_id = int(payment["user_id"])
+    else:
+        try:
+            user_id = (
+                callback_data.user_id
+                if isinstance(callback_data, PaymentActionCallback)
+                else int((callback_query.data or "").removeprefix("cancel_yookassa_"))
+            )
+        except ValueError:
+            await safe_answer_callback(callback_query, "❌ Некорректная кнопка")
+            return
     if callback_query.from_user.id != user_id:
         await safe_answer_callback(callback_query, "❌ Ошибка: неверный пользователь")
         return
 
-    await safe_answer_callback(callback_query)
+    if payment_id:
+        canceled = await asyncio.to_thread(
+            payment_manager.db.cancel_pending_payment,
+            payment_id,
+        )
+        if canceled:
+            await asyncio.to_thread(payment_manager.db.release_reservation, user_id)
+            await safe_answer_callback(callback_query, "✅ Платеж отменен")
+        else:
+            payment = await asyncio.to_thread(
+                payment_manager.db.get_payment_by_id,
+                payment_id,
+            )
+            status = payment.get("status") if payment else None
+            if status == "succeeded":
+                await safe_answer_callback(callback_query, "✅ Платеж уже обработан")
+            elif status == "canceled":
+                await safe_answer_callback(callback_query, "Платеж уже отменен")
+            else:
+                await safe_answer_callback(callback_query, "Платеж уже завершен")
+    else:
+        await safe_answer_callback(callback_query)
+
     payment_text, keyboard = await payment_manager.get_payment_selection_view(user_id)
     await safe_edit_callback_message(
         callback_query.message,

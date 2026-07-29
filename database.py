@@ -1353,7 +1353,12 @@ class Database:
             if not payment:
                 conn.rollback()
                 raise ValueError("Payment does not exist in the local database")
-            if payment["status"] != "pending":
+            can_apply_canceled_yookassa = (
+                payment["status"] == "canceled"
+                and payment_method == "yookassa"
+                and payment["payment_method"] == "yookassa"
+            )
+            if payment["status"] != "pending" and not can_apply_canceled_yookassa:
                 conn.rollback()
                 return None
             expected = (
@@ -1432,7 +1437,7 @@ class Database:
                     is_recurring=?, is_first_recurring=?,
                     subscription_expiration_date=?, access_days=?,
                     applied_from=?, applied_until=?
-                WHERE payment_id=? AND status='pending'
+                WHERE payment_id=? AND status IN ('pending', 'canceled')
                 """,
                 (
                     telegram_payment_charge_id,

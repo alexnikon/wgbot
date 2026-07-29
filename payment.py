@@ -6,7 +6,13 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
 
-from callbacks import PaymentAction, PaymentActionCallback, PaymentMethod, PaymentMethodCallback
+from callbacks import (
+    PaymentAction,
+    PaymentActionCallback,
+    PaymentMethod,
+    PaymentMethodCallback,
+    YooKassaCancelCallback,
+)
 from config import DOMAIN, PAYMENT_RETURN_URL, WEBHOOK_URL, get_tariffs
 from database import Database
 from message_templates import payment_selection_message
@@ -274,9 +280,9 @@ class PaymentManager:
         username: str = None,
         payment_chat_id: int | None = None,
         payment_message_id: int | None = None,
-    ) -> str | None:
+    ) -> tuple[str, str] | None:
         """
-        Create a YooKassa payment and return the checkout URL.
+        Create a YooKassa payment and return its ID and checkout URL.
 
         Args:
             user_id: Telegram user ID
@@ -284,7 +290,7 @@ class PaymentManager:
             username: Telegram username (optional)
 
         Returns:
-            Payment URL or None on error
+            Payment ID and URL, or None on error
         """
         try:
             reservation = self.db.get_active_reservation(user_id)
@@ -382,7 +388,7 @@ class PaymentManager:
                 return None
 
             logger.info(f"Created YooKassa payment {payment_id} for user {user_id}")
-            return payment_url
+            return str(payment_id), str(payment_url)
 
         except Exception as e:
             logger.error(
@@ -467,15 +473,16 @@ class PaymentManager:
         Build text and keyboard for the YooKassa payment screen inside the current message.
         """
         try:
-            payment_url = await self.create_yookassa_payment(
+            payment = await self.create_yookassa_payment(
                 user_id,
                 tariff_key,
                 username,
                 payment_chat_id=payment_chat_id,
                 payment_message_id=payment_message_id,
             )
-            if not payment_url:
+            if not payment:
                 return None
+            payment_id, payment_url = payment
 
             user_tariffs = self.get_user_tariffs(user_id)
             tariff_data = user_tariffs.get(tariff_key)
@@ -494,10 +501,8 @@ class PaymentManager:
                     [
                         InlineKeyboardButton(
                             text="❌ Отмена",
-                            callback_data=PaymentActionCallback(
-                                action=PaymentAction.CANCEL_YOOKASSA,
-                                tariff=tariff_key,
-                                user_id=user_id,
+                            callback_data=YooKassaCancelCallback(
+                                payment_id=payment_id,
                             ).pack(),
                         )
                     ],
