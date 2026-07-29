@@ -94,6 +94,21 @@ class DatabaseTests(unittest.TestCase):
         second = self.db.apply_refund("payment-1", 14)
         self.assertIsNotNone(first)
         self.assertIsNone(second)
+        subscription = self.db.get_peer_by_telegram_id(10)
+        self.assertEqual(subscription["payment_status"], "paid")
+        self.assertEqual(subscription["is_active"], 1)
+
+    def test_refund_expires_subscription_immediately(self):
+        self.db.activate_new_access(10, "alice", 7, "14_days", "yookassa")
+        self.db.add_payment("payment-1", 10, 15000, "yookassa", "14_days")
+        self.db.claim_payment_success("payment-1")
+
+        applied = self.db.apply_refund("payment-1", 14)
+
+        self.assertIsNotNone(applied)
+        subscription = self.db.get_peer_by_telegram_id(10)
+        self.assertEqual(subscription["payment_status"], "expired")
+        self.assertEqual(subscription["is_active"], 0)
 
     def test_pending_provisioning_task_is_reused(self):
         first = self.db.add_provisioning_task(10, "create_peer", {"value": 1}, "one")

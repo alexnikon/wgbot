@@ -1552,13 +1552,16 @@ class Database:
                 return None
             new_expiry = datetime.fromisoformat(subscription[0]) - timedelta(days=days)
             value = new_expiry.strftime("%Y-%m-%d %H:%M:%S")
+            is_future = new_expiry > datetime.now(UTC).replace(tzinfo=None)
+            payment_status = "paid" if is_future else "expired"
             conn.execute(
                 """
-                UPDATE subscriptions SET expire_date=?, notification_sent=0,
+                UPDATE subscriptions SET expire_date=?, is_active=?, payment_status=?,
+                    notification_sent=0,
                     hour_notification_sent=0, expired_notification_sent=0
                 WHERE telegram_user_id=?
                 """,
-                (value, user_id),
+                (value, int(is_future), payment_status, user_id),
             )
             conn.execute(
                 "UPDATE payments SET status='refunded', updated_at=CURRENT_TIMESTAMP WHERE payment_id=?",

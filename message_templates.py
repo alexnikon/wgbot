@@ -59,6 +59,46 @@ def active_access_message() -> TelegramText:
     return TelegramText.from_html(plain, rich_html)
 
 
+def yookassa_extension_success_message(days: int) -> TelegramText:
+    plain = (
+        "✅ Платеж успешно обработан!\n\n"
+        f"Продлили тебе доступ на {days} дней!\n"
+        "Способ оплаты: 💳 Банковская карта"
+    )
+    rich_html = (
+        f"{rich_bold('✅ Платеж успешно обработан!')}\n\n"
+        f"Продлили тебе доступ на {escape_rich_text(days)} дней!\n"
+        "Способ оплаты: 💳 Банковская карта"
+    )
+    return TelegramText.from_html(plain, rich_html)
+
+
+def yookassa_refund_success_message(
+    amount: object,
+    days: int,
+    remaining: str | None,
+) -> TelegramText:
+    status_line = f"⏰ Осталось: {remaining}" if remaining is not None else "Подписка не активна"
+    plain = (
+        "💰 Возврат успешно обработан!\n\n"
+        f"💳 Сумма возврата: {amount} руб.\n"
+        f"📉 Оплаченный период уменьшен на {days} дней.\n"
+        f"{status_line}"
+    )
+    rich_status_line = (
+        f"⏰ Осталось: {escape_rich_text(remaining)}"
+        if remaining is not None
+        else "Подписка не активна"
+    )
+    rich_html = (
+        f"{rich_bold('💰 Возврат успешно обработан!')}\n\n"
+        f"💳 Сумма возврата: {rich_code(amount)} руб.\n"
+        f"📉 Оплаченный период уменьшен на {escape_rich_text(days)} дней.\n"
+        f"{rich_status_line}"
+    )
+    return TelegramText.from_html(plain, rich_html)
+
+
 def service_guide_message() -> TelegramText:
     plain = (
         "📖 Как подключиться к сервису:\n\n"

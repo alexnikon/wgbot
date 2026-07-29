@@ -3,6 +3,7 @@ import hmac
 import json
 import logging
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 import httpx
 import uvicorn
@@ -19,7 +20,12 @@ from config import (
 )
 from database import Database
 from logging_setup import configure_logging
-from message_templates import initial_config_caption
+from message_templates import (
+    format_remaining_time,
+    initial_config_caption,
+    yookassa_extension_success_message,
+    yookassa_refund_success_message,
+)
 from services import AppServices
 from telegram_text import (
     TelegramText,
@@ -284,10 +290,7 @@ async def process_successful_payment(payment_data: dict) -> None:
             )
         await send_telegram_message(
             user_id,
-            f"✅ Платеж успешно обработан!\n"
-            f"🎉 Продлили тебе доступ на {tariff['days']} дней!\n"
-            f"💳 Способ оплаты: Банковская карта\n\n"
-            f"Текущая конфигурация остается актуальной.",
+            yookassa_extension_success_message(int(tariff["days"])),
             create_home_reply_markup(),
         )
         title = "🔁 Клиент продлил подписку"
@@ -412,12 +415,18 @@ async def process_refund_succeeded(refund_data: dict) -> None:
             f"Failed peers: {result['failed']}",
         )
     amount = refund_data.get("amount", {}).get("value", "0")
+    expire_at = datetime.fromisoformat(expire_date)
+    if expire_at.tzinfo is None:
+        expire_at = expire_at.replace(tzinfo=UTC)
+    time_left = expire_at - datetime.now(UTC)
+    remaining = format_remaining_time(time_left) if time_left.total_seconds() > 0 else None
     await send_telegram_message(
         user_id,
-        f"💰 Возврат успешно обработан!\n\n"
-        f"💳 Сумма возврата: {amount} руб.\n"
-        f"📉 Оплаченный период уменьшен на {tariff['days']} дней.\n"
-        f"📅 Срок действия доступа обновлен.",
+        yookassa_refund_success_message(
+            amount,
+            int(tariff["days"]),
+            remaining,
+        ),
         create_home_reply_markup(),
     )
 

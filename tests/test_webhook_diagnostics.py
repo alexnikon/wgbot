@@ -92,3 +92,87 @@ class WebhookDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         rich_html = client.post.await_args.kwargs["json"]["rich_message"]["html"]
         self.assertIn("<b>✅ Платеж обработан.</b>", rich_html)
         self.assertIn("<code>250</code> руб.", rich_html)
+
+    async def test_refund_webhook_reports_inactive_subscription_once(self):
+        payment = {
+            "payment_id": "payment-1",
+            "user_id": 10,
+            "amount": 15000,
+            "status": "succeeded",
+            "tariff_key": "14_days",
+        }
+        refunded_payment = {**payment, "status": "refunded"}
+        database = Mock()
+        database.get_payment_by_id.side_effect = [payment, refunded_payment]
+        database.apply_refund.return_value = (10, "2000-01-01 00:00:00")
+        cascade_router = SimpleNamespace(
+            sync_user_access=AsyncMock(return_value={"failed": 0})
+        )
+        yookassa_client = SimpleNamespace(get_payment_amount=lambda _data: 15000)
+        send_message = AsyncMock()
+        refund_data = {
+            "payment_id": "payment-1",
+            "amount": {"value": "150.00", "currency": "RUB"},
+        }
+
+        with (
+            patch.object(webhook_server, "db", database),
+            patch.object(webhook_server, "cascade_router", cascade_router, create=True),
+            patch.object(
+                webhook_server,
+                "yookassa_client",
+                yookassa_client,
+                create=True,
+            ),
+            patch.object(webhook_server, "send_telegram_message", send_message),
+            patch.object(
+                webhook_server,
+                "get_tariffs",
+                return_value={"14_days": {"days": 14}},
+            ),
+        ):
+            await webhook_server.process_refund_succeeded(refund_data)
+            await webhook_server.process_refund_succeeded(refund_data)
+
+        database.apply_refund.assert_called_once_with("payment-1", 14)
+        cascade_router.sync_user_access.assert_awaited_once_with(
+            10,
+            "2000-01-01 00:00:00",
+        )
+        send_message.assert_awaited_once()
+        content = send_message.await_args.args[1]
+        self.assertTrue(content.plain.endswith("Подписка не активна"))
+
+    async def test_partial_refund_still_requires_manual_adjustment(self):
+        database = Mock()
+        database.get_payment_by_id.return_value = {
+            "payment_id": "payment-1",
+            "user_id": 10,
+            "amount": 15000,
+            "status": "succeeded",
+            "tariff_key": "14_days",
+        }
+        yookassa_client = SimpleNamespace(get_payment_amount=lambda _data: 5000)
+        notify = AsyncMock()
+        send_message = AsyncMock()
+        refund_data = {
+            "payment_id": "payment-1",
+            "amount": {"value": "50.00", "currency": "RUB"},
+        }
+
+        with (
+            patch.object(webhook_server, "db", database),
+            patch.object(
+                webhook_server,
+                "yookassa_client",
+                yookassa_client,
+                create=True,
+            ),
+            patch.object(webhook_server, "notify_admins", notify),
+            patch.object(webhook_server, "send_telegram_message", send_message),
+        ):
+            await webhook_server.process_refund_succeeded(refund_data)
+
+        database.apply_refund.assert_not_called()
+        notify.assert_awaited_once()
+        send_message.assert_not_awaited()
