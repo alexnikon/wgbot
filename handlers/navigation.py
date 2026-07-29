@@ -4,7 +4,11 @@ from aiogram import F, Router, types
 from aiogram.filters import CommandStart
 
 from database import Database
-from message_templates import expired_subscription_status, welcome_message
+from message_templates import (
+    expired_subscription_status,
+    service_guide_message,
+    welcome_message,
+)
 from payment import PaymentManager
 from telegram_runtime import serialized_user_action
 from utils import format_date_for_user
@@ -127,31 +131,9 @@ async def handle_guide_callback(
     """Handle the 'Guide' button."""
     await safe_answer_callback(callback_query)
 
-    guide_text = """
-📖 Инструкция по использованию VPN:
-
-1️⃣ Скачайте клиент AmneziaWG:
-   • Windows: https://github.com/amnezia-vpn/amneziawg-windows-client/releases
-   • Android: Google Play https://play.google.com/store/apps/details?id=org.amnezia.awg
-   • iOS/macOS: App Store https://apps.apple.com/pl/app/amneziawg/id6478942365
-
-2️⃣ Получите конфигурацию:
-   • Нажмите "💾 Получить конфиг"
-   • Скачайте .conf файл
-
-3️⃣ Импортируйте конфигурацию:
-   • Откройте AmneziaWG
-   • Нажмите "Добавить туннель"
-   • Выберите скачанный файл
-
-4️⃣ Подключитесь:
-   • Нажмите "Подключить"
-   • Готово! 🎉
-    """
-
     await chat_panel.render_from_message(
         callback_query.message,
-        guide_text,
+        service_guide_message(),
         create_guide_keyboard(),
         user_id=callback_query.from_user.id,
     )

@@ -13,7 +13,9 @@ from message_templates import (
     expired_subscription_status,
     format_remaining_time,
     initial_config_caption,
+    payment_selection_message,
     renewal_reminder,
+    service_guide_message,
     welcome_message,
 )
 from telegram_runtime import ChatPanelService, send_telegram_text
@@ -43,6 +45,73 @@ class TelegramTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<br><br>", welcome_message().html)
         self.assertIn("\n\n", welcome_message().regular_html)
         self.assertNotIn("<br>", welcome_message().regular_html)
+
+    def test_payment_selection_message_snapshots(self):
+        content = payment_selection_message()
+        self.assertEqual(
+            content.plain,
+            "⏰ Выбери период  доступа к сервису:\n\n"
+            "Тариф можно приобрести повторно, срок доступа добавится к текущей подписке:",
+        )
+        self.assertEqual(
+            content.html,
+            "<b>⏰ Выбери период  доступа к сервису:</b><br><br>"
+            "Тариф можно приобрести повторно, срок доступа добавится к текущей подписке:",
+        )
+        self.assertEqual(
+            content.regular_html,
+            "<b>⏰ Выбери период  доступа к сервису:</b>\n\n"
+            "Тариф можно приобрести повторно, срок доступа добавится к текущей подписке:",
+        )
+
+    def test_service_guide_message_snapshots(self):
+        content = service_guide_message()
+        self.assertEqual(
+            content.plain,
+            "📖 Как подключиться к сервису:\n\n"
+            "1️⃣ Скачай приложение AmneziaWG:\n"
+            "• Windows: https://github.com/amnezia-vpn/amneziawg-windows-client/releases\n"
+            "• Android: Google Play "
+            "https://play.google.com/store/apps/details?id=org.amnezia.awg\n"
+            "• iOS/macOS: App Store "
+            "https://apps.apple.com/pl/app/amneziawg/id6478942365\n\n"
+            "2️⃣ Скачай файл конфигурации:\n"
+            '• Нажми "Получить конфигурацию"\n'
+            "• Скачай .conf файл\n"
+            "• Учти то что один конфиг будет работать только на одном устройстве.\n"
+            "• В стоимость подписки входит 3 устройства, для получения дополнительного "
+            "конфига, напиши в поддержку.\n\n"
+            "3️⃣ Добавь файл конфигурации в приложение AmneziaWG:\n"
+            "• Открой AmneziaWG\n"
+            '• Нажми "Добавить туннель"\n'
+            "• Выбери скачаный файл\n"
+            "• Подключись",
+        )
+        self.assertIn(
+            '<a href="https://github.com/amnezia-vpn/'
+            'amneziawg-windows-client/releases">Windows</a>',
+            content.html,
+        )
+        self.assertIn(
+            '<a href="https://play.google.com/store/apps/'
+            'details?id=org.amnezia.awg">Google Play</a>',
+            content.html,
+        )
+        self.assertIn(
+            '<a href="https://apps.apple.com/pl/app/amneziawg/id6478942365">'
+            "App Store</a>",
+            content.html,
+        )
+        for heading in (
+            "📖 Как подключиться к сервису:",
+            "1️⃣ Скачай приложение AmneziaWG:",
+            "2️⃣ Скачай файл конфигурации:",
+            "3️⃣ Добавь файл конфигурации в приложение AmneziaWG:",
+        ):
+            self.assertIn(f"<b>{heading}</b>", content.html)
+        self.assertIn("<br><br>", content.html)
+        self.assertNotIn("<br>", content.regular_html)
+        self.assertIn("\n\n", content.regular_html)
 
     def test_reminder_formats_every_price_as_code_and_escapes_names(self):
         content = renewal_reminder(

@@ -69,6 +69,43 @@ from utils import location_config_filename
 
 
 class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_guide_keyboard_keeps_only_back_button(self):
+        keyboard = bot_module.create_guide_keyboard()
+        self.assertEqual(len(keyboard.inline_keyboard), 1)
+        button = keyboard.inline_keyboard[0][0]
+        self.assertEqual(button.text, "🔙 Вернуться в меню")
+        self.assertEqual(button.callback_data, "main")
+        self.assertIsNone(button.url)
+
+    async def test_payment_selection_keeps_tariff_and_payment_buttons(self):
+        database = SimpleNamespace(get_user_promo_factor=lambda _user_id: 1.0)
+        yookassa = SimpleNamespace(shop_id="shop", secret_key="secret")
+        manager = PaymentManager(
+            SimpleNamespace(),
+            yookassa_client=yookassa,
+            db=database,
+        )
+        content, keyboard = await manager.get_payment_selection_view(10)
+        self.assertIsInstance(content, TelegramText)
+        self.assertEqual(
+            content.plain.splitlines()[0],
+            "⏰ Выбери период  доступа к сервису:",
+        )
+        labels = [row[0].text for row in keyboard.inline_keyboard[:-1:2]]
+        self.assertEqual(labels, ["2 недели", "1 месяц", "3 месяца"])
+        payment_rows = keyboard.inline_keyboard[1:-1:2]
+        tariffs = list(manager.get_user_tariffs(10).values())
+        self.assertEqual(
+            [[button.text for button in row] for row in payment_rows],
+            [
+                [
+                    f"⭐ {tariff['stars_price']} Stars",
+                    f"💳 {tariff['rub_price']} руб.",
+                ]
+                for tariff in tariffs
+            ],
+        )
+
     async def test_user_action_locks_serialize_and_cleanup(self):
         locks = UserActionLocks()
         active = 0

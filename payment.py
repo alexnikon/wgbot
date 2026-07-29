@@ -9,7 +9,9 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPri
 from callbacks import PaymentAction, PaymentActionCallback, PaymentMethod, PaymentMethodCallback
 from config import DOMAIN, PAYMENT_RETURN_URL, WEBHOOK_URL, get_tariffs
 from database import Database
+from message_templates import payment_selection_message
 from telegram_runtime import send_telegram_text
+from telegram_text import TelegramText
 from yookassa_client import YooKassaClient
 
 logger = logging.getLogger(__name__)
@@ -172,15 +174,12 @@ class PaymentManager:
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
         return keyboard
 
-    async def get_payment_selection_view(self, user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    async def get_payment_selection_view(
+        self, user_id: int
+    ) -> tuple[TelegramText, InlineKeyboardMarkup]:
         """Build text and keyboard for the tariff selection screen."""
         keyboard = await self.create_payment_selection_keyboard(user_id)
-        payment_text = """
-⏰ Выбери тариф VPN доступа:
-
-Выбери удобный для тебя тариф:
-        """
-        return payment_text, keyboard
+        return payment_selection_message(), keyboard
 
     async def create_stars_invoice(
         self, user_id: int, tariff_key: str, username: str = None

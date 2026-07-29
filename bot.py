@@ -561,24 +561,6 @@ def create_guide_keyboard() -> InlineKeyboardMarkup:
     """Create the instruction keyboard."""
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="iPhone / macOS",
-                    url="https://apps.apple.com/pl/app/amneziawg/id6478942365",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Android",
-                    url="https://play.google.com/store/apps/details?id=org.amnezia.awg",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Windows",
-                    url="https://github.com/amnezia-vpn/amneziawg-windows-client/releases",
-                )
-            ],
             [InlineKeyboardButton(text="🔙 Вернуться в меню", callback_data="main")],
         ]
     )

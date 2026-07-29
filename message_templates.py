@@ -10,6 +10,14 @@ from telegram_text import (
     rich_date,
 )
 
+WINDOWS_CLIENT_URL = (
+    "https://github.com/amnezia-vpn/amneziawg-windows-client/releases"
+)
+ANDROID_CLIENT_URL = (
+    "https://play.google.com/store/apps/details?id=org.amnezia.awg"
+)
+APPLE_CLIENT_URL = "https://apps.apple.com/pl/app/amneziawg/id6478942365"
+
 
 def welcome_message() -> TelegramText:
     plain = (
@@ -23,6 +31,58 @@ def welcome_message() -> TelegramText:
         "\n\nЧтобы начать пользоваться сервисом, скачай приложение "
         f"{rich_bold('AmneziaWG')} из магазина приложений на твоем устройстве.\n"
         "В инструкции есть ссылки на установку приложения и описан процесс подключения."
+    )
+    return TelegramText.from_html(plain, rich_html)
+
+
+def payment_selection_message() -> TelegramText:
+    plain = (
+        "⏰ Выбери период  доступа к сервису:\n\n"
+        "Тариф можно приобрести повторно, срок доступа добавится к текущей подписке:"
+    )
+    rich_html = (
+        f"{rich_bold('⏰ Выбери период  доступа к сервису:')}\n\n"
+        "Тариф можно приобрести повторно, срок доступа добавится к текущей подписке:"
+    )
+    return TelegramText.from_html(plain, rich_html)
+
+
+def service_guide_message() -> TelegramText:
+    plain = (
+        "📖 Как подключиться к сервису:\n\n"
+        "1️⃣ Скачай приложение AmneziaWG:\n"
+        f"• Windows: {WINDOWS_CLIENT_URL}\n"
+        f"• Android: Google Play {ANDROID_CLIENT_URL}\n"
+        f"• iOS/macOS: App Store {APPLE_CLIENT_URL}\n\n"
+        "2️⃣ Скачай файл конфигурации:\n"
+        '• Нажми "Получить конфигурацию"\n'
+        "• Скачай .conf файл\n"
+        "• Учти то что один конфиг будет работать только на одном устройстве.\n"
+        "• В стоимость подписки входит 3 устройства, для получения дополнительного "
+        "конфига, напиши в поддержку.\n\n"
+        "3️⃣ Добавь файл конфигурации в приложение AmneziaWG:\n"
+        "• Открой AmneziaWG\n"
+        '• Нажми "Добавить туннель"\n'
+        "• Выбери скачаный файл\n"
+        "• Подключись"
+    )
+    rich_html = (
+        f"{rich_bold('📖 Как подключиться к сервису:')}\n\n"
+        f"{rich_bold('1️⃣ Скачай приложение AmneziaWG:')}\n"
+        f'• <a href="{WINDOWS_CLIENT_URL}">Windows</a>\n'
+        f'• Android: <a href="{ANDROID_CLIENT_URL}">Google Play</a>\n'
+        f'• iOS/macOS: <a href="{APPLE_CLIENT_URL}">App Store</a>\n\n'
+        f"{rich_bold('2️⃣ Скачай файл конфигурации:')}\n"
+        '• Нажми "Получить конфигурацию"\n'
+        "• Скачай .conf файл\n"
+        "• Учти то что один конфиг будет работать только на одном устройстве.\n"
+        "• В стоимость подписки входит 3 устройства, для получения дополнительного "
+        "конфига, напиши в поддержку.\n\n"
+        f"{rich_bold('3️⃣ Добавь файл конфигурации в приложение AmneziaWG:')}\n"
+        "• Открой AmneziaWG\n"
+        '• Нажми "Добавить туннель"\n'
+        "• Выбери скачаный файл\n"
+        "• Подключись"
     )
     return TelegramText.from_html(plain, rich_html)
 
