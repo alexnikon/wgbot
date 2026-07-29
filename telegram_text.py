@@ -22,7 +22,7 @@ def _style_plain_html(value: str) -> str:
         if line.strip():
             lines[index] = f"<b>{line}</b>"
             break
-    return "\n".join(lines)
+    return "<br>".join(lines)
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,11 @@ class TelegramText:
     plain: str
     html: str
 
+    @property
+    def regular_html(self) -> str:
+        """Return HTML suitable for regular Telegram messages and captions."""
+        return self.html.replace("<br>", "\n")
+
     @classmethod
     def from_plain(cls, value: str) -> TelegramText:
         plain = _normalize(value)
@@ -39,7 +44,8 @@ class TelegramText:
 
     @classmethod
     def from_html(cls, plain: str, rich_html: str) -> TelegramText:
-        return cls(plain=_normalize(plain), html=_normalize(rich_html))
+        normalized_html = _normalize(rich_html).replace("\n", "<br>")
+        return cls(plain=_normalize(plain), html=normalized_html)
 
     @classmethod
     def from_plain_with_replacements(

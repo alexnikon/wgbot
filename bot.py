@@ -292,7 +292,7 @@ async def send_config_file(
             await bot.send_document(
                 chat_id=chat_id,
                 document=document,
-                caption=rendered_caption.html if rendered_caption else None,
+                caption=rendered_caption.regular_html if rendered_caption else None,
                 parse_mode="HTML" if rendered_caption else None,
                 reply_markup=reply_markup,
             )

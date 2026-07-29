@@ -90,7 +90,11 @@ async def send_telegram_message(
         ),
         (
             "sendMessage",
-            {"chat_id": chat_id, "text": rendered.html, "parse_mode": "HTML"},
+            {
+                "chat_id": chat_id,
+                "text": rendered.regular_html,
+                "parse_mode": "HTML",
+            },
         ),
         ("sendMessage", {"chat_id": chat_id, "text": rendered.plain}),
     )
@@ -158,7 +162,7 @@ async def send_config_with_confirmation(
     caption = initial_config_caption()
     try:
         for caption_text, parse_mode in (
-            (caption.html, "HTML"),
+            (caption.regular_html, "HTML"),
             (caption.plain, None),
         ):
             data = {

@@ -864,7 +864,7 @@ async def download_paid_client_config(
                 file=content,
                 filename=location_config_filename(server_name),
             ),
-            caption=caption.html,
+            caption=caption.regular_html,
             parse_mode="HTML",
         )
     except CascadeNotFound:

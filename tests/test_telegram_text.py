@@ -40,6 +40,9 @@ class TelegramTextTests(unittest.IsolatedAsyncioTestCase):
             "Добавь этот файл в приложение AmneziaWG.\n"
             "‼ Обрати внимание, один конфиг может использоваться только на одном устройстве!",
         )
+        self.assertIn("<br><br>", welcome_message().html)
+        self.assertIn("\n\n", welcome_message().regular_html)
+        self.assertNotIn("<br>", welcome_message().regular_html)
 
     def test_reminder_formats_every_price_as_code_and_escapes_names(self):
         content = renewal_reminder(
@@ -165,6 +168,27 @@ class TelegramTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "sent")
         self.assertEqual(bot.send_message.await_count, 2)
         self.assertEqual(bot.send_message.await_args.kwargs["text"], "Plain")
+
+    async def test_html_fallback_keeps_real_line_breaks(self):
+        bot = SimpleNamespace(
+            send_rich_message=AsyncMock(
+                side_effect=TelegramBadRequest(SimpleNamespace(), "unsupported")
+            ),
+            send_message=AsyncMock(return_value="sent"),
+        )
+        content = TelegramText.from_html(
+            "Heading\n\nBody",
+            "<b>Heading</b>\n\nBody",
+        )
+        await send_telegram_text(bot, 10, content)
+        self.assertEqual(
+            bot.send_rich_message.await_args.kwargs["rich_message"].html,
+            "<b>Heading</b><br><br>Body",
+        )
+        self.assertEqual(
+            bot.send_message.await_args.kwargs["text"],
+            "<b>Heading</b>\n\nBody",
+        )
 
     async def test_new_panel_is_sent_as_rich_message(self):
         database = SimpleNamespace(

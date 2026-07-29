@@ -190,7 +190,7 @@ async def send_telegram_text(
         try:
             return await bot.send_message(
                 chat_id=chat_id,
-                text=rendered.html,
+                text=rendered.regular_html,
                 parse_mode="HTML",
                 reply_markup=reply_markup,
             )
@@ -230,7 +230,7 @@ async def edit_telegram_text(
         return await bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
-            text=rendered.html,
+            text=rendered.regular_html,
             parse_mode="HTML",
             reply_markup=reply_markup,
         )
