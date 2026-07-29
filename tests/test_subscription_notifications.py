@@ -57,3 +57,14 @@ class SubscriptionNotificationWorkerTests(unittest.IsolatedAsyncioTestCase):
             [("expired", 10), ("hour", 20), ("day", 30)],
         )
         self.assertEqual(payment_manager.get_user_tariffs.call_count, 2)
+        expired_html = bot.send_message.await_args_list[0].kwargs["text"]
+        hour_html = bot.send_message.await_args_list[1].kwargs["text"]
+        day_html = bot.send_message.await_args_list[2].kwargs["text"]
+        self.assertIn("<b>⚠️ Оплаченный период закончился!</b>", expired_html)
+        self.assertIn(
+            "<b>⏰ Доступ к nikonVPN истекает через 1 час!</b>",
+            hour_html,
+        )
+        self.assertIn("<code>50</code> Stars", hour_html)
+        self.assertIn("<code>125</code> руб.", hour_html)
+        self.assertIn("<b>⏰ Доступ к nikonVPN истекает завтра!</b>", day_html)

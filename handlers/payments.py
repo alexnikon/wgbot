@@ -16,7 +16,7 @@ from cascade_api import CascadeCapacityError, CascadeRouter
 from database import Database
 from payment import PaymentManager
 from stars import StarsReconciler
-from telegram_runtime import UserActionLocks, serialized_user_action
+from telegram_runtime import UserActionLocks, edit_bound_message, serialized_user_action
 from utils import generate_peer_name, location_config_filename
 
 logger = logging.getLogger(__name__)
@@ -32,7 +32,7 @@ def _parse_legacy_method(
     try:
         tariff, raw_user_id = data[len(prefix) :].rsplit("_", 1)
         user_id = int(raw_user_id)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     if user_id <= 0 or not payment_manager.is_tariff_enabled(tariff):
         return None
@@ -222,9 +222,8 @@ async def handle_pay_yookassa_callback(
         reply_markup=keyboard,
     )
 
-@router.callback_query(
-    PaymentMethodCallback.filter(F.method == PaymentMethod.YOOKASSA_DISABLED)
-)
+
+@router.callback_query(PaymentMethodCallback.filter(F.method == PaymentMethod.YOOKASSA_DISABLED))
 @router.callback_query(F.data.startswith("pay_yookassa_disabled_"))
 async def handle_pay_yookassa_disabled_callback(
     callback_query: types.CallbackQuery,
@@ -239,9 +238,7 @@ async def handle_pay_yookassa_disabled_callback(
         user_id = callback_data.user_id
     else:
         try:
-            raw_user_id = (callback_query.data or "").removeprefix(
-                "pay_yookassa_disabled_"
-            )
+            raw_user_id = (callback_query.data or "").removeprefix("pay_yookassa_disabled_")
             user_id = int(raw_user_id)
         except ValueError:
             await safe_answer_callback(callback_query, "❌ Некорректная кнопка оплаты")
@@ -264,9 +261,7 @@ async def handle_pay_yookassa_disabled_callback(
     )
 
 
-@router.callback_query(
-    PaymentActionCallback.filter(F.action == PaymentAction.CANCEL_YOOKASSA)
-)
+@router.callback_query(PaymentActionCallback.filter(F.action == PaymentAction.CANCEL_YOOKASSA))
 @router.callback_query(F.data.startswith("cancel_yookassa_"))
 async def handle_cancel_yookassa_callback(
     callback_query: types.CallbackQuery,
@@ -277,8 +272,10 @@ async def handle_cancel_yookassa_callback(
 ):
     """Return from the YooKassa payment screen to tariff selection."""
     try:
-        user_id = callback_data.user_id if callback_data else int(
-            (callback_query.data or "").removeprefix("cancel_yookassa_")
+        user_id = (
+            callback_data.user_id
+            if callback_data
+            else int((callback_query.data or "").removeprefix("cancel_yookassa_"))
         )
     except ValueError:
         await safe_answer_callback(callback_query, "❌ Некорректная кнопка")
@@ -308,8 +305,10 @@ async def handle_cancel_stars_invoice_callback(
 ):
     """Delete the Stars invoice message on cancel."""
     try:
-        user_id = callback_data.user_id if callback_data else int(
-            (callback_query.data or "").removeprefix("cancel_stars_invoice_")
+        user_id = (
+            callback_data.user_id
+            if callback_data
+            else int((callback_query.data or "").removeprefix("cancel_stars_invoice_"))
         )
     except ValueError:
         await safe_answer_callback(callback_query, "❌ Некорректная кнопка")
@@ -319,9 +318,7 @@ async def handle_cancel_stars_invoice_callback(
         return
 
     await safe_answer_callback(callback_query)
-    invoice_payload = getattr(
-        getattr(callback_query.message, "invoice", None), "payload", None
-    )
+    invoice_payload = getattr(getattr(callback_query.message, "invoice", None), "payload", None)
     try:
         await callback_query.message.delete()
     except TelegramAPIError as e:
@@ -366,7 +363,8 @@ async def handle_retry_peer_callback(
 
         subscription = db.get_peer_by_telegram_id(user_id)
         if not subscription or not subscription.get("expire_date"):
-            await callback_query.message.edit_text(
+            await edit_bound_message(
+                callback_query.message,
                 "❌ Активная подписка не найдена.",
                 reply_markup=create_main_menu_keyboard(user_id),
             )
@@ -385,13 +383,15 @@ async def handle_retry_peer_callback(
                 "Manual retry requested by user",
             )
         logger.info("User %s requested provisioning retry task %s", user_id, task_id)
-        await callback_query.message.edit_text(
+        await edit_bound_message(
+            callback_query.message,
             "🔄 Создание доступа поставлено в очередь. Бот отправит конфиг автоматически.",
             reply_markup=create_main_menu_keyboard(user_id),
         )
     except Exception as e:
         logger.error(f"Error in retry_peer handler: {e}")
-        await callback_query.message.edit_text(
+        await edit_bound_message(
+            callback_query.message,
             "❌ Ошибка при повторном создании. Попробуй ещё раз позже.",
             reply_markup=create_main_menu_keyboard(callback_query.from_user.id),
         )
@@ -563,9 +563,7 @@ async def process_successful_payment(
             return
         primary_peer = await asyncio.to_thread(db.get_primary_client_peer, user_id)
         server_name = (
-            cascade_router.get_server_name(str(primary_peer["server_key"]))
-            if primary_peer
-            else ""
+            cascade_router.get_server_name(str(primary_peer["server_key"])) if primary_peer else ""
         )
         if not await send_config_with_confirmation(
             message.chat.id,
@@ -672,8 +670,7 @@ async def open_admin_payments(
     latest = await asyncio.to_thread(db.get_latest_star_reconciliation_run)
     if latest:
         lines.append(
-            "\nПоследняя сверка: "
-            f"{latest['status']}, расхождений: {latest['discrepancy_count']}"
+            f"\nПоследняя сверка: {latest['status']}, расхождений: {latest['discrepancy_count']}"
         )
     discrepancies = await asyncio.to_thread(db.list_star_discrepancies, 5)
     buttons = []
@@ -689,9 +686,7 @@ async def open_admin_payments(
                 [
                     types.InlineKeyboardButton(
                         text=f"Подтвердить #{short_review_id}",
-                        callback_data=StarApprovalCallback(
-                            review_id=item["review_id"]
-                        ).pack(),
+                        callback_data=StarApprovalCallback(review_id=item["review_id"]).pack(),
                     )
                 ]
             )
@@ -703,7 +698,8 @@ async def open_admin_payments(
             )
         ]
     )
-    await callback_query.message.edit_text(
+    await edit_bound_message(
+        callback_query.message,
         "\n".join(lines),
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
     )
@@ -720,9 +716,10 @@ async def run_admin_stars_reconciliation(
         await safe_answer_callback(callback_query, "❌ Недостаточно прав.")
         return
     await safe_answer_callback(callback_query)
-    await callback_query.message.edit_text("⭐ Выполняю сверку Stars...")
+    await edit_bound_message(callback_query.message, "⭐ Выполняю сверку Stars...")
     result = await stars_reconciler.run_once()
-    await callback_query.message.edit_text(
+    await edit_bound_message(
+        callback_query.message,
         stars_reconciler.format_report(result),
         reply_markup=types.InlineKeyboardMarkup(
             inline_keyboard=[
@@ -735,8 +732,6 @@ async def run_admin_stars_reconciliation(
             ]
         ),
     )
-
-
 
 
 @router.callback_query(StarApprovalCallback.filter())
@@ -758,27 +753,19 @@ async def approve_star_discrepancy(
         callback_query.from_user.id,
     )
     if not approved:
-        await callback_query.message.edit_text(
-            "Эта Stars-транзакция уже обработана или больше не существует."
+        await edit_bound_message(
+            callback_query.message, "Эта Stars-транзакция уже обработана или больше не существует."
         )
         return
-    await callback_query.message.edit_text(
-        "✅ Историческая Stars-транзакция подтверждена. "
-        "VPN-доступ автоматически не изменялся.",
+    await edit_bound_message(
+        callback_query.message,
+        "✅ Историческая Stars-транзакция подтверждена. VPN-доступ автоматически не изменялся.",
         reply_markup=types.InlineKeyboardMarkup(
             inline_keyboard=[
-                [
-                    types.InlineKeyboardButton(
-                        text="⬅️ К платежам", callback_data="admin_payments"
-                    )
-                ]
+                [types.InlineKeyboardButton(text="⬅️ К платежам", callback_data="admin_payments")]
             ]
         ),
     )
-
-
-
-
 
 
 @router.callback_query(RefundConfirmationCallback.filter())
@@ -796,11 +783,11 @@ async def confirm_stars_refund(
     await safe_answer_callback(callback_query)
     payment = await asyncio.to_thread(db.get_payment_by_id, callback_data.payment_id)
     if not payment or not payment.get("telegram_payment_charge_id"):
-        await callback_query.message.edit_text("❌ Платеж не найден.")
+        await edit_bound_message(callback_query.message, "❌ Платеж не найден.")
         return
     claimed = await asyncio.to_thread(db.claim_stars_refund_request, payment["payment_id"])
     if not claimed:
-        await callback_query.message.edit_text("Возврат уже запрошен или обработан.")
+        await edit_bound_message(callback_query.message, "Возврат уже запрошен или обработан.")
         return
     try:
         await bot.refund_star_payment(
@@ -812,15 +799,14 @@ async def confirm_stars_refund(
             db.update_refund_request_status, payment["payment_id"], "request_failed"
         )
         raise
-    await asyncio.to_thread(
-        db.update_refund_request_status, payment["payment_id"], "completed"
-    )
+    await asyncio.to_thread(db.update_refund_request_status, payment["payment_id"], "completed")
     db.log_operation(
         f"telegram:{payment['user_id']}",
         "stars_refund_requested",
         f"payment_id={payment['payment_id']}",
     )
-    await callback_query.message.edit_text(
+    await edit_bound_message(
+        callback_query.message,
         "✅ Возврат отправлен Telegram. VPN-доступ оставлен без изменений.",
         reply_markup=types.InlineKeyboardMarkup(
             inline_keyboard=[

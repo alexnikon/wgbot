@@ -19,7 +19,14 @@ from config import (
 )
 from database import Database
 from logging_setup import configure_logging
+from message_templates import initial_config_caption
 from services import AppServices
+from telegram_text import (
+    TelegramText,
+    TelegramTextLike,
+    ensure_telegram_text,
+    rich_date,
+)
 from utils import format_date_for_user, generate_peer_name, location_config_filename
 from yookassa_client import (
     YooKassaClient,
@@ -73,40 +80,59 @@ def create_home_reply_markup() -> dict:
 
 
 async def send_telegram_message(
-    chat_id: int, text: str, reply_markup: dict | None = None
+    chat_id: int, text: TelegramTextLike, reply_markup: dict | None = None
 ) -> bool:
-    payload: dict = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-    if reply_markup is not None:
-        payload["reply_markup"] = reply_markup
-    for attempt in range(3):
-        try:
-            response = await get_telegram_http_client().post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json=payload,
-                timeout=10.0,
-            )
-            if response.is_success:
-                await asyncio.to_thread(db.mark_telegram_reachable, chat_id)
-                return True
-            if response.status_code == 403:
-                await asyncio.to_thread(
-                    db.mark_telegram_unreachable, chat_id, "TelegramForbiddenError"
+    rendered = ensure_telegram_text(text)
+    candidates = (
+        (
+            "sendRichMessage",
+            {"chat_id": chat_id, "rich_message": {"html": rendered.html}},
+        ),
+        (
+            "sendMessage",
+            {"chat_id": chat_id, "text": rendered.html, "parse_mode": "HTML"},
+        ),
+        ("sendMessage", {"chat_id": chat_id, "text": rendered.plain}),
+    )
+    for method, candidate_payload in candidates:
+        if reply_markup is not None:
+            candidate_payload["reply_markup"] = reply_markup
+        for attempt in range(3):
+            try:
+                response = await get_telegram_http_client().post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}",
+                    json=candidate_payload,
+                    timeout=10.0,
+                )
+                if response.is_success:
+                    await asyncio.to_thread(db.mark_telegram_reachable, chat_id)
+                    return True
+                if response.status_code == 403:
+                    await asyncio.to_thread(
+                        db.mark_telegram_unreachable,
+                        chat_id,
+                        "TelegramForbiddenError",
+                    )
+                    return False
+                if response.status_code == 429 and attempt < 2:
+                    retry_after = response.json().get("parameters", {}).get("retry_after", 1)
+                    await asyncio.sleep(float(retry_after))
+                    continue
+                if response.status_code == 400:
+                    break
+                logger.error(
+                    "Telegram %s failed: status=%s",
+                    method,
+                    response.status_code,
                 )
                 return False
-            if response.status_code == 429 and attempt < 2:
-                retry_after = response.json().get("parameters", {}).get("retry_after", 1)
-                await asyncio.sleep(float(retry_after))
-                continue
-            logger.error("Telegram sendMessage failed: status=%s", response.status_code)
-        except Exception as exc:
-            logger.error("Telegram sendMessage error: %s", type(exc).__name__)
-        break
+            except Exception as exc:
+                logger.error("Telegram %s error: %s", method, type(exc).__name__)
+                return False
     return False
 
 
-async def send_telegram_document(
-    chat_id: int, filename: str, content: bytes | str
-) -> bool:
+async def send_telegram_document(chat_id: int, filename: str, content: bytes | str) -> bool:
     try:
         response = await get_telegram_http_client().post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
@@ -118,9 +144,7 @@ async def send_telegram_document(
             await asyncio.to_thread(db.mark_telegram_reachable, chat_id)
             return True
         if response.status_code == 403:
-            await asyncio.to_thread(
-                db.mark_telegram_unreachable, chat_id, "TelegramForbiddenError"
-            )
+            await asyncio.to_thread(db.mark_telegram_unreachable, chat_id, "TelegramForbiddenError")
             return False
         logger.error("Telegram sendDocument failed: status=%s", response.status_code)
     except Exception as exc:
@@ -131,34 +155,42 @@ async def send_telegram_document(
 async def send_config_with_confirmation(
     chat_id: int, config: bytes | str, filename: str = "nikonVPN.conf"
 ) -> bool:
+    caption = initial_config_caption()
     try:
-        response = await get_telegram_http_client().post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
-            files={"document": (filename, config, "application/octet-stream")},
-            data={
+        for caption_text, parse_mode in (
+            (caption.html, "HTML"),
+            (caption.plain, None),
+        ):
+            data = {
                 "chat_id": str(chat_id),
-                "caption": (
-                    "✅ Конфигурация nikonVPN готова.\n\n"
-                    "Открой файл через AmneziaWG и добавь новый туннель."
-                ),
+                "caption": caption_text,
                 "reply_markup": json.dumps(create_home_reply_markup()),
-            },
-            timeout=30.0,
-        )
-        if response.is_success:
-            await asyncio.to_thread(db.mark_telegram_reachable, chat_id)
-            return True
-        if response.status_code == 403:
-            await asyncio.to_thread(
-                db.mark_telegram_unreachable, chat_id, "TelegramForbiddenError"
+            }
+            if parse_mode:
+                data["parse_mode"] = parse_mode
+            response = await get_telegram_http_client().post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
+                files={"document": (filename, config, "application/octet-stream")},
+                data=data,
+                timeout=30.0,
             )
+            if response.is_success:
+                await asyncio.to_thread(db.mark_telegram_reachable, chat_id)
+                return True
+            if response.status_code == 403:
+                await asyncio.to_thread(
+                    db.mark_telegram_unreachable, chat_id, "TelegramForbiddenError"
+                )
+                return False
+            if response.status_code != 400:
+                break
         logger.error("Telegram sendDocument failed: status=%s", response.status_code)
     except Exception as exc:
         logger.error("Telegram sendDocument error: %s", type(exc).__name__)
     return False
 
 
-async def notify_admins(text: str) -> None:
+async def notify_admins(text: TelegramTextLike) -> None:
     for admin_id in get_admin_telegram_ids():
         await send_telegram_message(admin_id, text)
 
@@ -167,7 +199,7 @@ async def delete_payment_message(metadata: dict) -> None:
     try:
         chat_id = int(metadata.get("payment_chat_id"))
         message_id = int(metadata.get("payment_message_id"))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return
     try:
         await get_telegram_http_client().post(
@@ -186,15 +218,20 @@ def admin_payment_text(
     tariff_name: str,
     amount: str,
     expire_date: str,
-) -> str:
-    return (
+) -> TelegramText:
+    formatted_date = format_date_for_user(expire_date)
+    plain = (
         f"{title}\n\n"
         f"👤 Пользователь: @{username if username else 'без username'}\n"
         f"🆔 Telegram ID: {user_id}\n"
         f"📋 Тариф: {tariff_name}\n"
         f"💰 Стоимость: {amount}\n"
         f"💳 Способ оплаты: Банковская карта\n"
-        f"📅 Новый срок: {format_date_for_user(expire_date)}"
+        f"📅 Новый срок: {formatted_date}"
+    )
+    return TelegramText.from_plain_with_replacements(
+        plain,
+        {formatted_date: rich_date(expire_date, formatted_date)},
     )
 
 
@@ -326,9 +363,7 @@ async def process_canceled_payment(payment_data: dict) -> None:
 
 
 async def process_waiting_for_capture_payment(payment_data: dict) -> None:
-    local_payment = await asyncio.to_thread(
-        db.get_payment_by_id, str(payment_data.get("id") or "")
-    )
+    local_payment = await asyncio.to_thread(db.get_payment_by_id, str(payment_data.get("id") or ""))
     if not local_payment:
         return
     user_id = int(local_payment["user_id"])
@@ -457,7 +492,8 @@ async def yookassa_webhook(request: Request):
             metadata = yookassa_client.get_payment_metadata(event_data)
             matches_local = (
                 yookassa_client.get_payment_amount(event_data) == int(local_payment["amount"])
-                and event_data.get("amount", {}).get("currency") == local_payment.get("currency", "RUB")
+                and event_data.get("amount", {}).get("currency")
+                == local_payment.get("currency", "RUB")
                 and str(metadata.get("user_id") or "") == str(local_payment["user_id"])
                 and str(metadata.get("tariff_key") or "") == str(local_payment["tariff_key"])
             )

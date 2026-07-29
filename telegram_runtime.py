@@ -18,6 +18,7 @@ from aiogram.exceptions import (
 from aiogram.types import InlineKeyboardMarkup, InputRichMessage, Message
 
 from database import Database
+from telegram_text import TelegramTextLike, ensure_telegram_text
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -140,40 +141,132 @@ class TelegramUIRenderer:
         self,
         chat_id: int,
         *,
-        rich_markdown: str,
-        fallback_text: str,
+        content: TelegramTextLike,
         reply_markup: InlineKeyboardMarkup | None = None,
     ) -> Any:
-        try:
-            return await self.bot.send_rich_message(
-                chat_id=chat_id,
-                rich_message=InputRichMessage(markdown=rich_markdown),
-                reply_markup=reply_markup,
-            )
-        except TelegramBadRequest:
-            return await self.bot.send_message(
-                chat_id=chat_id,
-                text=fallback_text,
-                reply_markup=reply_markup,
-            )
+        return await send_telegram_text(
+            self.bot,
+            chat_id,
+            content,
+            reply_markup=reply_markup,
+        )
 
     async def edit_rich_or_text(
         self,
         message: Any,
         *,
-        rich_markdown: str,
-        fallback_text: str,
+        content: TelegramTextLike,
         reply_markup: InlineKeyboardMarkup | None = None,
     ) -> Any:
+        return await edit_telegram_text(
+            self.bot,
+            message.chat.id,
+            message.message_id,
+            content,
+            reply_markup=reply_markup,
+        )
+
+
+def _message_not_modified(exc: TelegramBadRequest) -> bool:
+    return "message is not modified" in str(exc).lower()
+
+
+async def send_telegram_text(
+    bot: Bot,
+    chat_id: int,
+    content: TelegramTextLike,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> Any:
+    """Send rich HTML, falling back to regular HTML and then plain text."""
+    rendered = ensure_telegram_text(content)
+    try:
+        return await bot.send_rich_message(
+            chat_id=chat_id,
+            rich_message=InputRichMessage(html=rendered.html),
+            reply_markup=reply_markup,
+        )
+    except TelegramBadRequest, AttributeError, TypeError:
         try:
-            return await self.bot.edit_message_text(
-                chat_id=message.chat.id,
-                message_id=message.message_id,
-                rich_message=InputRichMessage(markdown=rich_markdown),
+            return await bot.send_message(
+                chat_id=chat_id,
+                text=rendered.html,
+                parse_mode="HTML",
                 reply_markup=reply_markup,
             )
         except TelegramBadRequest:
-            return await message.edit_text(fallback_text, reply_markup=reply_markup)
+            return await bot.send_message(
+                chat_id=chat_id,
+                text=rendered.plain,
+                reply_markup=reply_markup,
+            )
+
+
+async def edit_telegram_text(
+    bot: Bot,
+    chat_id: int,
+    message_id: int,
+    content: TelegramTextLike | None = None,
+    *,
+    text: TelegramTextLike | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> Any:
+    """Edit rich HTML, falling back to regular HTML and then plain text."""
+    effective_content = content if content is not None else text
+    if effective_content is None:
+        raise ValueError("Telegram message content is required")
+    rendered = ensure_telegram_text(effective_content)
+    try:
+        return await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            rich_message=InputRichMessage(html=rendered.html),
+            reply_markup=reply_markup,
+        )
+    except (TelegramBadRequest, AttributeError, TypeError) as exc:
+        if isinstance(exc, TelegramBadRequest) and _message_not_modified(exc):
+            return None
+    try:
+        return await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=rendered.html,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+        )
+    except TelegramBadRequest as exc:
+        if _message_not_modified(exc):
+            return None
+    try:
+        return await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=rendered.plain,
+            reply_markup=reply_markup,
+        )
+    except TelegramBadRequest as exc:
+        if _message_not_modified(exc):
+            return None
+        raise
+
+
+async def edit_bound_message(
+    message: Message,
+    content: TelegramTextLike,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> Any:
+    """Edit an aiogram-bound message through the common rich renderer."""
+    if not all(hasattr(message, attribute) for attribute in ("bot", "chat", "message_id")):
+        rendered = ensure_telegram_text(content)
+        return await message.edit_text(rendered.plain, reply_markup=reply_markup)
+    return await edit_telegram_text(
+        message.bot,
+        message.chat.id,
+        message.message_id,
+        content,
+        reply_markup=reply_markup,
+    )
 
 
 class ChatPanelService:
@@ -184,9 +277,7 @@ class ChatPanelService:
         self.db = db
 
     async def _save(self, user_id: int, chat_id: int, message_id: int) -> None:
-        await asyncio.to_thread(
-            self.db.set_telegram_ui_panel, user_id, chat_id, message_id
-        )
+        await asyncio.to_thread(self.db.set_telegram_ui_panel, user_id, chat_id, message_id)
 
     async def _delete_message(self, chat_id: int, message_id: int) -> None:
         try:
@@ -204,41 +295,27 @@ class ChatPanelService:
             int(panel["chat_id"]) != message.chat.id
             or int(panel["message_id"]) != message.message_id
         ):
-            await self._delete_message(
-                int(panel["chat_id"]), int(panel["message_id"])
-            )
+            await self._delete_message(int(panel["chat_id"]), int(panel["message_id"]))
         await self._save(user_id, message.chat.id, message.message_id)
 
     async def _edit(
         self,
         chat_id: int,
         message_id: int,
-        text: str,
+        content: TelegramTextLike,
         reply_markup: InlineKeyboardMarkup | None,
-        rich_markdown: str | None,
     ) -> bool:
-        if rich_markdown:
-            try:
-                await self.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    rich_message=InputRichMessage(markdown=rich_markdown),
-                    reply_markup=reply_markup,
-                )
-                return True
-            except TelegramBadRequest as exc:
-                if "message is not modified" in str(exc).lower():
-                    return True
         try:
-            await self.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=text,
+            await edit_telegram_text(
+                self.bot,
+                chat_id,
+                message_id,
+                content,
                 reply_markup=reply_markup,
             )
             return True
-        except TelegramBadRequest as exc:
-            return "message is not modified" in str(exc).lower()
+        except TelegramBadRequest:
+            return False
         except TelegramForbiddenError:
             return False
 
@@ -246,28 +323,24 @@ class ChatPanelService:
         self,
         chat_id: int,
         user_id: int,
-        text: str,
+        content: TelegramTextLike,
         reply_markup: InlineKeyboardMarkup | None = None,
-        *,
-        rich_markdown: str | None = None,
     ) -> Message | None:
         panel = await asyncio.to_thread(self.db.get_telegram_ui_panel, user_id)
         if panel and await self._edit(
             int(panel["chat_id"]),
             int(panel["message_id"]),
-            text,
+            content,
             reply_markup,
-            rich_markdown,
         ):
             return None
         if panel:
-            await self._delete_message(
-                int(panel["chat_id"]), int(panel["message_id"])
-            )
+            await self._delete_message(int(panel["chat_id"]), int(panel["message_id"]))
             await asyncio.to_thread(self.db.delete_telegram_ui_panel, user_id)
-        sent = await self.bot.send_message(
-            chat_id=chat_id,
-            text=text,
+        sent = await send_telegram_text(
+            self.bot,
+            chat_id,
+            content,
             reply_markup=reply_markup,
         )
         await self._save(user_id, chat_id, sent.message_id)
@@ -276,37 +349,32 @@ class ChatPanelService:
     async def render_from_message(
         self,
         message: Message,
-        text: str,
+        content: TelegramTextLike,
         reply_markup: InlineKeyboardMarkup | None = None,
         *,
         user_id: int | None = None,
-        rich_markdown: str | None = None,
     ) -> Message | None:
         effective_user_id = user_id or message.chat.id
         await self.adopt(message, effective_user_id)
         return await self.render(
             message.chat.id,
             effective_user_id,
-            text,
+            content,
             reply_markup,
-            rich_markdown=rich_markdown,
         )
 
     async def restore_or_create(
         self,
         chat_id: int,
         user_id: int,
-        text: str,
+        content: TelegramTextLike,
         reply_markup: InlineKeyboardMarkup | None = None,
-        *,
-        rich_markdown: str | None = None,
     ) -> Message | None:
         return await self.render(
             chat_id,
             user_id,
-            text,
+            content,
             reply_markup,
-            rich_markdown=rich_markdown,
         )
 
     async def delete_user_message(self, message: Message) -> None:

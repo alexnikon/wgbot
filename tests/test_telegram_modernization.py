@@ -64,6 +64,7 @@ from telegram_runtime import (
     UserActionLocks,
     redact_telegram_content,
 )
+from telegram_text import TelegramText
 from utils import location_config_filename
 
 
@@ -122,9 +123,7 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
             PaymentManager.parse_invoice_payload(f"vpn2:{payment_id}:30_days:123"),
             ("stars", "30_days", 123),
         )
-        self.assertIsNone(
-            PaymentManager.parse_invoice_payload(f"vpn2:{payment_id}:unknown:123")
-        )
+        self.assertIsNone(PaymentManager.parse_invoice_payload(f"vpn2:{payment_id}:unknown:123"))
 
     def test_log_preview_redacts_credentials(self):
         preview = redact_telegram_content(
@@ -148,10 +147,12 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
         fake = FakeBot()
         renderer = TelegramUIRenderer(fake)
         result = await renderer.send_rich_or_text(
-            10, rich_markdown="# Status", fallback_text="Status"
+            10,
+            content=TelegramText.from_html("Status", "<b>Status</b>"),
         )
         self.assertEqual(result, "sent")
-        self.assertEqual(fake.fallback["text"], "Status")
+        self.assertEqual(fake.fallback["text"], "<b>Status</b>")
+        self.assertEqual(fake.fallback["parse_mode"], "HTML")
 
     async def test_chat_panel_restores_persisted_message_without_sending(self):
         handle, path = tempfile.mkstemp(suffix=".db")
@@ -186,9 +187,7 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
                 edit_message_text=AsyncMock(
                     side_effect=TelegramBadRequest(SimpleNamespace(), "message not found")
                 ),
-                send_message=AsyncMock(
-                    return_value=SimpleNamespace(message_id=88)
-                ),
+                send_message=AsyncMock(return_value=SimpleNamespace(message_id=88)),
                 delete_message=AsyncMock(),
             )
             panel = ChatPanelService(fake_bot, database)
@@ -220,7 +219,9 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
             )
             panel = ChatPanelService(fake_bot, database)
             await panel.restore_or_create(
-                10, 10, "Plain status", rich_markdown="# Rich status"
+                10,
+                10,
+                TelegramText.from_html("Plain status", "<b>Rich status</b>"),
             )
             self.assertEqual(fake_bot.edit_message_text.await_count, 2)
             fake_bot.send_message.assert_not_awaited()
@@ -277,9 +278,7 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
     async def test_config_is_sent_once_with_caption_without_navigation_keyboard(self):
         fake_bot = SimpleNamespace(send_document=AsyncMock())
         with patch.object(bot_module, "bot", fake_bot, create=True):
-            self.assertTrue(
-                await bot_module.send_config_with_confirmation(10, b"config")
-            )
+            self.assertTrue(await bot_module.send_config_with_confirmation(10, b"config"))
         fake_bot.send_document.assert_awaited_once()
         arguments = fake_bot.send_document.await_args.kwargs
         self.assertIn("AmneziaWG", arguments["caption"])
@@ -288,9 +287,7 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_selected_config_includes_server_name_and_location_filename(self):
         events = []
-        instruction_message = SimpleNamespace(
-            chat=SimpleNamespace(id=10), message_id=99
-        )
+        instruction_message = SimpleNamespace(chat=SimpleNamespace(id=10), message_id=99)
 
         async def send_document(**_kwargs):
             events.append("document")
@@ -333,13 +330,9 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
         fake_panel.adopt.assert_awaited_once_with(instruction_message, 10)
 
     async def test_hidden_start_deletes_input_and_restores_panel(self):
-        panel = SimpleNamespace(
-            delete_user_message=AsyncMock(), restore_or_create=AsyncMock()
-        )
+        panel = SimpleNamespace(delete_user_message=AsyncMock(), restore_or_create=AsyncMock())
         clear_admin_state = unittest.mock.Mock()
-        message = SimpleNamespace(
-            from_user=SimpleNamespace(id=42), chat=SimpleNamespace(id=42)
-        )
+        message = SimpleNamespace(from_user=SimpleNamespace(id=42), chat=SimpleNamespace(id=42))
         keyboard = SimpleNamespace()
         await cmd_start(
             message,
@@ -396,12 +389,8 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
         workflow = SimpleNamespace(get=lambda _user_id: {"state": "await_expiry"})
         with patch("handlers.admin.is_admin", return_value=True):
             for text in ("/start", "/start payload", "/start@TestBot payload"):
-                command_message = SimpleNamespace(
-                    text=text, from_user=SimpleNamespace(id=42)
-                )
-                self.assertFalse(
-                    await ActiveAdminWorkflow()(command_message, workflow)
-                )
+                command_message = SimpleNamespace(text=text, from_user=SimpleNamespace(id=42))
+                self.assertFalse(await ActiveAdminWorkflow()(command_message, workflow))
 
     async def test_document_callback_is_not_adopted_as_panel(self):
         middleware = bot_module.PanelTrackingMiddleware()
@@ -465,21 +454,15 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
                     pass
 
     async def test_unknown_input_is_deleted_without_new_reply(self):
-        panel = SimpleNamespace(
-            delete_user_message=AsyncMock(), restore_or_create=AsyncMock()
-        )
-        message = SimpleNamespace(
-            from_user=SimpleNamespace(id=42), chat=SimpleNamespace(id=42)
-        )
+        panel = SimpleNamespace(delete_user_message=AsyncMock(), restore_or_create=AsyncMock())
+        message = SimpleNamespace(from_user=SimpleNamespace(id=42), chat=SimpleNamespace(id=42))
         await handle_unknown(message, lambda _user_id: SimpleNamespace(), panel)
         panel.delete_user_message.assert_awaited_once_with(message)
         panel.restore_or_create.assert_awaited_once()
 
     def test_admin_dashboard_contains_all_button_only_operations(self):
         labels = [
-            button.text
-            for row in admin_dashboard_keyboard().inline_keyboard
-            for button in row
+            button.text for row in admin_dashboard_keyboard().inline_keyboard for button in row
         ]
         self.assertIn("👥 Клиенты и скидки", labels)
         self.assertIn("📣 Рассылка", labels)
@@ -515,9 +498,7 @@ class TelegramDatabaseTests(unittest.TestCase):
         self.assertIsNone(self.db.get_admin_workflow(1, "input"))
 
     def test_named_config_keyboards_hide_deactivated_config_from_client(self):
-        self.db.save_client_peer(
-            10, "server-a", "if-a", "primary", "key-a", "alice", "primary"
-        )
+        self.db.save_client_peer(10, "server-a", "if-a", "primary", "key-a", "alice", "primary")
         self.db.save_client_peer(
             10,
             "server-b",
@@ -541,38 +522,24 @@ class TelegramDatabaseTests(unittest.TestCase):
             admin_enabled=False,
         )
         client_keyboard, count = client_config_keyboard(self.db, 10)
-        client_labels = [
-            button.text
-            for row in client_keyboard.inline_keyboard
-            for button in row
-        ]
+        client_labels = [button.text for row in client_keyboard.inline_keyboard for button in row]
         self.assertEqual(count, 2)
         self.assertIn("Основной конфиг", client_labels)
         self.assertIn("Телефон", client_labels)
         self.assertNotIn("Планшет", client_labels)
 
         admin_keyboard, _ = config_list_keyboard(self.db, 10)
-        admin_labels = [
-            button.text
-            for row in admin_keyboard.inline_keyboard
-            for button in row
-        ]
+        admin_labels = [button.text for row in admin_keyboard.inline_keyboard for button in row]
         self.assertTrue(any("Планшет" in label for label in admin_labels))
 
     def test_client_card_exposes_discount_and_config_management(self):
-        labels = [
-            button.text
-            for row in client_card_keyboard(10).inline_keyboard
-            for button in row
-        ]
+        labels = [button.text for row in client_card_keyboard(10).inline_keyboard for button in row]
         self.assertIn("💸 Скидка", labels)
         self.assertIn("🗂 Конфиги", labels)
         self.assertIn("📅 Срок доступа", labels)
         self.assertEqual(location_config_filename("USA NY"), "USA-NY.conf")
         self.assertEqual(location_config_filename("Finland / Helsinki"), "Finland-Helsinki.conf")
-        empty_keyboard, total = client_list_keyboard(
-            self.db, view="details", page=0
-        )
+        empty_keyboard, total = client_list_keyboard(self.db, view="details", page=0)
         self.assertEqual(total, 0)
         self.assertEqual(
             empty_keyboard.inline_keyboard[-1][0].text,
@@ -598,9 +565,7 @@ class TelegramDatabaseTests(unittest.TestCase):
             parse_admin_expiry_input("2030/01/01")
 
     def test_expiry_confirmation_syncs_and_queues_partial_failure(self):
-        self.db.ensure_subscription(
-            10, "alice", "2030-01-01 00:00:00", "paid", "30_days", "stars"
-        )
+        self.db.ensure_subscription(10, "alice", "2030-01-01 00:00:00", "paid", "30_days", "stars")
         workflow = AdminWorkflowService(self.db)
         workflow.set(
             99,
@@ -630,22 +595,16 @@ class TelegramDatabaseTests(unittest.TestCase):
                     AdminClientCallback(action="expiry_confirm", user_id=10),
                 )
             )
-        self.assertEqual(
-            self.db.get_subscription_expiry(10), "2031-01-01 00:00:00"
-        )
+        self.assertEqual(self.db.get_subscription_expiry(10), "2031-01-01 00:00:00")
         self.assertIsNone(workflow.get(99))
         self.assertIn(
             "автоматического повтора",
             callback.message.edit_text.await_args.args[0],
         )
-        self.assertEqual(
-            self.db.get_runtime_stats()["provisioning_pending"], 1
-        )
+        self.assertEqual(self.db.get_runtime_stats()["provisioning_pending"], 1)
 
     def test_expiry_confirmation_rejects_mismatched_client(self):
-        self.db.ensure_subscription(
-            10, "alice", "2030-01-01 00:00:00", "paid", "30_days", "stars"
-        )
+        self.db.ensure_subscription(10, "alice", "2030-01-01 00:00:00", "paid", "30_days", "stars")
         workflow = AdminWorkflowService(self.db)
         workflow.set(
             99,
@@ -670,9 +629,7 @@ class TelegramDatabaseTests(unittest.TestCase):
                 )
             )
         cascade_router.sync_user_access.assert_not_awaited()
-        self.assertEqual(
-            self.db.get_subscription_expiry(10), "2030-01-01 00:00:00"
-        )
+        self.assertEqual(self.db.get_subscription_expiry(10), "2030-01-01 00:00:00")
 
     def test_paid_config_details_include_download_and_display_location(self):
         config = {
@@ -688,18 +645,14 @@ class TelegramDatabaseTests(unittest.TestCase):
         }
 
         labels = [
-            button.text
-            for row in config_details_keyboard(config).inline_keyboard
-            for button in row
+            button.text for row in config_details_keyboard(config).inline_keyboard for button in row
         ]
 
         self.assertIn("📥 Скачать конфиг", labels)
         self.assertIn("Сервер: Finland (fin-1)", format_config(config, "Finland"))
 
     def test_admin_download_sends_file_privately_and_audits(self):
-        self.db.ensure_subscription(
-            10, "alice", "2000-01-01 00:00:00", "paid", "30_days", "stars"
-        )
+        self.db.ensure_subscription(10, "alice", "2000-01-01 00:00:00", "paid", "30_days", "stars")
         self.db.save_client_peer(
             10,
             "fin-1",
@@ -736,15 +689,11 @@ class TelegramDatabaseTests(unittest.TestCase):
                     self.db,
                     router,
                     AsyncMock(),
-                    AdminConfigCallback(
-                        action="download", user_id=10, peer_id=peer_id
-                    ),
+                    AdminConfigCallback(action="download", user_id=10, peer_id=peer_id),
                 )
             )
 
-        self.assertEqual(
-            telegram_bot.send_document.await_args.kwargs["chat_id"], 99
-        )
+        self.assertEqual(telegram_bot.send_document.await_args.kwargs["chat_id"], 99)
         self.assertEqual(
             telegram_bot.send_document.await_args.kwargs["document"].filename,
             "Finland.conf",
@@ -758,9 +707,7 @@ class TelegramDatabaseTests(unittest.TestCase):
 
     def test_admin_download_rejects_unpaid_client_before_cascade(self):
         self.db.ensure_subscription(10, "alice", None, "unpaid")
-        self.db.save_client_peer(
-            10, "fin-1", "if-a", "peer-a", "key-a", "alice", "primary"
-        )
+        self.db.save_client_peer(10, "fin-1", "if-a", "peer-a", "key-a", "alice", "primary")
         peer_id = self.db.get_managed_client_configs(10)[0]["id"]
         callback = SimpleNamespace(
             from_user=SimpleNamespace(id=99),
@@ -776,9 +723,7 @@ class TelegramDatabaseTests(unittest.TestCase):
                     self.db,
                     router,
                     AsyncMock(),
-                    AdminConfigCallback(
-                        action="download", user_id=10, peer_id=peer_id
-                    ),
+                    AdminConfigCallback(action="download", user_id=10, peer_id=peer_id),
                 )
             )
 
@@ -793,9 +738,7 @@ class TelegramDatabaseTests(unittest.TestCase):
         self.assertEqual(self.db.get_legacy_callback_zero_streak(), 1)
         self.db.record_telegram_daily_metric("legacy_callbacks")
         self.assertEqual(self.db.get_legacy_callback_zero_streak(), 0)
-        self.assertEqual(
-            self.db.get_runtime_stats()["legacy_callbacks_today"], 1
-        )
+        self.assertEqual(self.db.get_runtime_stats()["legacy_callbacks_today"], 1)
 
     def test_star_discrepancy_approval_is_atomic_and_does_not_grant_access(self):
         self.db.record_star_transaction(
@@ -824,11 +767,7 @@ class TelegramDatabaseTests(unittest.TestCase):
     def test_star_payment_fields_and_refund_review_do_not_reduce_access(self):
         payment_id = str(uuid.uuid4())
         payload = f"vpn2:{payment_id}:14_days:7"
-        self.assertTrue(
-            self.db.create_stars_payment_intent(
-                payment_id, 7, 100, "14_days", payload
-            )
-        )
+        self.assertTrue(self.db.create_stars_payment_intent(payment_id, 7, 100, "14_days", payload))
         result = self.db.apply_verified_payment(
             payment_id,
             7,
@@ -849,15 +788,9 @@ class TelegramDatabaseTests(unittest.TestCase):
         self.assertEqual(self.db.get_peer_by_telegram_id(7)["expire_date"], expiry)
 
     def test_star_ledger_distinguishes_payment_and_refund_direction(self):
-        self.assertTrue(
-            self.db.record_star_transaction("same-id", "incoming", 100, 1)
-        )
-        self.assertTrue(
-            self.db.record_star_transaction("same-id", "outgoing", 100, 2)
-        )
-        self.assertFalse(
-            self.db.record_star_transaction("same-id", "incoming", 100, 1)
-        )
+        self.assertTrue(self.db.record_star_transaction("same-id", "incoming", 100, 1))
+        self.assertTrue(self.db.record_star_transaction("same-id", "outgoing", 100, 2))
+        self.assertFalse(self.db.record_star_transaction("same-id", "incoming", 100, 1))
 
     def test_payment_schema_keeps_provider_and_telegram_ids_separate(self):
         payment_id = str(uuid.uuid4())
@@ -940,9 +873,7 @@ class TelegramSenderTests(unittest.IsolatedAsyncioTestCase):
             payment_id = str(uuid.uuid4())
             payload = f"vpn2:{payment_id}:14_days:10"
             self.assertTrue(
-                database.create_stars_payment_intent(
-                    payment_id, 10, 100, "14_days", payload
-                )
+                database.create_stars_payment_intent(payment_id, 10, 100, "14_days", payload)
             )
             self.assertTrue(database.set_stars_invoice_message(payload, 55))
             self.assertEqual(
@@ -978,9 +909,7 @@ class TelegramSenderTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_network_error_uses_bounded_backoff(self):
         sender = TelegramSender(SimpleNamespace(), SimpleNamespace())
-        operation = AsyncMock(
-            side_effect=TelegramNetworkError(SimpleNamespace(), "offline")
-        )
+        operation = AsyncMock(side_effect=TelegramNetworkError(SimpleNamespace(), "offline"))
         with patch("telegram_runtime.asyncio.sleep", new=AsyncMock()) as sleep:
             self.assertIsNone(await sender.call(42, operation))
         self.assertEqual(operation.await_count, 3)
@@ -988,9 +917,7 @@ class TelegramSenderTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_bad_request_is_not_retried(self):
         sender = TelegramSender(SimpleNamespace(), SimpleNamespace())
-        operation = AsyncMock(
-            side_effect=TelegramBadRequest(SimpleNamespace(), "invalid")
-        )
+        operation = AsyncMock(side_effect=TelegramBadRequest(SimpleNamespace(), "invalid"))
         self.assertIsNone(await sender.call(42, operation))
         self.assertEqual(operation.await_count, 1)
 
@@ -999,12 +926,8 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
     def test_malformed_legacy_payment_callbacks_are_rejected(self):
         manager = SimpleNamespace(is_tariff_enabled=lambda tariff: tariff == "14_days")
         self.assertIsNone(_parse_legacy_method("pay_stars_bad", "stars", manager))
-        self.assertIsNone(
-            _parse_legacy_method("pay_stars_14_days_not-a-user", "stars", manager)
-        )
-        self.assertIsNone(
-            _parse_legacy_method("pay_stars_unknown_10", "stars", manager)
-        )
+        self.assertIsNone(_parse_legacy_method("pay_stars_14_days_not-a-user", "stars", manager))
+        self.assertIsNone(_parse_legacy_method("pay_stars_unknown_10", "stars", manager))
 
     async def test_payment_callback_is_acknowledged_before_cascade(self):
         events = []
@@ -1037,16 +960,12 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
             lambda: None,
             UserActionLocks(),
             SimpleNamespace(telegram_event=lambda _name: None),
-            PaymentMethodCallback(
-                method=PaymentMethod.STARS, tariff="14_days", user_id=55
-            ),
+            PaymentMethodCallback(method=PaymentMethod.STARS, tariff="14_days", user_id=55),
         )
         self.assertEqual(events, ["ack", "cascade", "invoice"])
 
     async def test_start_command_is_exposed_and_admin_override_is_cleared(self):
-        fake_bot = SimpleNamespace(
-            delete_my_commands=AsyncMock(), set_my_commands=AsyncMock()
-        )
+        fake_bot = SimpleNamespace(delete_my_commands=AsyncMock(), set_my_commands=AsyncMock())
         with (
             patch.object(bot_module, "bot", fake_bot, create=True),
             patch.object(bot_module, "get_admin_telegram_ids", return_value=[99]),
@@ -1080,9 +999,7 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
             database = Database(path)
             payment_id = str(uuid.uuid4())
             payload = f"vpn2:{payment_id}:14_days:70"
-            database.create_stars_payment_intent(
-                payment_id, 70, 100, "14_days", payload
-            )
+            database.create_stars_payment_intent(payment_id, 70, 100, "14_days", payload)
             database.apply_verified_payment(
                 payment_id,
                 70,
@@ -1125,9 +1042,7 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
             database = Database(path)
             payment_id = str(uuid.uuid4())
             payload = f"vpn2:{payment_id}:14_days:80"
-            database.create_stars_payment_intent(
-                payment_id, 80, 100, "14_days", payload
-            )
+            database.create_stars_payment_intent(payment_id, 80, 100, "14_days", payload)
             applied = database.apply_verified_payment(
                 payment_id,
                 80,
@@ -1149,9 +1064,7 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
                 from_user=SimpleNamespace(id=80),
                 chat=SimpleNamespace(id=80),
             )
-            panel = SimpleNamespace(
-                delete_user_message=AsyncMock(), render=AsyncMock()
-            )
+            panel = SimpleNamespace(delete_user_message=AsyncMock(), render=AsyncMock())
             await process_refunded_payment(
                 message,
                 database,
@@ -1163,9 +1076,7 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
                 database.get_peer_by_telegram_id(80)["expire_date"],
                 applied["expire_date"],
             )
-            self.assertEqual(
-                database.get_payment_by_id(payment_id)["status"], "refunded"
-            )
+            self.assertEqual(database.get_payment_by_id(payment_id)["status"], "refunded")
         finally:
             for suffix in ("", "-wal", "-shm"):
                 try:
@@ -1251,9 +1162,7 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
             class FakeBot:
                 async def get_star_transactions(self, *, offset, limit):
                     offsets.append(offset)
-                    return SimpleNamespace(
-                        transactions=transactions[offset : offset + limit]
-                    )
+                    return SimpleNamespace(transactions=transactions[offset : offset + limit])
 
             reconciler = StarsReconciler(
                 FakeBot(),

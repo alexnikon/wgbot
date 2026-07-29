@@ -6,7 +6,13 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from callbacks import ClientConfigCallback
 from cascade_api import CascadeNotFound, CascadeRouter
 from database import Database
+from message_templates import (
+    active_subscription_status,
+    expired_subscription_status,
+    format_remaining_time,
+)
 from payment import PaymentManager
+from telegram_text import TelegramText, rich_date
 from utils import format_date_for_user, location_config_filename, parse_date_flexible
 
 logger = logging.getLogger(__name__)
@@ -59,9 +65,7 @@ def config_file_back_keyboard(page: int = 0) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text="⬅️ Назад",
-                    callback_data=ClientConfigCallback(
-                        action="back", page=max(0, page)
-                    ).pack(),
+                    callback_data=ClientConfigCallback(action="back", page=max(0, page)).pack(),
                 )
             ]
         ]
@@ -98,13 +102,17 @@ async def handle_get_config_callback(
                     if expire_date != "Неизвестно"
                     else "Неизвестно"
                 )
-                text = f"""
+                plain_text = f"""
 ⚠️ Твой доступ к VPN истек!
 
 📅 Дата истечения: {formatted}
 
 ⚠️ Для продолжения пользования сервисом, необходимо продлить доступ.
                 """
+                text = TelegramText.from_plain_with_replacements(
+                    plain_text,
+                    {formatted: rich_date(expire_date, formatted)},
+                )
             else:
                 text = """
 ❌ У тебя нет активного доступа.
@@ -239,9 +247,7 @@ async def download_client_config(
             except CascadeNotFound:
                 if config["role"] != "primary":
                     raise
-                logger.warning(
-                    "Primary Cascade peer is explicitly missing for user %s", user_id
-                )
+                logger.warning("Primary Cascade peer is explicitly missing for user %s", user_id)
                 ok, err, new_config = await create_or_restore_peer_for_user(
                     user_id,
                     callback_query.from_user.username,
@@ -255,9 +261,7 @@ async def download_client_config(
                     )
                     return
                 peer_config = new_config
-            server_name = cascade_router.get_server_name(
-                str(config["server_key"])
-            )
+            server_name = cascade_router.get_server_name(str(config["server_key"]))
             sent = await send_config_with_confirmation(
                 callback_query.message.chat.id,
                 peer_config,
@@ -386,8 +390,6 @@ async def handle_status_callback(
             else "Неизвестно"
         )
         connected_devices = db.get_peer_count(user_id)
-        devices_line = f"\nПодключено устройств: {connected_devices}" if connected_devices else ""
-
         # Check if access has expired
         from datetime import datetime
 
@@ -397,67 +399,41 @@ async def handle_status_callback(
                 expire_date = parse_date_flexible(expire_date_str)
                 now = datetime.now()
                 is_expired = expire_date <= now
-            except (ValueError, TypeError):
+            except ValueError, TypeError:
                 pass
 
         # Format peer info
         if is_expired:
-            status_text = f"""
-📊 Статус доступа:
-
-⏰ Доступ закончился: {expire_date_formatted}{devices_line}
-
-⚠️ Твой VPN доступ истек!
-
-⚠️ Для продолжения пользования сервисом, необходимо продлить доступ.
-
-Выбери действие с помощью кнопок ниже:
-            """
+            status_text = expired_subscription_status(
+                connected_devices,
+                expire_date_str,
+                expire_date_formatted,
+            )
         else:
             # Access active: calculate remaining time
             try:
                 expire_date = parse_date_flexible(expire_date_str)
                 now = datetime.now()
                 time_left = expire_date - now
-                days_left = time_left.days
-                hours_left = time_left.seconds // 3600
-                minutes_left = (time_left.seconds % 3600) // 60
-
+                status_text = active_subscription_status(
+                    connected_devices,
+                    expire_date_str,
+                    expire_date_formatted,
+                    format_remaining_time(time_left),
+                )
+            except ValueError, TypeError:
                 status_text = f"""
-📊 Статус доступа:
+📊 Статус подписки
 
-⏰ Доступ закончится: {expire_date_formatted}{devices_line}
-                """
+⚙️Подключено устройств: {connected_devices}
+⏰ Доступ закончится: {expire_date_formatted}
 
-                if days_left > 0:
-                    status_text += (
-                        f"\n⏰ Осталось: {days_left} дн. {hours_left} ч. {minutes_left} мин."
-                    )
-                elif hours_left > 0:
-                    status_text += f"\n⏰ Осталось: {hours_left} ч. {minutes_left} мин."
-                else:
-                    status_text += f"\n⏰ Осталось: {minutes_left} мин."
-
-                if days_left <= 3:
-                    status_text += '\n\n⚠️ Доступ к сервису скоро истекает! Нажми "Продлить доступ" для продления.'
-
-                status_text += "\n\nВыбери действие с помощью кнопок ниже:"
-            except (ValueError, TypeError):
-                status_text = f"""
-📊 Статус доступа:
-
-⏰ Доступ закончится: {expire_date_formatted}{devices_line}
-
-Выбери действие с помощью кнопок ниже:
+Ты можешь продлить действующую подписку, оплатив доступ еще раз, срок добавится к текущей подписке
                 """
 
         await ui_renderer.edit_rich_or_text(
             callback_query.message,
-            rich_markdown=(
-                "# 📊 Статус подписки\n\n"
-                + status_text.replace("📊 Статус доступа:", "").strip()
-            ),
-            fallback_text=status_text,
+            content=status_text,
             reply_markup=create_main_menu_keyboard(user_id),
         )
 

@@ -19,6 +19,8 @@ from callbacks import (
 from cascade_api import CascadeError, CascadeNotFound, CascadeRouter
 from config import get_admin_telegram_ids
 from database import Database, normalize_config_name
+from telegram_runtime import edit_bound_message, edit_telegram_text
+from telegram_text import TelegramText, ensure_telegram_text, rich_date
 from utils import format_date_for_user, location_config_filename
 
 logger = logging.getLogger(__name__)
@@ -46,7 +48,7 @@ def parse_admin_expiry_input(value: str) -> str:
                 .replace(tzinfo=None)
                 .strftime("%Y-%m-%d %H:%M:%S")
             )
-        except (OverflowError, ValueError):
+        except OverflowError, ValueError:
             continue
     raise ValueError("Unsupported expiry date format")
 
@@ -88,9 +90,7 @@ class AdminWorkflowService:
 
 
 class ActiveAdminWorkflow(BaseFilter):
-    async def __call__(
-        self, message: types.Message, admin_workflows: AdminWorkflowService
-    ) -> bool:
+    async def __call__(self, message: types.Message, admin_workflows: AdminWorkflowService) -> bool:
         command = (message.text or "").split(maxsplit=1)[0].casefold()
         if command == "/start" or command.startswith("/start@"):
             return False
@@ -124,27 +124,11 @@ def broadcast_menu_keyboard() -> InlineKeyboardMarkup:
 def admin_dashboard_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="👥 Клиенты и скидки", callback_data="admin_client_list"
-                )
-            ],
+            [InlineKeyboardButton(text="👥 Клиенты и скидки", callback_data="admin_client_list")],
             [InlineKeyboardButton(text="📣 Рассылка", callback_data="admin_broadcast")],
-            [
-                InlineKeyboardButton(
-                    text="💳 Платежи и расхождения", callback_data="admin_payments"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⭐ Сверить Stars", callback_data="admin_stars_reconcile"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="↩️ Возврат Stars", callback_data="admin_refund_stars"
-                )
-            ],
+            [InlineKeyboardButton(text="💳 Платежи и расхождения", callback_data="admin_payments")],
+            [InlineKeyboardButton(text="⭐ Сверить Stars", callback_data="admin_stars_reconcile")],
+            [InlineKeyboardButton(text="↩️ Возврат Stars", callback_data="admin_refund_stars")],
             [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main")],
         ]
     )
@@ -172,9 +156,7 @@ def confirm_keyboard() -> InlineKeyboardMarkup:
 def client_list_keyboard(
     db: Database, *, view: str, page: int, query: str = ""
 ) -> tuple[InlineKeyboardMarkup, int]:
-    clients, total = db.get_admin_clients_page(
-        page, ADMIN_CLIENTS_PAGE_SIZE, query=query
-    )
+    clients, total = db.get_admin_clients_page(page, ADMIN_CLIENTS_PAGE_SIZE, query=query)
     pages = max(1, (total + ADMIN_CLIENTS_PAGE_SIZE - 1) // ADMIN_CLIENTS_PAGE_SIZE)
     page = max(0, min(page, pages - 1))
     rows: list[list[InlineKeyboardButton]] = []
@@ -212,11 +194,7 @@ def client_list_keyboard(
             [InlineKeyboardButton(text="🔎 Найти клиента", callback_data="admin_search_client")]
         )
     rows.append(
-        [
-            InlineKeyboardButton(
-                text="⬅️ Управление клиентами", callback_data="admin_manage_clients"
-            )
-        ]
+        [InlineKeyboardButton(text="⬅️ Управление клиентами", callback_data="admin_manage_clients")]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows), total
 
@@ -228,9 +206,7 @@ def discount_keyboard(user_id: int) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text=f"{value}%",
-                    callback_data=AdminDiscountCallback(
-                        user_id=user_id, value=value
-                    ).pack(),
+                    callback_data=AdminDiscountCallback(user_id=user_id, value=value).pack(),
                 )
                 for value in values
             ]
@@ -239,9 +215,7 @@ def discount_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(
                 text="✏️ Другое значение",
-                callback_data=AdminClientCallback(
-                    action="custom_discount", user_id=user_id
-                ).pack(),
+                callback_data=AdminClientCallback(action="custom_discount", user_id=user_id).pack(),
             )
         ]
     )
@@ -249,9 +223,7 @@ def discount_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(
                 text="⬅️ К клиенту",
-                callback_data=AdminClientCallback(
-                    action="details", user_id=user_id
-                ).pack(),
+                callback_data=AdminClientCallback(action="details", user_id=user_id).pack(),
             )
         ]
     )
@@ -264,30 +236,20 @@ def client_card_keyboard(user_id: int) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text="💸 Скидка",
-                    callback_data=AdminClientCallback(
-                        action="discount", user_id=user_id
-                    ).pack(),
+                    callback_data=AdminClientCallback(action="discount", user_id=user_id).pack(),
                 ),
                 InlineKeyboardButton(
                     text="🗂 Конфиги",
-                    callback_data=AdminConfigCallback(
-                        action="list", user_id=user_id
-                    ).pack(),
+                    callback_data=AdminConfigCallback(action="list", user_id=user_id).pack(),
                 ),
             ],
             [
                 InlineKeyboardButton(
                     text="📅 Срок доступа",
-                    callback_data=AdminClientCallback(
-                        action="expiry", user_id=user_id
-                    ).pack(),
+                    callback_data=AdminClientCallback(action="expiry", user_id=user_id).pack(),
                 )
             ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ К списку", callback_data="admin_client_list"
-                )
-            ],
+            [InlineKeyboardButton(text="⬅️ К списку", callback_data="admin_client_list")],
         ]
     )
 
@@ -341,17 +303,13 @@ def config_list_keyboard(
             [
                 InlineKeyboardButton(
                     text="➕ Добавить конфиг",
-                    callback_data=AdminConfigCallback(
-                        action="add", user_id=user_id
-                    ).pack(),
+                    callback_data=AdminConfigCallback(action="add", user_id=user_id).pack(),
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="⬅️ К клиенту",
-                    callback_data=AdminClientCallback(
-                        action="details", user_id=user_id
-                    ).pack(),
+                    callback_data=AdminClientCallback(action="details", user_id=user_id).pack(),
                 )
             ],
         ]
@@ -434,11 +392,7 @@ def config_error_back_keyboard(user_id: int, peer_id: int) -> InlineKeyboardMark
 
 def config_display_name(config: dict[str, Any]) -> str:
     """Return a stable display name for managed and historical configs."""
-    return str(
-        config.get("config_name")
-        or config.get("peer_name")
-        or "Конфиг"
-    )
+    return str(config.get("config_name") or config.get("peer_name") or "Конфиг")
 
 
 def format_config(config: dict[str, Any], server_name: str | None = None) -> str:
@@ -450,9 +404,7 @@ def format_config(config: dict[str, Any], server_name: str | None = None) -> str
         status = "недоступен или срок истёк"
     server_key = str(config["server_key"])
     server_label = (
-        f"{server_name} ({server_key})"
-        if server_name and server_name != server_key
-        else server_key
+        f"{server_name} ({server_key})" if server_name and server_name != server_key else server_key
     )
     role_label = {
         "primary": "основной",
@@ -467,20 +419,26 @@ def format_config(config: dict[str, Any], server_name: str | None = None) -> str
     )
 
 
-def format_client(client: dict[str, Any]) -> str:
+def format_client(client: dict[str, Any]) -> TelegramText:
     username = str(client.get("telegram_username") or "")
     identity = f"@{username}" if username else "без username"
     expiry = client.get("expire_date")
-    return (
+    formatted_expiry = format_date_for_user(expiry) if expiry else "нет"
+    plain = (
         "👤 Клиент\n\n"
         f"Telegram ID: {client['telegram_user_id']}\n"
         f"Username: {identity}\n"
         f"Скидка: {int(client.get('promo') or 0)}%\n"
         f"Сервер: {client.get('server_keys') or 'не назначен'}\n"
         f"Устройств: {int(client.get('device_count') or 0)}\n"
-        f"Доступ до: {format_date_for_user(expiry) if expiry else 'нет'}"
+        f"Доступ до: {formatted_expiry}"
     )
-
+    if not expiry:
+        return TelegramText.from_plain(plain)
+    return TelegramText.from_plain_with_replacements(
+        plain,
+        {formatted_expiry: rich_date(expiry, formatted_expiry)},
+    )
 
 
 @router.callback_query(F.data == "admin_broadcast")
@@ -488,19 +446,19 @@ async def open_broadcast(callback: types.CallbackQuery, safe_answer_callback) ->
     await safe_answer_callback(callback)
     if not is_admin(callback.from_user.id):
         return
-    await callback.message.edit_text("📣 Рассылка", reply_markup=broadcast_menu_keyboard())
+    await edit_bound_message(
+        callback.message, "📣 Рассылка", reply_markup=broadcast_menu_keyboard()
+    )
 
 
 @router.callback_query(F.data == "admin_manage_clients")
-async def open_clients(
-    callback: types.CallbackQuery, db: Database, safe_answer_callback
-) -> None:
+async def open_clients(callback: types.CallbackQuery, db: Database, safe_answer_callback) -> None:
     if not is_admin(callback.from_user.id):
         await safe_answer_callback(callback, "❌ Недостаточно прав.")
         return
     await safe_answer_callback(callback)
-    await callback.message.edit_text(
-        "👥 Управление клиентами", reply_markup=admin_dashboard_keyboard()
+    await edit_bound_message(
+        callback.message, "👥 Управление клиентами", reply_markup=admin_dashboard_keyboard()
     )
 
 
@@ -513,8 +471,8 @@ async def open_client_list(
         return
     await safe_answer_callback(callback)
     keyboard, total = client_list_keyboard(db, view="details", page=0)
-    await callback.message.edit_text(
-        f"👥 Клиенты и скидки\n\nНайдено: {total}", reply_markup=keyboard
+    await edit_bound_message(
+        callback.message, f"👥 Клиенты и скидки\n\nНайдено: {total}", reply_markup=keyboard
     )
 
 
@@ -536,7 +494,8 @@ async def start_broadcast_all(
         service_message_id=callback.message.message_id,
     )
     recipients = db.get_client_telegram_ids()
-    await callback.message.edit_text(
+    await edit_bound_message(
+        callback.message,
         f"Отправь сообщение для рассылки.\n\nПолучателей: {len(recipients)}",
         reply_markup=cancel_keyboard(),
     )
@@ -550,8 +509,8 @@ async def open_message_clients(
     if not is_admin(callback.from_user.id):
         return
     keyboard, total = client_list_keyboard(db, view="message", page=0)
-    await callback.message.edit_text(
-        f"👤 Выбери получателя\n\nНайдено: {total}", reply_markup=keyboard
+    await edit_bound_message(
+        callback.message, f"👤 Выбери получателя\n\nНайдено: {total}", reply_markup=keyboard
     )
 
 
@@ -577,8 +536,8 @@ async def change_page(
         except ValueError:
             page = 0
     keyboard, total = client_list_keyboard(db, view=view, page=page)
-    await callback.message.edit_text(
-        f"👥 Клиенты\n\nНайдено: {total}", reply_markup=keyboard
+    await edit_bound_message(
+        callback.message, f"👥 Клиенты\n\nНайдено: {total}", reply_markup=keyboard
     )
 
 
@@ -594,12 +553,14 @@ async def show_client_details(
         return
     client = db.get_admin_client_details(callback_data.user_id)
     if not client:
-        await callback.message.edit_text(
-            "❌ Клиент не найден.", reply_markup=admin_dashboard_keyboard()
+        await edit_bound_message(
+            callback.message, "❌ Клиент не найден.", reply_markup=admin_dashboard_keyboard()
         )
         return
-    await callback.message.edit_text(
-        format_client(client), reply_markup=client_card_keyboard(callback_data.user_id)
+    await edit_bound_message(
+        callback.message,
+        format_client(client),
+        reply_markup=client_card_keyboard(callback_data.user_id),
     )
 
 
@@ -617,12 +578,13 @@ async def start_expiry_change(
     client = db.get_admin_client_details(callback_data.user_id)
     subscription = db.get_peer_by_telegram_id(callback_data.user_id)
     if not client:
-        await callback.message.edit_text(
-            "❌ Клиент не найден.", reply_markup=admin_dashboard_keyboard()
+        await edit_bound_message(
+            callback.message, "❌ Клиент не найден.", reply_markup=admin_dashboard_keyboard()
         )
         return
     if not subscription or subscription.get("payment_status") is None:
-        await callback.message.edit_text(
+        await edit_bound_message(
+            callback.message,
             "❌ У клиента нет подписки. Изменить срок доступа нельзя.",
             reply_markup=client_card_keyboard(callback_data.user_id),
         )
@@ -635,7 +597,8 @@ async def start_expiry_change(
         service_chat_id=callback.message.chat.id,
         service_message_id=callback.message.message_id,
     )
-    await callback.message.edit_text(
+    await edit_bound_message(
+        callback.message,
         "Введи новый срок доступа:\n\n"
         "• ДД-ММ-ГГГГ\n"
         "• ДД-ММ-ГГГГ ЧЧ:ММ\n\n"
@@ -655,8 +618,10 @@ async def choose_message_client(
     await safe_answer_callback(callback)
     if not is_admin(callback.from_user.id):
         return
-    user_id = callback_data.user_id if callback_data else int(
-        (callback.data or "").removeprefix("admin_message_client_")
+    user_id = (
+        callback_data.user_id
+        if callback_data
+        else int((callback.data or "").removeprefix("admin_message_client_"))
     )
     admin_workflows.set(
         callback.from_user.id,
@@ -666,7 +631,8 @@ async def choose_message_client(
         service_chat_id=callback.message.chat.id,
         service_message_id=callback.message.message_id,
     )
-    await callback.message.edit_text(
+    await edit_bound_message(
+        callback.message,
         f"Отправь сообщение для пользователя {user_id}.",
         reply_markup=cancel_keyboard(),
     )
@@ -683,17 +649,19 @@ async def choose_discount_client(
     await safe_answer_callback(callback)
     if not is_admin(callback.from_user.id):
         return
-    user_id = callback_data.user_id if callback_data else int(
-        (callback.data or "").removeprefix("admin_discount_client_")
+    user_id = (
+        callback_data.user_id
+        if callback_data
+        else int((callback.data or "").removeprefix("admin_discount_client_"))
     )
     client = db.get_admin_client_details(user_id)
     if not client:
-        await callback.message.edit_text(
-            "❌ Клиент не найден.", reply_markup=admin_dashboard_keyboard()
+        await edit_bound_message(
+            callback.message, "❌ Клиент не найден.", reply_markup=admin_dashboard_keyboard()
         )
         return
-    await callback.message.edit_text(
-        format_client(client), reply_markup=discount_keyboard(user_id)
+    await edit_bound_message(
+        callback.message, format_client(client), reply_markup=discount_keyboard(user_id)
     )
 
 
@@ -716,7 +684,7 @@ async def set_discount(
         user_id, value = int(raw_user_id), int(raw_value)
     client = db.get_admin_client_details(user_id)
     if not client or not db.set_client_promo(user_id, value):
-        await callback.message.edit_text("❌ Не удалось сохранить скидку.")
+        await edit_bound_message(callback.message, "❌ Не удалось сохранить скидку.")
         return
     db.log_admin_promo_change(
         callback.from_user.id,
@@ -725,7 +693,8 @@ async def set_discount(
         int(client.get("promo") or 0),
         value,
     )
-    await callback.message.edit_text(
+    await edit_bound_message(
+        callback.message,
         f"✅ Скидка {value}% сохранена.",
         reply_markup=client_card_keyboard(user_id),
     )
@@ -742,8 +711,10 @@ async def start_custom_discount(
     await safe_answer_callback(callback)
     if not is_admin(callback.from_user.id):
         return
-    user_id = callback_data.user_id if callback_data else int(
-        (callback.data or "").removeprefix("admin_discount_custom_")
+    user_id = (
+        callback_data.user_id
+        if callback_data
+        else int((callback.data or "").removeprefix("admin_discount_custom_"))
     )
     admin_workflows.set(
         callback.from_user.id,
@@ -752,8 +723,8 @@ async def start_custom_discount(
         service_chat_id=callback.message.chat.id,
         service_message_id=callback.message.message_id,
     )
-    await callback.message.edit_text(
-        "Введи скидку целым числом от 0 до 90.", reply_markup=cancel_keyboard()
+    await edit_bound_message(
+        callback.message, "Введи скидку целым числом от 0 до 90.", reply_markup=cancel_keyboard()
     )
 
 
@@ -772,8 +743,8 @@ async def start_search(
         service_chat_id=callback.message.chat.id,
         service_message_id=callback.message.message_id,
     )
-    await callback.message.edit_text(
-        "Введи Telegram ID или username.", reply_markup=cancel_keyboard()
+    await edit_bound_message(
+        callback.message, "Введи Telegram ID или username.", reply_markup=cancel_keyboard()
     )
 
 
@@ -793,7 +764,8 @@ async def start_stars_refund(
         service_chat_id=callback.message.chat.id,
         service_message_id=callback.message.message_id,
     )
-    await callback.message.edit_text(
+    await edit_bound_message(
+        callback.message,
         "Введи Telegram charge ID платежа Stars.",
         reply_markup=cancel_keyboard(),
     )
@@ -810,12 +782,13 @@ async def show_client_configs(
     if not is_admin(callback.from_user.id):
         return
     if not db.get_admin_client_details(callback_data.user_id):
-        await callback.message.edit_text("❌ Клиент не найден.")
+        await edit_bound_message(callback.message, "❌ Клиент не найден.")
         return
     page = callback_data.value if callback_data.action == "page" else 0
     keyboard, current_page = config_list_keyboard(db, callback_data.user_id, page)
     configs = db.get_admin_client_configs(callback_data.user_id)
-    await callback.message.edit_text(
+    await edit_bound_message(
+        callback.message,
         f"🗂 Конфиги клиента {callback_data.user_id}\n\n"
         f"Всего: {len(configs)} · Страница: {current_page + 1}",
         reply_markup=keyboard,
@@ -833,17 +806,16 @@ async def show_config_details(
     await safe_answer_callback(callback)
     if not is_admin(callback.from_user.id):
         return
-    config = db.get_admin_managed_config(
-        callback_data.peer_id, callback_data.user_id
-    )
+    config = db.get_admin_managed_config(callback_data.peer_id, callback_data.user_id)
     if not config:
-        await callback.message.edit_text("❌ Конфиг не найден.")
+        await edit_bound_message(callback.message, "❌ Конфиг не найден.")
         return
     try:
         server_name = cascade_router.get_server_name(str(config["server_key"]))
     except CascadeError:
         server_name = str(config["server_key"])
-    await callback.message.edit_text(
+    await edit_bound_message(
+        callback.message,
         format_config(config, server_name),
         reply_markup=config_details_keyboard(config),
     )
@@ -861,23 +833,19 @@ async def download_paid_client_config(
     await safe_answer_callback(callback)
     if not is_admin(callback.from_user.id):
         return
-    config = db.get_admin_managed_config(
-        callback_data.peer_id, callback_data.user_id
-    )
+    config = db.get_admin_managed_config(callback_data.peer_id, callback_data.user_id)
     if not config:
-        await callback.message.edit_text(
+        await edit_bound_message(
+            callback.message,
             "❌ Конфиг не найден.",
-            reply_markup=config_error_back_keyboard(
-                callback_data.user_id, callback_data.peer_id
-            ),
+            reply_markup=config_error_back_keyboard(callback_data.user_id, callback_data.peer_id),
         )
         return
     if config.get("payment_status") != "paid":
-        await callback.message.edit_text(
+        await edit_bound_message(
+            callback.message,
             "❌ Скачивание доступно только для клиентов с подтверждённой оплатой.",
-            reply_markup=config_error_back_keyboard(
-                callback_data.user_id, callback_data.peer_id
-            ),
+            reply_markup=config_error_back_keyboard(callback_data.user_id, callback_data.peer_id),
         )
         return
     try:
@@ -885,42 +853,41 @@ async def download_paid_client_config(
             callback_data.user_id, callback_data.peer_id
         )
         server_name = cascade_router.get_server_name(str(config["server_key"]))
+        caption = ensure_telegram_text(
+            f"Клиент: {callback_data.user_id}\n"
+            f"Конфиг: {config['config_name']}\n"
+            f"Локация: {server_name}"
+        )
         await bot.send_document(
             chat_id=callback.from_user.id,
             document=types.BufferedInputFile(
                 file=content,
                 filename=location_config_filename(server_name),
             ),
-            caption=(
-                f"Клиент: {callback_data.user_id}\n"
-                f"Конфиг: {config['config_name']}\n"
-                f"Локация: {server_name}"
-            ),
+            caption=caption.html,
+            parse_mode="HTML",
         )
     except CascadeNotFound:
-        await callback.message.edit_text(
+        await edit_bound_message(
+            callback.message,
             "❌ Peer отсутствует в Cascade. Создай новый конфиг.",
-            reply_markup=config_error_back_keyboard(
-                callback_data.user_id, callback_data.peer_id
-            ),
+            reply_markup=config_error_back_keyboard(callback_data.user_id, callback_data.peer_id),
         )
         return
     except CascadeError:
         logger.exception("Failed to download a paid client configuration")
-        await callback.message.edit_text(
+        await edit_bound_message(
+            callback.message,
             "❌ Не удалось скачать конфиг.",
-            reply_markup=config_error_back_keyboard(
-                callback_data.user_id, callback_data.peer_id
-            ),
+            reply_markup=config_error_back_keyboard(callback_data.user_id, callback_data.peer_id),
         )
         return
     except Exception:
         logger.exception("Failed to send a paid client configuration to the admin")
-        await callback.message.edit_text(
+        await edit_bound_message(
+            callback.message,
             "❌ Не удалось отправить конфиг.",
-            reply_markup=config_error_back_keyboard(
-                callback_data.user_id, callback_data.peer_id
-            ),
+            reply_markup=config_error_back_keyboard(callback_data.user_id, callback_data.peer_id),
         )
         return
     db.log_admin_config_change(
@@ -943,10 +910,11 @@ async def start_additional_config(
     await safe_answer_callback(callback)
     if not is_admin(callback.from_user.id):
         return
-    if not db.get_primary_client_peer(
+    if not db.get_primary_client_peer(callback_data.user_id) or not db.get_subscription_expiry(
         callback_data.user_id
-    ) or not db.get_subscription_expiry(callback_data.user_id):
-        await callback.message.edit_text(
+    ):
+        await edit_bound_message(
+            callback.message,
             "❌ Для создания нужен основной конфиг и установленный срок доступа.",
             reply_markup=client_card_keyboard(callback_data.user_id),
         )
@@ -958,7 +926,8 @@ async def start_additional_config(
         service_chat_id=callback.message.chat.id,
         service_message_id=callback.message.message_id,
     )
-    await callback.message.edit_text(
+    await edit_bound_message(
+        callback.message,
         "Введи название нового конфига (1–48 символов).",
         reply_markup=cancel_keyboard(),
     )
@@ -983,14 +952,15 @@ async def select_config_server(
         or int(flow.get("user_id", 0)) != callback_data.user_id
         or not 0 <= callback_data.value < len(servers)
     ):
-        await callback.message.edit_text("❌ Сценарий создания устарел.")
+        await edit_bound_message(callback.message, "❌ Сценарий создания устарел.")
         return
     server_key = str(servers[callback_data.value])
     try:
         interfaces = await cascade_router.list_server_interfaces(server_key)
     except CascadeError:
         logger.exception("Failed to list Cascade interfaces for %s", server_key)
-        await callback.message.edit_text(
+        await edit_bound_message(
+            callback.message,
             "❌ Не удалось получить интерфейсы сервера.",
             reply_markup=cancel_keyboard(),
         )
@@ -1004,7 +974,8 @@ async def select_config_server(
         if item.get("id")
     ]
     if not options:
-        await callback.message.edit_text(
+        await edit_bound_message(
+            callback.message,
             "❌ На сервере нет доступных интерфейсов.",
             reply_markup=cancel_keyboard(),
         )
@@ -1030,7 +1001,8 @@ async def select_config_server(
         for index, item in enumerate(options)
     ]
     rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="admin_flow_cancel")])
-    await callback.message.edit_text(
+    await edit_bound_message(
+        callback.message,
         f"Выбери интерфейс на сервере {server_key}.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
@@ -1054,17 +1026,13 @@ async def select_config_interface(
         or int(flow.get("user_id", 0)) != callback_data.user_id
         or not 0 <= callback_data.value < len(interfaces)
     ):
-        await callback.message.edit_text("❌ Сценарий создания устарел.")
+        await edit_bound_message(callback.message, "❌ Сценарий создания устарел.")
         return
     interface = interfaces[callback_data.value]
     admin_workflows.set(
         callback.from_user.id,
         "confirm_config_create",
-        **{
-            key: value
-            for key, value in flow.items()
-            if key not in {"state", "interfaces"}
-        },
+        **{key: value for key, value in flow.items() if key not in {"state", "interfaces"}},
         interface_id=interface["id"],
         interface_name=interface["name"],
     )
@@ -1082,7 +1050,8 @@ async def select_config_interface(
             [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_flow_cancel")],
         ]
     )
-    await callback.message.edit_text(
+    await edit_bound_message(
+        callback.message,
         "Создать дополнительный конфиг?\n\n"
         f"Название: {flow['config_name']}\n"
         f"Сервер: {flow['server_key']}\n"
@@ -1109,7 +1078,7 @@ async def confirm_config_create(
         or flow.get("state") != "confirm_config_create"
         or int(flow.get("user_id", 0)) != callback_data.user_id
     ):
-        await callback.message.edit_text("❌ Сценарий создания устарел.")
+        await edit_bound_message(callback.message, "❌ Сценарий создания устарел.")
         return
     try:
         config = await cascade_router.create_additional_config(
@@ -1120,7 +1089,8 @@ async def confirm_config_create(
         )
     except CascadeError:
         logger.exception("Failed to create an additional configuration")
-        await callback.message.edit_text(
+        await edit_bound_message(
+            callback.message,
             "❌ Не удалось создать конфиг. Проверь сервер, интерфейс и ёмкость.",
             reply_markup=cancel_keyboard(),
         )
@@ -1134,8 +1104,8 @@ async def confirm_config_create(
         server_key=str(config["server_key"]),
     )
     keyboard, _ = config_list_keyboard(db, callback_data.user_id)
-    await callback.message.edit_text(
-        f"✅ Конфиг «{config['config_name']}» создан.", reply_markup=keyboard
+    await edit_bound_message(
+        callback.message, f"✅ Конфиг «{config['config_name']}» создан.", reply_markup=keyboard
     )
 
 
@@ -1152,7 +1122,7 @@ async def start_config_rename(
         return
     config = db.get_client_peer(callback_data.peer_id, callback_data.user_id)
     if not config or config["role"] not in {"primary", "additional"}:
-        await callback.message.edit_text("❌ Конфиг не найден.")
+        await edit_bound_message(callback.message, "❌ Конфиг не найден.")
         return
     admin_workflows.set(
         callback.from_user.id,
@@ -1162,7 +1132,8 @@ async def start_config_rename(
         service_chat_id=callback.message.chat.id,
         service_message_id=callback.message.message_id,
     )
-    await callback.message.edit_text(
+    await edit_bound_message(
+        callback.message,
         "Введи новое название конфига (1–48 символов).",
         reply_markup=cancel_keyboard(),
     )
@@ -1180,7 +1151,7 @@ async def confirm_config_deactivation(
         return
     config = db.get_client_peer(callback_data.peer_id, callback_data.user_id)
     if not config or config["role"] != "additional":
-        await callback.message.edit_text("❌ Дополнительный конфиг не найден.")
+        await edit_bound_message(callback.message, "❌ Дополнительный конфиг не найден.")
         return
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -1206,16 +1177,15 @@ async def confirm_config_deactivation(
             ],
         ]
     )
-    await callback.message.edit_text(
+    await edit_bound_message(
+        callback.message,
         f"Деактивировать конфиг «{config['config_name']}»?\n"
         "Peer останется в Cascade и сможет быть восстановлен.",
         reply_markup=keyboard,
     )
 
 
-@router.callback_query(
-    AdminConfigCallback.filter(F.action.in_({"deactivate_confirm", "restore"}))
-)
+@router.callback_query(AdminConfigCallback.filter(F.action.in_({"deactivate_confirm", "restore"})))
 async def change_config_state(
     callback: types.CallbackQuery,
     db: Database,
@@ -1232,20 +1202,18 @@ async def change_config_state(
             callback_data.user_id, callback_data.peer_id, active
         )
     except CascadeNotFound:
-        await callback.message.edit_text(
+        await edit_bound_message(
+            callback.message,
             "❌ Peer не найден в Cascade. Создай новый дополнительный конфиг.",
-            reply_markup=config_error_back_keyboard(
-                callback_data.user_id, callback_data.peer_id
-            ),
+            reply_markup=config_error_back_keyboard(callback_data.user_id, callback_data.peer_id),
         )
         return
     except CascadeError:
         logger.exception("Failed to change additional configuration state")
-        await callback.message.edit_text(
+        await edit_bound_message(
+            callback.message,
             "❌ Не удалось изменить состояние конфига.",
-            reply_markup=config_error_back_keyboard(
-                callback_data.user_id, callback_data.peer_id
-            ),
+            reply_markup=config_error_back_keyboard(callback_data.user_id, callback_data.peer_id),
         )
         return
     operation = "admin_restore_config" if active else "admin_deactivate_config"
@@ -1256,10 +1224,9 @@ async def change_config_state(
         operation,
         server_key=str(config["server_key"]),
     )
-    refreshed_config = db.get_admin_managed_config(
-        callback_data.peer_id, callback_data.user_id
-    )
-    await callback.message.edit_text(
+    refreshed_config = db.get_admin_managed_config(callback_data.peer_id, callback_data.user_id)
+    await edit_bound_message(
+        callback.message,
         "✅ Конфиг восстановлен." if active else "✅ Конфиг деактивирован.",
         reply_markup=config_details_keyboard(refreshed_config or config),
     )
@@ -1281,22 +1248,17 @@ async def capture_admin_input(
         try:
             expire_date = parse_admin_expiry_input(message.text or "")
         except ValueError:
-            await bot.edit_message_text(
+            await edit_telegram_text(
+                bot,
                 chat_id=flow["service_chat_id"],
                 message_id=flow["service_message_id"],
-                text=(
-                    "❌ Неверный формат даты.\n\n"
-                    "Введи ДД-ММ-ГГГГ или ДД-ММ-ГГГГ ЧЧ:ММ."
-                ),
+                text=("❌ Неверный формат даты.\n\nВведи ДД-ММ-ГГГГ или ДД-ММ-ГГГГ ЧЧ:ММ."),
                 reply_markup=cancel_keyboard(),
             )
             with suppress(Exception):
                 await message.delete()
             return
-        is_future = (
-            datetime.fromisoformat(expire_date)
-            > datetime.now(UTC).replace(tzinfo=None)
-        )
+        is_future = datetime.fromisoformat(expire_date) > datetime.now(UTC).replace(tzinfo=None)
         admin_workflows.set(
             message.from_user.id,
             "confirm_expiry",
@@ -1314,21 +1276,38 @@ async def capture_admin_input(
                         ).pack(),
                     )
                 ],
-                [
-                    InlineKeyboardButton(
-                        text="❌ Отмена", callback_data="admin_flow_cancel"
-                    )
-                ],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_flow_cancel")],
             ]
         )
-        await bot.edit_message_text(
+        old_expire_date = flow.get("old_expire_date")
+        old_formatted = format_admin_expiry(old_expire_date)
+        new_formatted = format_admin_expiry(expire_date)
+        confirmation_text = (
+            "Подтверди изменение срока доступа.\n\n"
+            f"Старый срок: {old_formatted}\n"
+            f"Новый срок: {new_formatted}\n"
+            f"Состояние: {'активен' if is_future else 'истёк'}"
+        )
+        replacements = {
+            new_formatted: rich_date(
+                expire_date,
+                new_formatted,
+                date_time_format="dt",
+            )
+        }
+        if old_expire_date:
+            replacements[old_formatted] = rich_date(
+                str(old_expire_date),
+                old_formatted,
+                date_time_format="dt",
+            )
+        await edit_telegram_text(
+            bot,
             chat_id=flow["service_chat_id"],
             message_id=flow["service_message_id"],
-            text=(
-                "Подтверди изменение срока доступа.\n\n"
-                f"Старый срок: {format_admin_expiry(flow.get('old_expire_date'))}\n"
-                f"Новый срок: {format_admin_expiry(expire_date)}\n"
-                f"Состояние: {'активен' if is_future else 'истёк'}"
+            text=TelegramText.from_plain_with_replacements(
+                confirmation_text,
+                replacements,
             ),
             reply_markup=keyboard,
         )
@@ -1336,7 +1315,8 @@ async def capture_admin_input(
         try:
             config_name = normalize_config_name(message.text or "")
         except ValueError:
-            await bot.edit_message_text(
+            await edit_telegram_text(
+                bot,
                 chat_id=flow["service_chat_id"],
                 message_id=flow["service_message_id"],
                 text="Название должно содержать от 1 до 48 символов без управляющих знаков.",
@@ -1350,14 +1330,14 @@ async def capture_admin_input(
             (
                 item
                 for item in existing
-                if str(item.get("config_name") or "").casefold()
-                == config_name.casefold()
+                if str(item.get("config_name") or "").casefold() == config_name.casefold()
                 and int(item["id"]) != int(flow.get("peer_id", 0))
             ),
             None,
         )
         if duplicate:
-            await bot.edit_message_text(
+            await edit_telegram_text(
+                bot,
                 chat_id=flow["service_chat_id"],
                 message_id=flow["service_message_id"],
                 text="У этого клиента уже есть конфиг с таким названием.",
@@ -1369,7 +1349,8 @@ async def capture_admin_input(
         if state == "await_config_rename":
             peer_id = int(flow["peer_id"])
             if not db.rename_managed_config(peer_id, int(flow["user_id"]), config_name):
-                await bot.edit_message_text(
+                await edit_telegram_text(
+                    bot,
                     chat_id=flow["service_chat_id"],
                     message_id=flow["service_message_id"],
                     text="❌ Не удалось переименовать конфиг.",
@@ -1387,7 +1368,8 @@ async def capture_admin_input(
                 "admin_rename_config",
                 server_key=str(config["server_key"]) if config else None,
             )
-            await bot.edit_message_text(
+            await edit_telegram_text(
+                bot,
                 chat_id=flow["service_chat_id"],
                 message_id=flow["service_message_id"],
                 text=f"✅ Конфиг переименован в «{config_name}».",
@@ -1396,11 +1378,10 @@ async def capture_admin_input(
                 else admin_dashboard_keyboard(),
             )
         else:
-            servers = [
-                server.server_key for server in cascade_router.get_enabled_servers()
-            ]
+            servers = [server.server_key for server in cascade_router.get_enabled_servers()]
             if not servers:
-                await bot.edit_message_text(
+                await edit_telegram_text(
+                    bot,
                     chat_id=flow["service_chat_id"],
                     message_id=flow["service_message_id"],
                     text="❌ Нет активных Cascade-серверов.",
@@ -1429,10 +1410,9 @@ async def capture_admin_input(
                 ]
                 for index, server_key in enumerate(servers)
             ]
-            rows.append(
-                [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_flow_cancel")]
-            )
-            await bot.edit_message_text(
+            rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="admin_flow_cancel")])
+            await edit_telegram_text(
+                bot,
                 chat_id=flow["service_chat_id"],
                 message_id=flow["service_message_id"],
                 text=f"Название: {config_name}\n\nВыбери сервер.",
@@ -1440,11 +1420,10 @@ async def capture_admin_input(
             )
     elif state == "await_search":
         query = (message.text or "").strip()[:100]
-        keyboard, total = client_list_keyboard(
-            db, view="details", page=0, query=query
-        )
+        keyboard, total = client_list_keyboard(db, view="details", page=0, query=query)
         admin_workflows.clear(message.from_user.id)
-        await bot.edit_message_text(
+        await edit_telegram_text(
+            bot,
             chat_id=flow["service_chat_id"],
             message_id=flow["service_message_id"],
             text=f"👥 Результаты поиска: {total}",
@@ -1456,7 +1435,8 @@ async def capture_admin_input(
         except ValueError:
             value = -1
         if not 0 <= value <= 90:
-            await bot.edit_message_text(
+            await edit_telegram_text(
+                bot,
                 chat_id=flow["service_chat_id"],
                 message_id=flow["service_message_id"],
                 text="Скидка должна быть целым числом от 0 до 90.",
@@ -1475,7 +1455,8 @@ async def capture_admin_input(
                 value,
             )
         admin_workflows.clear(message.from_user.id)
-        await bot.edit_message_text(
+        await edit_telegram_text(
+            bot,
             chat_id=flow["service_chat_id"],
             message_id=flow["service_message_id"],
             text=f"✅ Скидка {value}% сохранена.",
@@ -1485,7 +1466,8 @@ async def capture_admin_input(
         charge_id = (message.text or "").strip()[:200]
         payment = await asyncio.to_thread(db.get_payment_by_telegram_charge, charge_id)
         if not payment or payment["payment_method"] != "stars":
-            await bot.edit_message_text(
+            await edit_telegram_text(
+                bot,
                 chat_id=flow["service_chat_id"],
                 message_id=flow["service_message_id"],
                 text="❌ Платеж Telegram Stars не найден. Введи другой charge ID.",
@@ -1510,14 +1492,11 @@ async def capture_admin_input(
                         ).pack(),
                     )
                 ],
-                [
-                    InlineKeyboardButton(
-                        text="❌ Отмена", callback_data="admin_flow_cancel"
-                    )
-                ],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_flow_cancel")],
             ]
         )
-        await bot.edit_message_text(
+        await edit_telegram_text(
+            bot,
             chat_id=flow["service_chat_id"],
             message_id=flow["service_message_id"],
             text=(
@@ -1538,7 +1517,8 @@ async def capture_admin_input(
             source_chat_id=message.chat.id,
             source_message_id=message.message_id,
         )
-        await bot.edit_message_text(
+        await edit_telegram_text(
+            bot,
             chat_id=flow["service_chat_id"],
             message_id=flow["service_message_id"],
             text="Отправить это сообщение?",
@@ -1563,18 +1543,15 @@ async def cancel_flow(
     admin_workflows.clear(callback.from_user.id)
     if flow and flow.get("source_chat_id") and flow.get("source_message_id"):
         with suppress(Exception):
-            await callback.bot.delete_message(
-                flow["source_chat_id"], flow["source_message_id"]
-            )
+            await callback.bot.delete_message(flow["source_chat_id"], flow["source_message_id"])
     reply_markup = admin_dashboard_keyboard()
-    if flow and flow.get("user_id") and (
-        "config" in str(flow.get("state", ""))
-        or "expiry" in str(flow.get("state", ""))
+    if (
+        flow
+        and flow.get("user_id")
+        and ("config" in str(flow.get("state", "")) or "expiry" in str(flow.get("state", "")))
     ):
         reply_markup = client_card_keyboard(int(flow["user_id"]))
-    await callback.message.edit_text(
-        "Действие отменено.", reply_markup=reply_markup
-    )
+    await edit_bound_message(callback.message, "Действие отменено.", reply_markup=reply_markup)
 
 
 @router.callback_query(AdminClientCallback.filter(F.action == "expiry_confirm"))
@@ -1595,15 +1572,16 @@ async def confirm_expiry_change(
         or flow.get("state") != "confirm_expiry"
         or int(flow.get("user_id", 0)) != callback_data.user_id
     ):
-        await callback.message.edit_text(
+        await edit_bound_message(
+            callback.message,
             "❌ Изменение срока устарело или не соответствует клиенту.",
             reply_markup=client_card_keyboard(callback_data.user_id),
         )
         return
     if not db.get_admin_client_details(callback_data.user_id):
         admin_workflows.clear(callback.from_user.id)
-        await callback.message.edit_text(
-            "❌ Клиент не найден.", reply_markup=admin_dashboard_keyboard()
+        await edit_bound_message(
+            callback.message, "❌ Клиент не найден.", reply_markup=admin_dashboard_keyboard()
         )
         return
     result = db.set_admin_subscription_expiry(
@@ -1613,7 +1591,8 @@ async def confirm_expiry_change(
     )
     if not result:
         admin_workflows.clear(callback.from_user.id)
-        await callback.message.edit_text(
+        await edit_bound_message(
+            callback.message,
             "❌ У клиента нет подписки. Срок доступа не изменён.",
             reply_markup=client_card_keyboard(callback_data.user_id),
         )
@@ -1631,20 +1610,31 @@ async def confirm_expiry_change(
             f"Failed peers: {sync_result['failed']}",
         )
         warning = (
-            "\n\n⚠️ Часть конфигов не синхронизирована. "
-            "Создана задача автоматического повтора."
+            "\n\n⚠️ Часть конфигов не синхронизирована. Создана задача автоматического повтора."
         )
     if sync_result["missing"]:
-        warning += (
-            f"\n\n⚠️ Недоступных дополнительных конфигов: "
-            f"{sync_result['missing']}."
-        )
-    await callback.message.edit_text(
+        warning += f"\n\n⚠️ Недоступных дополнительных конфигов: {sync_result['missing']}."
+    result_expiry = str(result["expire_date"])
+    formatted_result_expiry = format_admin_expiry(result_expiry)
+    result_text = (
         "✅ Срок доступа изменён.\n\n"
-        f"Новый срок: {format_admin_expiry(str(result['expire_date']))}\n"
+        f"Новый срок: {formatted_result_expiry}\n"
         f"Состояние: "
         f"{'активен' if result['payment_status'] == 'paid' else 'истёк'}"
-        f"{warning}",
+        f"{warning}"
+    )
+    await edit_bound_message(
+        callback.message,
+        TelegramText.from_plain_with_replacements(
+            result_text,
+            {
+                formatted_result_expiry: rich_date(
+                    result_expiry,
+                    formatted_result_expiry,
+                    date_time_format="dt",
+                )
+            },
+        ),
         reply_markup=client_card_keyboard(callback_data.user_id),
     )
 
@@ -1664,15 +1654,15 @@ async def confirm_flow(
         return
     flow = admin_workflows.get(callback.from_user.id)
     if not flow or flow["state"] != "confirm_message":
-        await callback.message.edit_text("Нет подготовленного сообщения.")
+        await edit_bound_message(callback.message, "Нет подготовленного сообщения.")
         return
     recipients = (
-        db.get_client_telegram_ids()
-        if flow["mode"] == "all"
-        else [int(flow["recipient_id"])]
+        db.get_client_telegram_ids() if flow["mode"] == "all" else [int(flow["recipient_id"])]
     )
     admin_workflows.clear(callback.from_user.id)
-    await callback.message.edit_text(f"📣 Отправка запущена. Получателей: {len(recipients)}")
+    await edit_bound_message(
+        callback.message, f"📣 Отправка запущена. Получателей: {len(recipients)}"
+    )
     sent = 0
     failed = 0
     for recipient_id in recipients:
@@ -1691,7 +1681,8 @@ async def confirm_flow(
         await asyncio.sleep(0.07)
     with suppress(Exception):
         await bot.delete_message(flow["source_chat_id"], flow["source_message_id"])
-    await callback.message.edit_text(
+    await edit_bound_message(
+        callback.message,
         f"📣 Рассылка завершена.\n\nОтправлено: {sent}\nНе доставлено: {failed}",
         reply_markup=admin_dashboard_keyboard(),
     )

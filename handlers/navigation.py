@@ -4,6 +4,7 @@ from aiogram import F, Router, types
 from aiogram.filters import CommandStart
 
 from database import Database
+from message_templates import expired_subscription_status, welcome_message
 from payment import PaymentManager
 from telegram_runtime import serialized_user_action
 from utils import format_date_for_user
@@ -25,16 +26,10 @@ async def cmd_start(
     user_id = message.from_user.id
     await chat_panel.delete_user_message(message)
     clear_admin_state(user_id)
-    welcome_text = (
-        "👋🏻 Привет! Здесь ты можешь подключиться к быстрому и безопасному VPN.\n\n"
-        "Чтобы начать пользоваться нашим VPN, скачай клиент AmneziaWG из своего "
-        "магазина приложений. В инструкции есть ссылки на скачивание приложения "
-        "и описан процесс подключения."
-    )
     await chat_panel.restore_or_create(
         message.chat.id,
         user_id,
-        welcome_text,
+        welcome_message(),
         create_main_menu_keyboard(user_id),
     )
 
@@ -93,15 +88,11 @@ async def handle_already_paid_callback(
         )
         await safe_answer_callback(callback_query, "⚠️ Твой VPN доступ истек!")
 
-        expired_text = f"""
-⚠️ Твой доступ к VPN истек!
-
-📅 Дата истечения: {expire_date_formatted}
-
-⚠️ Для продолжения пользования сервисом, необходимо продлить доступ.
-
-Выбери действие с помощью кнопок ниже:
-        """
+        expired_text = expired_subscription_status(
+            db.get_peer_count(user_id),
+            expire_date_str,
+            expire_date_formatted,
+        )
         # Update message with new keyboard (button switches to "Buy access")
         await show_menu_from_callback(
             callback_query,
@@ -163,12 +154,6 @@ async def handle_guide_callback(
         guide_text,
         create_guide_keyboard(),
         user_id=callback_query.from_user.id,
-        rich_markdown=(
-            "# 📖 Инструкция\n\n"
-            "1. Установите AmneziaWG кнопкой ниже.\n"
-            "2. Получите конфигурацию в главном меню.\n"
-            "3. Импортируйте `.conf` и включите туннель."
-        ),
     )
 
 
@@ -188,15 +173,8 @@ async def handle_main_callback(
     if is_admin(user_id):
         clear_admin_state(user_id)
 
-    welcome_text = """
-👋🏻 Привет! Здесь ты можешь подключиться к быстрому и безопасному VPN.
-
-Чтобы начать пользоваться нашим VPN, скачай клиент AmneziaWG из своего магазина приложений.
-В инструкции есть ссылки на скачивание приложения и описан процесс подключения.
-    """
-
     await show_menu_from_callback(
         callback_query,
-        welcome_text,
+        welcome_message(),
         create_main_menu_keyboard(user_id),
     )

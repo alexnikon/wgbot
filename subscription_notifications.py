@@ -6,8 +6,9 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from database import Database
+from message_templates import expired_period_notice, renewal_reminder
 from payment import PaymentManager
-from telegram_runtime import TelegramSender
+from telegram_runtime import TelegramSender, send_telegram_text
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +56,7 @@ class SubscriptionNotificationWorker:
         for subscription in expired:
             await self._send_expired(subscription)
 
-        hour_notifications = await asyncio.to_thread(
-            self.db.get_users_for_hour_notification
-        )
+        hour_notifications = await asyncio.to_thread(self.db.get_users_for_hour_notification)
         for subscription in hour_notifications:
             await self._send_reminder(subscription, "через 1 час")
 
@@ -70,12 +69,10 @@ class SubscriptionNotificationWorker:
         try:
             sent = await self.telegram_sender.call(
                 user_id,
-                lambda: self.bot.send_message(
-                    chat_id=user_id,
-                    text=(
-                        "⚠️ Оплаченный период закончился, для возобновления доступа "
-                        "к сервису, необходимо оплатить доступ."
-                    ),
+                lambda: send_telegram_text(
+                    self.bot,
+                    user_id,
+                    expired_period_notice(),
                     reply_markup=renewal_keyboard("💳 Купить доступ"),
                 ),
             )
@@ -87,20 +84,13 @@ class SubscriptionNotificationWorker:
     async def _send_reminder(self, subscription: dict, deadline: str) -> None:
         user_id = int(subscription["telegram_user_id"])
         tariffs = self.payment_manager.get_user_tariffs(user_id)
-        tariff_text = "".join(
-            f"⭐ {tariff['name']} - {tariff['stars_price']} Stars\n"
-            f"💳 {tariff['name']} - {tariff['rub_price']} руб.\n\n"
-            for tariff in tariffs.values()
-        )
         try:
             sent = await self.telegram_sender.call(
                 user_id,
-                lambda: self.bot.send_message(
-                    chat_id=user_id,
-                    text=(
-                        f"⏰ Доступ к nikonVPN истекает {deadline}!\n\n"
-                        f"💎 Доступные тарифы для продления:\n{tariff_text}"
-                    ),
+                lambda: send_telegram_text(
+                    self.bot,
+                    user_id,
+                    renewal_reminder(deadline, tariffs),
                     reply_markup=renewal_keyboard(),
                 ),
             )

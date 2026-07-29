@@ -71,3 +71,24 @@ class WebhookDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             client.post.await_args.kwargs["files"]["document"][0],
             "USA-NY.conf",
         )
+        data = client.post.await_args.kwargs["data"]
+        self.assertEqual(data["parse_mode"], "HTML")
+        self.assertIn("только на одном устройстве", data["caption"])
+
+    async def test_authored_webhook_message_uses_rich_message(self):
+        client = SimpleNamespace(
+            post=AsyncMock(return_value=SimpleNamespace(is_success=True))
+        )
+        with patch.object(
+            webhook_server, "get_telegram_http_client", return_value=client
+        ):
+            sent = await webhook_server.send_telegram_message(
+                10,
+                "✅ Платеж обработан.\n💰 Стоимость: 250 руб.",
+            )
+
+        self.assertTrue(sent)
+        self.assertTrue(client.post.await_args.args[0].endswith("/sendRichMessage"))
+        rich_html = client.post.await_args.kwargs["json"]["rich_message"]["html"]
+        self.assertIn("<b>✅ Платеж обработан.</b>", rich_html)
+        self.assertIn("<code>250</code> руб.", rich_html)

@@ -40,6 +40,7 @@ from handlers.fallback import router as fallback_router
 from handlers.navigation import router as navigation_router
 from handlers.payments import router as payment_router
 from logging_setup import configure_logging
+from message_templates import config_instructions, initial_config_caption
 from payment import PaymentManager
 from provisioning import ProvisioningWorker
 from services import AppServices
@@ -51,7 +52,9 @@ from telegram_runtime import (
     TelegramUIRenderer,
     UserActionLocks,
     redact_telegram_content,
+    send_telegram_text,
 )
+from telegram_text import TelegramText, TelegramTextLike, ensure_telegram_text, rich_date
 from utils import (
     format_date_for_user,
     generate_peer_name,
@@ -153,8 +156,7 @@ class OperationLoggingMiddleware:
             chat_id = event.chat.id if event.chat else "unknown"
             text = event.text or event.caption or ""
             logger.debug(
-                "Incoming message operation: user_id=%s, chat_id=%s, "
-                "content_type=%s, length=%s",
+                "Incoming message operation: user_id=%s, chat_id=%s, content_type=%s, length=%s",
                 user_id,
                 chat_id,
                 event.content_type,
@@ -224,6 +226,7 @@ dp.callback_query.outer_middleware(OperationLoggingMiddleware())
 dp.callback_query.outer_middleware(PanelTrackingMiddleware())
 dp.update.outer_middleware(ConcurrencyMetricsMiddleware())
 
+
 def format_admin_payment_notification(
     title: str,
     user_id: int,
@@ -232,7 +235,7 @@ def format_admin_payment_notification(
     amount: str,
     payment_method: str,
     expire_date: str | None = None,
-) -> str:
+) -> TelegramText:
     user_line = f"@{username}" if username else "без username"
     text = (
         f"{title}\n\n"
@@ -243,17 +246,22 @@ def format_admin_payment_notification(
         f"💳 Способ оплаты: {payment_method}"
     )
     if expire_date:
-        text += f"\n📅 Новый срок: {format_date_for_user(expire_date)}"
-    return text
+        formatted_date = format_date_for_user(expire_date)
+        text += f"\n📅 Новый срок: {formatted_date}"
+        return TelegramText.from_plain_with_replacements(
+            text,
+            {formatted_date: rich_date(expire_date, formatted_date)},
+        )
+    return TelegramText.from_plain(text)
 
 
-async def notify_admins(text: str) -> None:
+async def notify_admins(text: TelegramTextLike) -> None:
     """Send a best-effort notification to configured admins."""
     for admin_id in get_admin_telegram_ids():
         try:
             await telegram_sender.call(
                 admin_id,
-                lambda admin_id=admin_id: bot.send_message(admin_id, text),
+                lambda admin_id=admin_id: send_telegram_text(bot, admin_id, text),
             )
         except TelegramAPIError as e:
             logger.warning(f"Failed to send admin notification to {admin_id}: {e}")
@@ -264,7 +272,7 @@ async def notify_admins(text: str) -> None:
 async def send_config_file(
     chat_id: int,
     config_content: bytes | str | None,
-    caption: str | None = "📁 Твой файл конфигурации",
+    caption: TelegramTextLike | None = "📁 Твой файл конфигурации",
     reply_markup: InlineKeyboardMarkup | None = None,
     filename: str = "nikonVPN.conf",
 ) -> bool:
@@ -278,12 +286,23 @@ async def send_config_file(
             if isinstance(config_content, (bytes, bytearray))
             else config_content.encode("utf-8")
         )
-        await bot.send_document(
-            chat_id=chat_id,
-            document=types.BufferedInputFile(file=config_bytes, filename=filename),
-            caption=caption,
-            reply_markup=reply_markup,
-        )
+        rendered_caption = ensure_telegram_text(caption) if caption is not None else None
+        document = types.BufferedInputFile(file=config_bytes, filename=filename)
+        try:
+            await bot.send_document(
+                chat_id=chat_id,
+                document=document,
+                caption=rendered_caption.html if rendered_caption else None,
+                parse_mode="HTML" if rendered_caption else None,
+                reply_markup=reply_markup,
+            )
+        except TelegramBadRequest:
+            await bot.send_document(
+                chat_id=chat_id,
+                document=types.BufferedInputFile(file=config_bytes, filename=filename),
+                caption=rendered_caption.plain if rendered_caption else None,
+                reply_markup=reply_markup,
+            )
         logger.info(f"Config file sent to chat {chat_id}")
         return True
     except Exception as e:
@@ -295,7 +314,7 @@ async def send_config_with_confirmation(
     chat_id: int,
     config_content: bytes | str | None,
     source_message: types.Message | None = None,
-    caption: str | None = None,
+    caption: TelegramTextLike | None = None,
     filename: str = "nikonVPN.conf",
     server_name: str | None = None,
     reply_markup: InlineKeyboardMarkup | None = None,
@@ -312,14 +331,10 @@ async def send_config_with_confirmation(
         if not sent:
             return False
         try:
-            message = await bot.send_message(
-                chat_id=chat_id,
-                text=(
-                    f"🌍 Локация: {server_name}\n\n"
-                    "✅ Это твоя конфигурация для доступа к сервису.\n"
-                    "Добавь этот файл в приложение AmneziaWG.\n"
-                    "‼ Один конфиг может использоваться только на одном устройстве"
-                ),
+            message = await send_telegram_text(
+                bot,
+                chat_id,
+                config_instructions(server_name),
                 reply_markup=reply_markup,
             )
             await chat_panel.adopt(message, chat_id)
@@ -328,10 +343,7 @@ async def send_config_with_confirmation(
             logger.exception("Failed to send configuration instructions to chat %s", chat_id)
             return False
 
-    effective_caption = caption or (
-        "✅ Конфигурация nikonVPN готова.\n\n"
-        "Открой файл через AmneziaWG и добавь новый туннель."
-    )
+    effective_caption = caption or initial_config_caption()
     return await send_config_file(
         chat_id,
         config_content,
@@ -589,17 +601,13 @@ dp.include_router(fallback_router)
 
 
 @dp.my_chat_member()
-async def handle_bot_chat_member_update(
-    event: types.ChatMemberUpdated, db: Database
-) -> None:
+async def handle_bot_chat_member_update(event: types.ChatMemberUpdated, db: Database) -> None:
     """Track private-chat block and unblock events."""
     if event.chat.type != ChatType.PRIVATE:
         return
     user_id = event.chat.id
     if event.new_chat_member.status == ChatMemberStatus.KICKED:
-        await asyncio.to_thread(
-            db.mark_telegram_unreachable, user_id, "my_chat_member:kicked"
-        )
+        await asyncio.to_thread(db.mark_telegram_unreachable, user_id, "my_chat_member:kicked")
     elif event.new_chat_member.status in {
         ChatMemberStatus.MEMBER,
         ChatMemberStatus.ADMINISTRATOR,
