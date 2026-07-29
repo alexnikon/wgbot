@@ -1590,10 +1590,11 @@ class Database:
             return cursor.rowcount
 
     def get_users_for_notification(self, days_before: int = 3) -> list[dict[str, Any]]:
+        lower_bound_hours = max(0, int(days_before) * 24 - 1)
         return self._subscription_query(
             f"s.is_active=1 AND s.payment_status='paid' AND s.notification_sent=0 "
             f"AND s.expire_date <= datetime('now', '+{int(days_before)} days') "
-            "AND s.expire_date > datetime('now', '+1 hour')"
+            f"AND s.expire_date > datetime('now', '+{lower_bound_hours} hours')"
         )
 
     def get_users_for_hour_notification(self) -> list[dict[str, Any]]:

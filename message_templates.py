@@ -115,7 +115,7 @@ def renewal_reminder(
     deadline: str,
     tariffs: Mapping[str, Mapping[str, Any]],
 ) -> TelegramText:
-    heading = f"⏰ Доступ к nikonVPN истекает {deadline}!"
+    heading = f"⏰ Доступ к сервису истекает {deadline}!"
     plain_lines = [heading, "💎 Доступные варианты продления:", ""]
     rich_lines = [rich_bold(heading), "💎 Доступные варианты продления:", ""]
     for tariff in tariffs.values():

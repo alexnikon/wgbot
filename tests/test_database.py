@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from datetime import UTC, datetime, timedelta
 
 from database import DEFAULT_PRIMARY_CONFIG_NAME, Database
 
@@ -35,6 +36,33 @@ class DatabaseTests(unittest.TestCase):
             )
         self.assertEqual(self.db.cleanup_expired_reservations(), 1)
         self.assertIsNone(self.db.get_active_reservation(10))
+
+    def test_notification_windows_do_not_label_near_expiry_as_tomorrow(self):
+        now = datetime.now(UTC).replace(tzinfo=None)
+        subscriptions = {
+            10: now + timedelta(minutes=30),
+            20: now + timedelta(hours=1, minutes=5),
+            30: now + timedelta(hours=23, minutes=30),
+        }
+        for user_id, expire_date in subscriptions.items():
+            self.db.ensure_subscription(
+                user_id,
+                f"user-{user_id}",
+                expire_date.strftime("%Y-%m-%d %H:%M:%S"),
+                "paid",
+            )
+
+        hour_user_ids = {
+            row["telegram_user_id"]
+            for row in self.db.get_users_for_hour_notification()
+        }
+        day_user_ids = {
+            row["telegram_user_id"]
+            for row in self.db.get_users_for_notification(1)
+        }
+
+        self.assertEqual(hour_user_ids, {10})
+        self.assertEqual(day_user_ids, {30})
 
     def test_payment_success_is_claimed_once(self):
         self.assertTrue(self.db.add_payment("payment-1", 10, 100, "stars", "14_days"))

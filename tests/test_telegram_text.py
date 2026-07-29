@@ -154,7 +154,7 @@ class TelegramTextTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertIn(
-            "<b>⏰ Доступ к nikonVPN истекает через 1 час!</b>",
+            "<b>⏰ Доступ к сервису истекает через 1 час!</b>",
             content.html,
         )
         self.assertIn("2 &lt; недели", content.html)
