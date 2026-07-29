@@ -69,6 +69,25 @@ from utils import location_config_filename
 
 
 class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_active_main_menu_uses_information_status_icon(self):
+        peer = {
+            "payment_status": "paid",
+            "expire_date": "2099-01-01 00:00:00",
+        }
+        database = SimpleNamespace(
+            get_peer_by_telegram_id=lambda _user_id: peer,
+        )
+        with patch.object(
+            bot_module,
+            "db",
+            database,
+            create=True,
+        ):
+            keyboard = bot_module.create_main_menu_keyboard(10)
+        status_button = keyboard.inline_keyboard[1][0]
+        self.assertEqual(status_button.text, "ℹ️ Статус подписки")
+        self.assertEqual(status_button.callback_data, "status")
+
     async def test_guide_keyboard_keeps_only_back_button(self):
         keyboard = bot_module.create_guide_keyboard()
         self.assertEqual(len(keyboard.inline_keyboard), 1)

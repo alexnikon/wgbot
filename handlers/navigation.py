@@ -5,6 +5,7 @@ from aiogram.filters import CommandStart
 
 from database import Database
 from message_templates import (
+    active_access_message,
     expired_subscription_status,
     service_guide_message,
     welcome_message,
@@ -107,16 +108,10 @@ async def handle_already_paid_callback(
 
     await safe_answer_callback(callback_query, "✅ У тебя уже есть доступ!")
 
-    already_paid_text = """
-✅ У тебя уже есть активный доступ к VPN!
-
-Используй кнопки ниже для управления доступом:
-    """
-
     # Update message with the current keyboard
     await show_menu_from_callback(
         callback_query,
-        already_paid_text,
+        active_access_message(),
         create_main_menu_keyboard(user_id),
     )
 

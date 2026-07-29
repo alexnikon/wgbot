@@ -47,6 +47,18 @@ def payment_selection_message() -> TelegramText:
     return TelegramText.from_html(plain, rich_html)
 
 
+def active_access_message() -> TelegramText:
+    plain = (
+        "✅ У тебя уже есть активный доступ к сервису!\n\n"
+        'Нажми "ℹ️ Статус подписки" чтобы проверить информацию по твоей подписке:'
+    )
+    rich_html = (
+        f"{rich_bold('✅ У тебя уже есть активный доступ к сервису!')}\n\n"
+        'Нажми "ℹ️ Статус подписки" чтобы проверить информацию по твоей подписке:'
+    )
+    return TelegramText.from_html(plain, rich_html)
+
+
 def service_guide_message() -> TelegramText:
     plain = (
         "📖 Как подключиться к сервису:\n\n"

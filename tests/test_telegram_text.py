@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 from aiogram.exceptions import TelegramBadRequest
 
 from message_templates import (
+    active_access_message,
     active_subscription_status,
     config_instructions,
     expired_period_notice,
@@ -62,6 +63,24 @@ class TelegramTextTests(unittest.IsolatedAsyncioTestCase):
             content.regular_html,
             "<b>⏰ Выбери период  доступа к сервису:</b>\n\n"
             "Тариф можно приобрести повторно, срок доступа добавится к текущей подписке:",
+        )
+
+    def test_active_access_message_snapshots(self):
+        content = active_access_message()
+        self.assertEqual(
+            content.plain,
+            "✅ У тебя уже есть активный доступ к сервису!\n\n"
+            'Нажми "ℹ️ Статус подписки" чтобы проверить информацию по твоей подписке:',
+        )
+        self.assertEqual(
+            content.html,
+            "<b>✅ У тебя уже есть активный доступ к сервису!</b><br><br>"
+            'Нажми "ℹ️ Статус подписки" чтобы проверить информацию по твоей подписке:',
+        )
+        self.assertEqual(
+            content.regular_html,
+            "<b>✅ У тебя уже есть активный доступ к сервису!</b>\n\n"
+            'Нажми "ℹ️ Статус подписки" чтобы проверить информацию по твоей подписке:',
         )
 
     def test_service_guide_message_snapshots(self):

@@ -523,7 +523,7 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     if has_active_access:
         inline_keyboard = [
             [InlineKeyboardButton(text="✅ Доступ приобретен", callback_data="already_paid")],
-            [InlineKeyboardButton(text="📊 Статус подписки", callback_data="status")],
+            [InlineKeyboardButton(text="ℹ️ Статус подписки", callback_data="status")],
         ]
     else:
         inline_keyboard = [
