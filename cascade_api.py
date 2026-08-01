@@ -1,8 +1,9 @@
 import asyncio
+import hashlib
 import json
 import logging
 import time
-import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,7 +17,7 @@ from config import (
     CASCADE_RESERVATION_MINUTES,
     CASCADE_SERVERS_FILE,
 )
-from database import Database
+from database import Database, normalize_config_name
 from runtime_metrics import RuntimeMetrics
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ class CascadeServer:
     priority: int
     max_peers: int
     client_group: str = "Basic"
+    assignable_client_groups: tuple[str, ...] = ()
     enabled: bool = True
     verify_tls: bool = True
     server_name: str = ""
@@ -51,6 +53,10 @@ class CascadeServer:
     def api_url(self) -> str:
         base = self.base_url.rstrip("/")
         return base if base.endswith("/api") else f"{base}/api"
+
+    @property
+    def selectable_client_groups(self) -> tuple[str, ...]:
+        return self.assignable_client_groups or (self.client_group,)
 
 
 def load_cascade_servers(path: Path = CASCADE_SERVERS_FILE) -> list[CascadeServer]:
@@ -79,6 +85,16 @@ def load_cascade_servers(path: Path = CASCADE_SERVERS_FILE) -> list[CascadeServe
             )
         server_key = str(item.get("server_key") or "").strip()
         raw_server_name = item.get("server_name", server_key)
+        client_group = str(item.get("client_group") or "Basic").strip()
+        raw_assignable_groups = item.get("assignable_client_groups")
+        if raw_assignable_groups is None:
+            assignable_groups = (client_group,)
+        elif isinstance(raw_assignable_groups, list):
+            assignable_groups = tuple(str(value).strip() for value in raw_assignable_groups)
+        else:
+            raise CascadeError(
+                f"assignable_client_groups must be a list for server entry {index}"
+            )
         server = CascadeServer(
             server_key=server_key,
             base_url=str(item.get("base_url") or "").strip(),
@@ -86,7 +102,8 @@ def load_cascade_servers(path: Path = CASCADE_SERVERS_FILE) -> list[CascadeServe
             interface_id=str(item.get("interface_id") or "").strip(),
             priority=int(item.get("priority", 100)),
             max_peers=int(item.get("max_peers", 0)),
-            client_group=str(item.get("client_group") or "Basic").strip(),
+            client_group=client_group,
+            assignable_client_groups=assignable_groups,
             enabled=enabled,
             verify_tls=verify_tls,
             server_name=str(raw_server_name or "").strip(),
@@ -113,6 +130,26 @@ def load_cascade_servers(path: Path = CASCADE_SERVERS_FILE) -> list[CascadeServe
             raise CascadeError(f"API token is unexpectedly short for {server.server_key}")
         if not server.client_group:
             raise CascadeError(f"client_group must not be empty for {server.server_key}")
+        normalized_groups = [group.casefold() for group in server.selectable_client_groups]
+        if (
+            not normalized_groups
+            or len(normalized_groups) != len(set(normalized_groups))
+            or any(
+                not group
+                or len(group) > 64
+                or any(ord(character) < 32 or ord(character) == 127 for character in group)
+                for group in server.selectable_client_groups
+            )
+        ):
+            raise CascadeError(
+                f"assignable_client_groups must contain unique printable names for "
+                f"{server.server_key}"
+            )
+        if server.client_group.casefold() not in normalized_groups:
+            raise CascadeError(
+                f"client_group must be included in assignable_client_groups for "
+                f"{server.server_key}"
+            )
         if (
             not server.server_name
             or len(server.server_name) > 64
@@ -137,7 +174,8 @@ class CascadeAPI:
     def __init__(self, server: CascadeServer, metrics: RuntimeMetrics | None = None):
         self.server = server
         self.metrics = metrics
-        self._client_group_id: str | None = None
+        self._client_group_ids: dict[str, str] = {}
+        self._client_group_names: dict[str, str] = {}
         self.client = httpx.AsyncClient(
             base_url=server.api_url.rstrip("/") + "/",
             headers={"Authorization": f"Bearer {server.api_token}"},
@@ -242,21 +280,36 @@ class CascadeAPI:
         result = await self._request("GET", "/aliases/client-groups")
         return result.get("groups", []) if isinstance(result, dict) else []
 
-    async def resolve_client_group_id(self) -> str:
-        """Resolve the configured client-group name to its Cascade alias ID."""
-        if self._client_group_id:
-            return self._client_group_id
-        expected = self.server.client_group.casefold()
+    async def resolve_client_group_id(self, group_name: str | None = None) -> str:
+        """Resolve one configured client-group name to its Cascade alias ID."""
+        requested = (group_name or self.server.client_group).strip()
+        expected = requested.casefold()
+        if expected in self._client_group_ids:
+            return self._client_group_ids[expected]
         for group in await self.list_client_groups():
-            if str(group.get("name") or "").casefold() == expected:
-                group_id = str(group.get("id") or "").strip()
-                if group_id:
-                    self._client_group_id = group_id
-                    return group_id
+            name = str(group.get("name") or "").strip()
+            group_id = str(group.get("id") or "").strip()
+            if name and group_id:
+                self._client_group_ids[name.casefold()] = group_id
+                self._client_group_names[group_id] = name
+        if expected in self._client_group_ids:
+            return self._client_group_ids[expected]
         raise CascadeError(
-            f"Client group {self.server.client_group!r} was not found on "
+            f"Client group {requested!r} was not found on "
             f"{self.server.server_key}"
         )
+
+    async def resolve_client_group_name(self, group_id: str) -> str | None:
+        """Resolve a Cascade group ID to its current display name."""
+        if group_id in self._client_group_names:
+            return self._client_group_names[group_id]
+        for group in await self.list_client_groups():
+            name = str(group.get("name") or "").strip()
+            current_id = str(group.get("id") or "").strip()
+            if name and current_id:
+                self._client_group_ids[name.casefold()] = current_id
+                self._client_group_names[current_id] = name
+        return self._client_group_names.get(group_id)
 
     async def get_peer(self, peer_id: str, interface_id: str | None = None) -> dict[str, Any]:
         return await self._request(
@@ -269,8 +322,9 @@ class CascadeAPI:
         name: str,
         expired_at: str,
         interface_id: str | None = None,
+        client_group: str | None = None,
     ) -> dict[str, Any]:
-        group_id = await self.resolve_client_group_id()
+        group_id = await self.resolve_client_group_id(client_group)
         result = await self._request(
             "POST",
             f"/tunnel-interfaces/{interface_id or self.server.interface_id}/peers",
@@ -287,6 +341,20 @@ class CascadeAPI:
         if not isinstance(peer, dict) or not peer.get("id"):
             raise CascadeError(f"Invalid create peer response from {self.server.server_key}")
         return peer
+
+    async def update_client_group(
+        self,
+        peer_id: str,
+        group_name: str,
+        interface_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Move an existing peer to one named Cascade client group."""
+        group_id = await self.resolve_client_group_id(group_name)
+        return await self._request(
+            "PATCH",
+            f"/tunnel-interfaces/{interface_id or self.server.interface_id}/peers/{peer_id}",
+            json_body={"groupId": group_id},
+        )
 
     async def update_expiry(
         self, peer_id: str, expired_at: str, interface_id: str | None = None
@@ -384,6 +452,40 @@ class CascadeRouter:
             raise CascadeError(f"Cascade server is disabled: {server_key}")
         return await self.get_api(server_key).list_interfaces()
 
+    async def list_assignable_client_groups(
+        self, user_id: int, extra_server_key: str | None = None
+    ) -> list[str]:
+        """Return live assignable groups shared by every server used by a client."""
+        server_keys = {
+            str(peer["server_key"])
+            for peer in self.db.get_managed_client_configs(user_id)
+        }
+        if extra_server_key:
+            server_keys.add(extra_server_key)
+        if not server_keys:
+            return []
+        shared: dict[str, str] | None = None
+        for server_key in sorted(server_keys):
+            server = self.get_server(server_key)
+            if not server.enabled:
+                raise CascadeError(f"Cascade server is disabled: {server_key}")
+            live = {
+                str(group.get("name") or "").strip().casefold():
+                str(group.get("name") or "").strip()
+                for group in await self.get_api(server_key).list_client_groups()
+                if str(group.get("id") or "").strip()
+                and str(group.get("name") or "").strip()
+            }
+            configured = {
+                name.casefold(): live[name.casefold()]
+                for name in server.selectable_client_groups
+                if name.casefold() in live
+            }
+            shared = configured if shared is None else {
+                key: shared[key] for key in shared.keys() & configured.keys()
+            }
+        return list(shared.values()) if shared else []
+
     async def validate(self) -> dict[str, str]:
         """Validate health, token, and interface on every configured server."""
         async def check(server: CascadeServer) -> tuple[str, str]:
@@ -396,7 +498,10 @@ class CascadeRouter:
                 interface = await self.get_api(server.server_key).get_interface()
                 if str(interface.get("id")) != server.interface_id:
                     raise CascadeError("Configured interface ID does not match API response")
-                await self.get_api(server.server_key).resolve_client_group_id()
+                for group_name in server.selectable_client_groups:
+                    await self.get_api(server.server_key).resolve_client_group_id(
+                        group_name
+                    )
                 status = "ok" if server.enabled else "ok-disabled"
                 return server.server_key, status
             except Exception as exc:
@@ -404,6 +509,171 @@ class CascadeRouter:
 
         checks = await asyncio.gather(*(check(server) for server in self.servers))
         return dict(checks)
+
+    @staticmethod
+    def _peer_group_id(peer: dict[str, Any]) -> str:
+        nested_group = peer.get("group") or peer.get("clientGroup")
+        group_id = str(
+            peer.get("groupId")
+            or peer.get("clientGroupId")
+            or peer.get("group_id")
+            or (nested_group.get("id") if isinstance(nested_group, dict) else "")
+            or ""
+        ).strip()
+        if not group_id:
+            raise CascadeError("Cascade peer response has no client group ID")
+        return group_id
+
+    async def _read_peer_group(self, peer: dict[str, Any]) -> str:
+        api = self.get_api(str(peer["server_key"]))
+        live_peer = await api.get_peer(
+            str(peer["cascade_peer_id"]), str(peer["interface_id"])
+        )
+        if isinstance(live_peer.get("peer"), dict):
+            live_peer = live_peer["peer"]
+        group_name = await api.resolve_client_group_name(
+            self._peer_group_id(live_peer)
+        )
+        if not group_name:
+            raise CascadeError("Cascade peer references an unknown client group")
+        return group_name
+
+    async def reconcile_client_groups(self) -> dict[str, int]:
+        """Refresh stored group names without mutating Cascade peers."""
+        result = {"total": 0, "updated": 0, "unknown": 0}
+        peers_by_interface: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for peer in self.db.get_all_managed_client_peers():
+            key = (str(peer["server_key"]), str(peer["interface_id"]))
+            peers_by_interface.setdefault(key, []).append(peer)
+        result["total"] = sum(len(peers) for peers in peers_by_interface.values())
+        for (server_key, interface_id), stored_peers in peers_by_interface.items():
+            try:
+                api = self.get_api(server_key)
+                live_peers = {
+                    str(peer.get("id") or ""): peer
+                    for peer in await api.list_peers(interface_id)
+                    if peer.get("id")
+                }
+                for stored_peer in stored_peers:
+                    try:
+                        live_peer = live_peers.get(str(stored_peer["cascade_peer_id"]))
+                        if not live_peer:
+                            raise CascadeNotFound("Stored peer is missing from Cascade")
+                        group_name = await api.resolve_client_group_name(
+                            self._peer_group_id(live_peer)
+                        )
+                        if not group_name:
+                            raise CascadeError(
+                                "Cascade peer references an unknown client group"
+                            )
+                        self.db.set_client_peer_group(
+                            int(stored_peer["id"]), group_name
+                        )
+                        result["updated"] += 1
+                    except Exception:
+                        self.db.set_client_peer_group(int(stored_peer["id"]), None)
+                        result["unknown"] += 1
+            except Exception as exc:
+                for stored_peer in stored_peers:
+                    self.db.set_client_peer_group(int(stored_peer["id"]), None)
+                result["unknown"] += len(stored_peers)
+                logger.warning(
+                    "Unable to reconcile client groups on %s interface %s: %s",
+                    server_key,
+                    interface_id,
+                    type(exc).__name__,
+                )
+        self.db.log_operation(
+            "system",
+            "reconcile_client_groups",
+            json.dumps(result, sort_keys=True),
+        )
+        return result
+
+    async def delete_peer_by_identity(
+        self, server_key: str, interface_id: str, cascade_peer_id: str
+    ) -> None:
+        """Delete a compensating orphan created before local persistence."""
+        await self.get_api(server_key).delete_peer(cascade_peer_id, interface_id)
+
+    async def _restore_peer_groups(
+        self, user_id: int, original_groups: dict[int, str]
+    ) -> None:
+        failures = 0
+        for peer_id, group_name in original_groups.items():
+            peer = self.db.get_client_peer(peer_id, user_id)
+            if not peer or peer["role"] not in {"primary", "additional"}:
+                failures += 1
+                continue
+            try:
+                await self.get_api(str(peer["server_key"])).update_client_group(
+                    str(peer["cascade_peer_id"]),
+                    group_name,
+                    str(peer["interface_id"]),
+                )
+                self.db.set_client_peer_group(peer_id, group_name)
+            except Exception:
+                failures += 1
+                self.db.set_client_peer_group(peer_id, None)
+        if failures:
+            raise CascadeError(f"Failed to restore groups for {failures} peers")
+
+    async def restore_peer_groups(
+        self, user_id: int, original_groups: dict[str, str]
+    ) -> None:
+        await self._restore_peer_groups(
+            user_id, {int(peer_id): group for peer_id, group in original_groups.items()}
+        )
+
+    async def _change_client_group_unlocked(
+        self, user_id: int, group_name: str
+    ) -> dict[int, str]:
+        peers = self.db.get_managed_client_configs(user_id)
+        if not peers:
+            raise CascadeError("Client has no managed configurations")
+        available = await self.list_assignable_client_groups(user_id)
+        selected = next(
+            (name for name in available if name.casefold() == group_name.casefold()),
+            None,
+        )
+        if not selected:
+            raise CascadeError(f"Client group {group_name!r} is not assignable")
+        original_groups: dict[int, str] = {}
+        for peer in peers:
+            original_groups[int(peer["id"])] = await self._read_peer_group(peer)
+        changed: dict[int, str] = {}
+        try:
+            for peer in peers:
+                peer_id = int(peer["id"])
+                if original_groups[peer_id].casefold() == selected.casefold():
+                    continue
+                await self.get_api(str(peer["server_key"])).update_client_group(
+                    str(peer["cascade_peer_id"]), selected, str(peer["interface_id"])
+                )
+                changed[peer_id] = original_groups[peer_id]
+            self.db.set_client_peer_groups(user_id, selected)
+            return original_groups
+        except Exception:
+            try:
+                await self._restore_peer_groups(user_id, changed)
+            except CascadeError as rollback_error:
+                self.db.add_provisioning_task(
+                    user_id,
+                    "restore_peer_groups",
+                    {"groups": {str(key): value for key, value in changed.items()}},
+                    str(rollback_error),
+                )
+            raise
+
+    async def change_client_group(self, user_id: int, group_name: str) -> int:
+        """Move every managed peer of one client to a single group."""
+        user_lock = self._user_locks.get(user_id)
+        if user_lock is None:
+            user_lock = asyncio.Lock()
+            self._user_locks[user_id] = user_lock
+        async with user_lock:
+            original = await self._change_client_group_unlocked(user_id, group_name)
+            return len(original)
 
     async def ensure_reservation(self, user_id: int) -> dict[str, Any] | None:
         """Reserve capacity for a new user; existing users stay on their server."""
@@ -512,6 +782,11 @@ class CascadeRouter:
                     if not peer.get("id") or not public_key:
                         raise CascadeError("Reconciled Cascade peer has incomplete identity")
                     config = await api.download_config(str(peer["id"]), interface_id)
+                    client_group = None
+                    with suppress(CascadeError):
+                        client_group = await api.resolve_client_group_name(
+                            self._peer_group_id(peer)
+                        )
                     self.db.upsert_client(user_id, username)
                     if not self.db.save_client_peer(
                         user_id=user_id,
@@ -522,6 +797,7 @@ class CascadeRouter:
                         peer_name=peer_name,
                         role="primary",
                         enabled=bool(peer.get("enabled", True)),
+                        client_group=client_group,
                     ):
                         raise CascadeError("Failed to persist the reconciled Cascade peer")
                     self.db.release_reservation(user_id)
@@ -550,6 +826,7 @@ class CascadeRouter:
                     peer_name=str(peer.get("name") or peer_name),
                     role="primary",
                     enabled=bool(peer.get("enabled", True)),
+                    client_group=server.client_group,
                 )
                 if not saved:
                     raise CascadeError("Failed to persist the created Cascade peer")
@@ -609,13 +886,41 @@ class CascadeRouter:
             raise
         return peer, content
 
+    async def build_additional_peer_name(
+        self,
+        user_id: int,
+        config_name: str,
+        server_key: str,
+        interface_id: str,
+    ) -> str:
+        """Build a readable, bounded peer name and avoid live name collisions."""
+        config_name = normalize_config_name(config_name)
+        client = self.db.get_admin_client_details(user_id)
+        identity = str((client or {}).get("telegram_username") or user_id).strip().lstrip("@")
+        base_peer_name = f"{identity}_{config_name}"
+        existing_names = {
+            str(item.get("name") or "").strip().casefold()
+            for item in await self.get_api(server_key).list_peers(interface_id)
+        }
+        if len(base_peer_name) <= 50 and base_peer_name.casefold() not in existing_names:
+            return base_peer_name
+        seed = f"{user_id}\0{config_name}\0{server_key}\0{interface_id}"
+        for attempt in range(100):
+            suffix = hashlib.sha256(f"{seed}\0{attempt}".encode()).hexdigest()[:8]
+            candidate = f"{base_peer_name[:41].rstrip()}-{suffix}"
+            if candidate.casefold() not in existing_names:
+                return candidate
+        raise CascadeError("Unable to build a unique Cascade peer name")
+
     async def create_additional_config(
         self,
         user_id: int,
         config_name: str,
         server_key: str,
         interface_id: str,
+        client_group: str | None = None,
     ) -> dict[str, Any]:
+        config_name = normalize_config_name(config_name)
         primary = self.db.get_primary_client_peer(user_id)
         expire_date = self.db.get_subscription_expiry(user_id)
         if not primary or not expire_date:
@@ -623,6 +928,8 @@ class CascadeRouter:
                 "An additional configuration requires a primary peer and expiration date"
             )
         server = self.get_server(server_key)
+        explicit_group = client_group is not None
+        client_group = client_group or server.client_group
         if not server.enabled:
             raise CascadeError(f"Cascade server is disabled: {server_key}")
         api = self.get_api(server_key)
@@ -639,48 +946,112 @@ class CascadeRouter:
         if peer_total >= server.max_peers:
             raise CascadeCapacityError(f"Cascade server {server_key} is full")
 
-        peer: dict[str, Any] | None = None
-        saved = False
-        try:
-            peer_name = f"tg-{user_id}-cfg-{uuid.uuid4().hex[:8]}"
-            peer = await api.create_peer(peer_name, expire_date, interface_id)
-            public_key = str(peer.get("publicKey") or "").strip()
-            if not public_key:
-                raise CascadeError("Cascade create response has no public key")
-            await api.download_config(str(peer["id"]), interface_id)
-            is_future = (
-                datetime.fromisoformat(expire_date).replace(tzinfo=UTC)
-                > datetime.now(UTC)
-            )
-            if not is_future:
-                await api.disable_peer(str(peer["id"]), interface_id)
-            saved = self.db.save_client_peer(
-                user_id=user_id,
-                server_key=server_key,
-                interface_id=interface_id,
-                cascade_peer_id=str(peer["id"]),
-                public_key=public_key,
-                peer_name=str(peer.get("name") or peer_name),
-                role="additional",
-                enabled=is_future,
-                config_name=config_name,
-                admin_enabled=True,
-            )
-            if not saved:
-                raise CascadeError("Failed to persist the additional Cascade peer")
-            stored = self.db.get_client_peer_by_cascade_id(
-                server_key, interface_id, str(peer["id"])
-            )
-            if not stored:
-                raise CascadeError("Stored additional Cascade peer could not be read")
-            return stored
-        except Exception:
-            if peer and peer.get("id") and not saved:
-                try:
-                    await api.delete_peer(str(peer["id"]), interface_id)
-                except Exception:
-                    logger.exception("Failed to compensate additional peer creation")
-            raise
+        user_lock = self._user_locks.get(user_id)
+        if user_lock is None:
+            user_lock = asyncio.Lock()
+            self._user_locks[user_id] = user_lock
+        async with user_lock:
+            original_groups: dict[int, str] = {}
+            peer: dict[str, Any] | None = None
+            saved = False
+            try:
+                original_groups = (
+                    await self._change_client_group_unlocked(user_id, client_group)
+                    if explicit_group
+                    else {}
+                )
+                current_interfaces = await api.list_interfaces()
+                if not any(
+                    str(item.get("id") or "") == interface_id
+                    for item in current_interfaces
+                ):
+                    raise CascadeNotFound(
+                        f"Interface {interface_id} was not found on {server_key}"
+                    )
+                current_total = 0
+                for interface in current_interfaces:
+                    current_interface_id = str(interface.get("id") or "")
+                    if current_interface_id:
+                        current_total += len(
+                            await api.list_peers(current_interface_id)
+                        )
+                if current_total >= server.max_peers:
+                    raise CascadeCapacityError(f"Cascade server {server_key} is full")
+                peer_name = await self.build_additional_peer_name(
+                    user_id, config_name, server_key, interface_id
+                )
+                if explicit_group:
+                    peer = await api.create_peer(
+                        peer_name,
+                        expire_date,
+                        interface_id,
+                        client_group=client_group,
+                    )
+                else:
+                    peer = await api.create_peer(peer_name, expire_date, interface_id)
+                public_key = str(peer.get("publicKey") or "").strip()
+                if not public_key:
+                    raise CascadeError("Cascade create response has no public key")
+                await api.download_config(str(peer["id"]), interface_id)
+                is_future = (
+                    datetime.fromisoformat(expire_date).replace(tzinfo=UTC)
+                    > datetime.now(UTC)
+                )
+                if not is_future:
+                    await api.disable_peer(str(peer["id"]), interface_id)
+                saved = self.db.save_client_peer(
+                    user_id=user_id,
+                    server_key=server_key,
+                    interface_id=interface_id,
+                    cascade_peer_id=str(peer["id"]),
+                    public_key=public_key,
+                    peer_name=str(peer.get("name") or peer_name),
+                    role="additional",
+                    enabled=is_future,
+                    config_name=config_name,
+                    admin_enabled=True,
+                    client_group=client_group,
+                )
+                if not saved:
+                    raise CascadeError("Failed to persist the additional Cascade peer")
+                stored = self.db.get_client_peer_by_cascade_id(
+                    server_key, interface_id, str(peer["id"])
+                )
+                if not stored:
+                    raise CascadeError("Stored additional Cascade peer could not be read")
+                return stored
+            except Exception:
+                if peer and peer.get("id") and not saved:
+                    try:
+                        await api.delete_peer(str(peer["id"]), interface_id)
+                    except Exception as delete_error:
+                        logger.exception("Failed to compensate additional peer creation")
+                        self.db.add_provisioning_task(
+                            user_id,
+                            "delete_cascade_peer",
+                            {
+                                "server_key": server_key,
+                                "interface_id": interface_id,
+                                "cascade_peer_id": str(peer["id"]),
+                            },
+                            str(delete_error),
+                        )
+                if original_groups:
+                    try:
+                        await self._restore_peer_groups(user_id, original_groups)
+                    except CascadeError as rollback_error:
+                        self.db.add_provisioning_task(
+                            user_id,
+                            "restore_peer_groups",
+                            {
+                                "groups": {
+                                    str(key): value
+                                    for key, value in original_groups.items()
+                                }
+                            },
+                            str(rollback_error),
+                        )
+                raise
 
     async def set_additional_config_active(
         self, user_id: int, peer_id: int, active: bool
@@ -712,6 +1083,37 @@ class CascadeRouter:
         if not updated:
             raise CascadeError("Updated configuration could not be read")
         return updated
+
+    async def delete_additional_config(
+        self, user_id: int, peer_id: int
+    ) -> tuple[dict[str, Any], bool]:
+        """Permanently delete an additional peer from Cascade and local storage."""
+        user_lock = self._user_locks.get(user_id)
+        if user_lock is None:
+            user_lock = asyncio.Lock()
+            self._user_locks[user_id] = user_lock
+        async with user_lock:
+            peer = self.db.get_client_peer(peer_id, user_id)
+            if not peer or peer["role"] != "additional":
+                raise CascadeNotFound(f"No additional configuration {peer_id}")
+            api = self.get_api(str(peer["server_key"]))
+            cascade_peer_missing = False
+            try:
+                await api.get_peer(
+                    str(peer["cascade_peer_id"]), str(peer["interface_id"])
+                )
+            except CascadeNotFound:
+                cascade_peer_missing = True
+            if not cascade_peer_missing:
+                try:
+                    await api.delete_peer(
+                        str(peer["cascade_peer_id"]), str(peer["interface_id"])
+                    )
+                except CascadeNotFound:
+                    cascade_peer_missing = True
+            if not self.db.delete_additional_config(peer_id, user_id):
+                raise CascadeError("Failed to remove the deleted configuration locally")
+            return peer, cascade_peer_missing
 
     async def primary_peer_exists(self, user_id: int) -> bool:
         peer = self.db.get_primary_client_peer(user_id)

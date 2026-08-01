@@ -689,6 +689,8 @@ async def main(services: AppServices):
         logger.info("Cascade startup validation: %s", cascade_status)
         if not any(status.startswith("ok") for status in cascade_status.values()):
             raise RuntimeError("No healthy Cascade server is configured")
+        group_reconciliation = await cascade_router.reconcile_client_groups()
+        logger.info("Cascade client-group reconciliation: %s", group_reconciliation)
         services.runtime_ready = True
 
         # Start background checks for expired peers and notifications

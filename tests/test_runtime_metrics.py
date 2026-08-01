@@ -73,6 +73,30 @@ class _ProvisioningDatabase:
 
 
 class ProvisioningMetricsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_group_compensation_task_calls_router(self):
+        database = _ProvisioningDatabase()
+        router = AsyncMock()
+        worker = ProvisioningWorker(
+            database,
+            router,
+            AsyncMock(),
+            AsyncMock(),
+            interval_seconds=60,
+            lease_seconds=30,
+        )
+
+        await worker._process(
+            {
+                "id": "task-group",
+                "telegram_user_id": 10,
+                "operation": "restore_peer_groups",
+                "payload": {"groups": {"1": "Basic"}},
+            }
+        )
+
+        router.restore_peer_groups.assert_awaited_once_with(10, {"1": "Basic"})
+        self.assertEqual(database.completed[0][0], "task-group")
+
     async def test_completed_task_updates_metrics(self):
         database = _ProvisioningDatabase()
         router = AsyncMock()

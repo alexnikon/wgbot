@@ -351,6 +351,28 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(config["admin_enabled"], 0)
         self.assertIsNone(self.db.get_admin_managed_config(peer_id, 11))
 
+    def test_permanent_config_delete_is_owner_bound_and_protects_primary(self):
+        self.db.save_client_peer(
+            10, "server-a", "if-a", "primary", "key-a", "alice", "primary"
+        )
+        self.db.save_client_peer(
+            10,
+            "server-a",
+            "if-a",
+            "additional",
+            "key-b",
+            "alice_phone",
+            "additional",
+            config_name="Phone",
+        )
+        primary, additional = self.db.get_managed_client_configs(10)
+
+        self.assertFalse(self.db.delete_additional_config(additional["id"], 11))
+        self.assertFalse(self.db.delete_additional_config(primary["id"], 10))
+        self.assertTrue(self.db.delete_additional_config(additional["id"], 10))
+        self.assertIsNone(self.db.get_client_peer(additional["id"], 10))
+        self.assertIsNotNone(self.db.get_client_peer(primary["id"], 10))
+
     def test_schema_migration_names_existing_primary_peer(self):
         handle, legacy_path = tempfile.mkstemp(suffix=".db")
         os.close(handle)
@@ -390,6 +412,40 @@ class DatabaseTests(unittest.TestCase):
         primary = migrated.get_primary_client_peer(10)
         self.assertEqual(primary["config_name"], DEFAULT_PRIMARY_CONFIG_NAME)
         self.assertEqual(primary["admin_enabled"], 1)
+        self.assertIsNone(primary["client_group"])
+
+    def test_client_group_is_stored_per_peer_and_summarized_for_admin(self):
+        self.db.save_client_peer(
+            10,
+            "server-a",
+            "if-a",
+            "primary",
+            "key-a",
+            "alice",
+            "primary",
+            client_group="Basic",
+        )
+        self.db.save_client_peer(
+            10,
+            "server-b",
+            "if-b",
+            "additional",
+            "key-b",
+            "phone",
+            "additional",
+            config_name="Phone",
+            client_group="Premium",
+        )
+
+        details = self.db.get_admin_client_details(10)
+
+        self.assertEqual(details["client_groups"], "Basic, Premium")
+        self.assertEqual(details["unknown_group_count"], 0)
+        self.assertEqual(self.db.set_client_peer_groups(10, "Premium"), 2)
+        self.assertEqual(
+            {peer["client_group"] for peer in self.db.get_managed_client_configs(10)},
+            {"Premium"},
+        )
 
     def test_extension_uses_current_expiry_for_active_subscription(self):
         self.db.activate_new_access(10, "alice", 30, "30_days", "stars")

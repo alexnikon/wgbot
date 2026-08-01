@@ -247,7 +247,11 @@ def client_card_keyboard(user_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="📅 Срок доступа",
                     callback_data=AdminClientCallback(action="expiry", user_id=user_id).pack(),
-                )
+                ),
+                InlineKeyboardButton(
+                    text="👥 Группа",
+                    callback_data=AdminClientCallback(action="group", user_id=user_id).pack(),
+                ),
             ],
             [InlineKeyboardButton(text="⬅️ К списку", callback_data="admin_client_list")],
         ]
@@ -353,13 +357,23 @@ def config_details_keyboard(config: dict[str, Any]) -> InlineKeyboardMarkup:
     ]
     if config["role"] == "additional":
         action = "deactivate" if config["admin_enabled"] else "restore"
-        text = "🗑 Деактивировать" if config["admin_enabled"] else "♻️ Восстановить"
+        text = "⏸ Деактивировать" if config["admin_enabled"] else "♻️ Восстановить"
         rows.append(
             [
                 InlineKeyboardButton(
                     text=text,
                     callback_data=AdminConfigCallback(
                         action=action, user_id=user_id, peer_id=peer_id
+                    ).pack(),
+                )
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🗑 Удалить навсегда",
+                    callback_data=AdminConfigCallback(
+                        action="delete", user_id=user_id, peer_id=peer_id
                     ).pack(),
                 )
             ]
@@ -415,8 +429,23 @@ def format_config(config: dict[str, Any], server_name: str | None = None) -> str
         f"Тип: {role_label}\n"
         f"Сервер: {server_label}\n"
         f"Интерфейс: {config['interface_id']}\n"
+        f"Группа: {config.get('client_group') or 'не подтверждена'}\n"
         f"Состояние: {status}"
     )
+
+
+def client_group_label(client: dict[str, Any]) -> str:
+    """Describe the verified group state of all managed client configs."""
+    groups = [
+        value.strip()
+        for value in str(client.get("client_groups") or "").split(",")
+        if value.strip()
+    ]
+    if int(client.get("unknown_group_count") or 0):
+        return "не подтверждена"
+    if len(groups) > 1:
+        return f"несогласовано: {', '.join(groups)}"
+    return groups[0] if groups else "не подтверждена"
 
 
 def format_client(client: dict[str, Any]) -> TelegramText:
@@ -430,6 +459,7 @@ def format_client(client: dict[str, Any]) -> TelegramText:
         f"Username: {identity}\n"
         f"Скидка: {int(client.get('promo') or 0)}%\n"
         f"Сервер: {client.get('server_keys') or 'не назначен'}\n"
+        f"Группа: {client_group_label(client)}\n"
         f"Устройств: {int(client.get('device_count') or 0)}\n"
         f"Доступ до: {formatted_expiry}"
     )
@@ -560,6 +590,180 @@ async def show_client_details(
     await edit_bound_message(
         callback.message,
         format_client(client),
+        reply_markup=client_card_keyboard(callback_data.user_id),
+    )
+
+
+@router.callback_query(AdminClientCallback.filter(F.action == "group"))
+async def start_client_group_change(
+    callback: types.CallbackQuery,
+    db: Database,
+    cascade_router: CascadeRouter,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+    callback_data: AdminClientCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    client = db.get_admin_client_details(callback_data.user_id)
+    if not client:
+        await edit_bound_message(
+            callback.message, "❌ Клиент не найден.", reply_markup=admin_dashboard_keyboard()
+        )
+        return
+    try:
+        groups = await cascade_router.list_assignable_client_groups(callback_data.user_id)
+    except CascadeError:
+        logger.exception("Failed to list client groups for group change")
+        await edit_bound_message(
+            callback.message,
+            "❌ Не удалось проверить группы Cascade.",
+            reply_markup=client_card_keyboard(callback_data.user_id),
+        )
+        return
+    if not groups:
+        await edit_bound_message(
+            callback.message,
+            "❌ Для серверов клиента нет общей назначаемой группы.",
+            reply_markup=client_card_keyboard(callback_data.user_id),
+        )
+        return
+    old_groups = sorted(
+        {
+            str(peer["client_group"])
+            for peer in db.get_managed_client_configs(callback_data.user_id)
+            if peer.get("client_group")
+        }
+    )
+    admin_workflows.set(
+        callback.from_user.id,
+        "select_client_group",
+        user_id=callback_data.user_id,
+        groups=groups,
+        old_groups=old_groups,
+        service_chat_id=callback.message.chat.id,
+        service_message_id=callback.message.message_id,
+    )
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=group_name,
+                callback_data=AdminConfigCallback(
+                    action="client_group", user_id=callback_data.user_id, value=index
+                ).pack(),
+            )
+        ]
+        for index, group_name in enumerate(groups)
+    ]
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="admin_flow_cancel")])
+    await edit_bound_message(
+        callback.message,
+        f"Текущая группа: {client_group_label(client)}\n\nВыбери новую группу клиента.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@router.callback_query(AdminConfigCallback.filter(F.action == "client_group"))
+async def select_client_group_change(
+    callback: types.CallbackQuery,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+    callback_data: AdminConfigCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    flow = admin_workflows.get(callback.from_user.id)
+    groups = flow.get("groups", []) if flow else []
+    if (
+        not flow
+        or flow.get("state") != "select_client_group"
+        or int(flow.get("user_id", 0)) != callback_data.user_id
+        or not 0 <= callback_data.value < len(groups)
+    ):
+        await edit_bound_message(callback.message, "❌ Сценарий смены группы устарел.")
+        return
+    group_name = str(groups[callback_data.value])
+    admin_workflows.set(
+        callback.from_user.id,
+        "confirm_client_group",
+        **{key: value for key, value in flow.items() if key not in {"state", "groups"}},
+        client_group=group_name,
+    )
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Изменить группу",
+                    callback_data=AdminConfigCallback(
+                        action="client_group_confirm", user_id=callback_data.user_id
+                    ).pack(),
+                )
+            ],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_flow_cancel")],
+        ]
+    )
+    await edit_bound_message(
+        callback.message,
+        f"Перевести все конфиги клиента в группу {group_name}?\n\n"
+        "Срок и состояние конфигов не изменятся.",
+        reply_markup=keyboard,
+    )
+
+
+@router.callback_query(AdminConfigCallback.filter(F.action == "client_group_confirm"))
+async def confirm_client_group_change(
+    callback: types.CallbackQuery,
+    db: Database,
+    cascade_router: CascadeRouter,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+    callback_data: AdminConfigCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    flow = admin_workflows.get(callback.from_user.id)
+    if (
+        not flow
+        or flow.get("state") != "confirm_client_group"
+        or int(flow.get("user_id", 0)) != callback_data.user_id
+    ):
+        await edit_bound_message(callback.message, "❌ Сценарий смены группы устарел.")
+        return
+    group_name = str(flow["client_group"])
+    try:
+        peer_count = await cascade_router.change_client_group(
+            callback_data.user_id, group_name
+        )
+    except CascadeError:
+        logger.exception("Failed to change unified client group")
+        db.log_admin_client_group_change(
+            callback.from_user.id,
+            callback_data.user_id,
+            list(flow.get("old_groups", [])),
+            group_name,
+            len(db.get_managed_client_configs(callback_data.user_id)),
+            operation="admin_change_client_group_failed",
+        )
+        await edit_bound_message(
+            callback.message,
+            "❌ Не удалось изменить группу. Изменения отменены или поставлены в очередь восстановления.",
+            reply_markup=client_card_keyboard(callback_data.user_id),
+        )
+        return
+    admin_workflows.clear(callback.from_user.id)
+    db.log_admin_client_group_change(
+        callback.from_user.id,
+        callback_data.user_id,
+        list(flow.get("old_groups", [])),
+        group_name,
+        peer_count,
+    )
+    await edit_bound_message(
+        callback.message,
+        f"✅ Все конфиги клиента переведены в группу {group_name}.",
         reply_markup=client_card_keyboard(callback_data.user_id),
     )
 
@@ -1011,6 +1215,7 @@ async def select_config_server(
 @router.callback_query(AdminConfigCallback.filter(F.action == "interface"))
 async def select_config_interface(
     callback: types.CallbackQuery,
+    cascade_router: CascadeRouter,
     admin_workflows: AdminWorkflowService,
     safe_answer_callback,
     callback_data: AdminConfigCallback,
@@ -1029,12 +1234,104 @@ async def select_config_interface(
         await edit_bound_message(callback.message, "❌ Сценарий создания устарел.")
         return
     interface = interfaces[callback_data.value]
+    try:
+        groups = await cascade_router.list_assignable_client_groups(
+            callback_data.user_id, str(flow["server_key"])
+        )
+    except CascadeError:
+        logger.exception("Failed to list assignable client groups")
+        await edit_bound_message(
+            callback.message,
+            "❌ Не удалось проверить группы Cascade.",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    if not groups:
+        await edit_bound_message(
+            callback.message,
+            "❌ Нет общей назначаемой группы для конфигов клиента.",
+            reply_markup=cancel_keyboard(),
+        )
+        return
     admin_workflows.set(
         callback.from_user.id,
-        "confirm_config_create",
+        "select_config_group",
         **{key: value for key, value in flow.items() if key not in {"state", "interfaces"}},
         interface_id=interface["id"],
         interface_name=interface["name"],
+        groups=groups,
+    )
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            *[
+                [
+                    InlineKeyboardButton(
+                        text=group_name,
+                        callback_data=AdminConfigCallback(
+                            action="group",
+                            user_id=callback_data.user_id,
+                            value=index,
+                        ).pack(),
+                    )
+                ]
+                for index, group_name in enumerate(groups)
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отмена", callback_data="admin_flow_cancel"
+                )
+            ],
+        ]
+    )
+    await edit_bound_message(
+        callback.message,
+        "Выбери единую группу клиента.",
+        reply_markup=keyboard,
+    )
+
+
+@router.callback_query(AdminConfigCallback.filter(F.action == "group"))
+async def select_config_group(
+    callback: types.CallbackQuery,
+    cascade_router: CascadeRouter,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+    callback_data: AdminConfigCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    flow = admin_workflows.get(callback.from_user.id)
+    groups = flow.get("groups", []) if flow else []
+    if (
+        not flow
+        or flow.get("state") != "select_config_group"
+        or int(flow.get("user_id", 0)) != callback_data.user_id
+        or not 0 <= callback_data.value < len(groups)
+    ):
+        await edit_bound_message(callback.message, "❌ Сценарий создания устарел.")
+        return
+    group_name = str(groups[callback_data.value])
+    try:
+        peer_name = await cascade_router.build_additional_peer_name(
+            callback_data.user_id,
+            str(flow["config_name"]),
+            str(flow["server_key"]),
+            str(flow["interface_id"]),
+        )
+    except CascadeError:
+        await edit_bound_message(
+            callback.message,
+            "❌ Не удалось проверить техническое имя peer.",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    admin_workflows.set(
+        callback.from_user.id,
+        "confirm_config_create",
+        **{key: value for key, value in flow.items() if key not in {"state", "groups"}},
+        client_group=group_name,
+        peer_name=peer_name,
     )
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -1042,8 +1339,7 @@ async def select_config_interface(
                 InlineKeyboardButton(
                     text="✅ Создать",
                     callback_data=AdminConfigCallback(
-                        action="create",
-                        user_id=callback_data.user_id,
+                        action="create", user_id=callback_data.user_id
                     ).pack(),
                 )
             ],
@@ -1054,8 +1350,10 @@ async def select_config_interface(
         callback.message,
         "Создать дополнительный конфиг?\n\n"
         f"Название: {flow['config_name']}\n"
+        f"Peer: {peer_name}\n"
         f"Сервер: {flow['server_key']}\n"
-        f"Интерфейс: {interface['name']} · {interface['id'][:8]}",
+        f"Интерфейс: {flow['interface_name']} · {str(flow['interface_id'])[:8]}\n"
+        f"Группа: {group_name}",
         reply_markup=keyboard,
     )
 
@@ -1086,9 +1384,24 @@ async def confirm_config_create(
             str(flow["config_name"]),
             str(flow["server_key"]),
             str(flow["interface_id"]),
+            str(flow["client_group"]),
         )
     except CascadeError:
         logger.exception("Failed to create an additional configuration")
+        db.log_admin_client_group_change(
+            callback.from_user.id,
+            callback_data.user_id,
+            sorted(
+                {
+                    str(peer["client_group"])
+                    for peer in db.get_managed_client_configs(callback_data.user_id)
+                    if peer.get("client_group")
+                }
+            ),
+            str(flow["client_group"]),
+            len(db.get_managed_client_configs(callback_data.user_id)),
+            operation="admin_create_config_rolled_back",
+        )
         await edit_bound_message(
             callback.message,
             "❌ Не удалось создать конфиг. Проверь сервер, интерфейс и ёмкость.",
@@ -1102,10 +1415,15 @@ async def confirm_config_create(
         int(config["id"]),
         "admin_create_config",
         server_key=str(config["server_key"]),
+        client_group=str(config["client_group"]),
     )
     keyboard, _ = config_list_keyboard(db, callback_data.user_id)
     await edit_bound_message(
-        callback.message, f"✅ Конфиг «{config['config_name']}» создан.", reply_markup=keyboard
+        callback.message,
+        f"✅ Конфиг «{config['config_name']}» создан.\n\n"
+        f"Peer: {config['peer_name']}\n"
+        f"Группа: {config['client_group']}",
+        reply_markup=keyboard,
     )
 
 
@@ -1181,6 +1499,105 @@ async def confirm_config_deactivation(
         callback.message,
         f"Деактивировать конфиг «{config['config_name']}»?\n"
         "Peer останется в Cascade и сможет быть восстановлен.",
+        reply_markup=keyboard,
+    )
+
+
+@router.callback_query(AdminConfigCallback.filter(F.action == "delete"))
+async def confirm_config_deletion(
+    callback: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    callback_data: AdminConfigCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    config = db.get_client_peer(callback_data.peer_id, callback_data.user_id)
+    if not config or config["role"] != "additional":
+        await edit_bound_message(callback.message, "❌ Дополнительный конфиг не найден.")
+        return
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🗑 Удалить навсегда",
+                    callback_data=AdminConfigCallback(
+                        action="delete_confirm",
+                        user_id=callback_data.user_id,
+                        peer_id=callback_data.peer_id,
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=AdminConfigCallback(
+                        action="view",
+                        user_id=callback_data.user_id,
+                        peer_id=callback_data.peer_id,
+                    ).pack(),
+                )
+            ],
+        ]
+    )
+    await edit_bound_message(
+        callback.message,
+        f"Удалить конфиг «{config_display_name(config)}» навсегда?\n\n"
+        "Peer будет удалён из Cascade и базы данных. Это действие нельзя отменить.",
+        reply_markup=keyboard,
+    )
+
+
+@router.callback_query(AdminConfigCallback.filter(F.action == "delete_confirm"))
+async def delete_additional_config(
+    callback: types.CallbackQuery,
+    db: Database,
+    cascade_router: CascadeRouter,
+    safe_answer_callback,
+    callback_data: AdminConfigCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    try:
+        config, cascade_peer_missing = await cascade_router.delete_additional_config(
+            callback_data.user_id, callback_data.peer_id
+        )
+    except CascadeNotFound:
+        await edit_bound_message(
+            callback.message,
+            "❌ Дополнительный конфиг не найден.",
+            reply_markup=config_list_keyboard(db, callback_data.user_id)[0],
+        )
+        return
+    except CascadeError:
+        logger.exception("Failed to permanently delete additional configuration")
+        await edit_bound_message(
+            callback.message,
+            "❌ Не удалось удалить конфиг. Данные не изменены.",
+            reply_markup=config_error_back_keyboard(
+                callback_data.user_id, callback_data.peer_id
+            ),
+        )
+        return
+    db.log_admin_config_change(
+        callback.from_user.id,
+        callback_data.user_id,
+        callback_data.peer_id,
+        "admin_delete_config",
+        server_key=str(config["server_key"]),
+        client_group=config.get("client_group"),
+    )
+    keyboard, _ = config_list_keyboard(db, callback_data.user_id)
+    suffix = (
+        "\nPeer уже отсутствовал в Cascade; удалена локальная запись."
+        if cascade_peer_missing
+        else ""
+    )
+    await edit_bound_message(
+        callback.message,
+        f"✅ Конфиг «{config_display_name(config)}» удалён навсегда.{suffix}",
         reply_markup=keyboard,
     )
 
@@ -1548,7 +1965,10 @@ async def cancel_flow(
     if (
         flow
         and flow.get("user_id")
-        and ("config" in str(flow.get("state", "")) or "expiry" in str(flow.get("state", "")))
+        and any(
+            marker in str(flow.get("state", ""))
+            for marker in ("config", "expiry", "group")
+        )
     ):
         reply_markup = client_card_keyboard(int(flow["user_id"]))
     await edit_bound_message(callback.message, "Действие отменено.", reply_markup=reply_markup)

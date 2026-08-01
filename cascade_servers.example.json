@@ -9,6 +9,7 @@
       "priority": 10,
       "max_peers": 250,
       "client_group": "Basic",
+      "assignable_client_groups": ["Basic", "Premium"],
       "enabled": true,
       "verify_tls": true
     }

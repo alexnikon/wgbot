@@ -26,6 +26,7 @@ from callbacks import (
     PaymentMethodCallback,
     RefundConfirmationCallback,
 )
+from cascade_api import CascadeNotFound
 from database import Database
 from handlers.access import (
     client_config_keyboard,
@@ -37,15 +38,18 @@ from handlers.admin import (
     AdminWorkflowService,
     admin_dashboard_keyboard,
     client_card_keyboard,
+    client_group_label,
     client_list_keyboard,
     config_details_keyboard,
     config_error_back_keyboard,
     config_list_keyboard,
     confirm_expiry_change,
+    delete_additional_config,
     download_paid_client_config,
     format_admin_expiry,
     format_config,
     parse_admin_expiry_input,
+    select_client_group_change,
 )
 from handlers.fallback import handle_unknown
 from handlers.navigation import cmd_start
@@ -549,6 +553,25 @@ class TelegramDatabaseTests(unittest.TestCase):
         second.clear(1)
         self.assertIsNone(first.get(1))
 
+    def test_group_callback_rejects_mismatched_client(self):
+        workflow = AdminWorkflowService(self.db)
+        workflow.set(99, "select_client_group", user_id=10, groups=["Basic", "Premium"])
+        callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=99),
+            message=SimpleNamespace(edit_text=AsyncMock()),
+        )
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                select_client_group_change(
+                    callback,
+                    workflow,
+                    AsyncMock(),
+                    AdminConfigCallback(action="client_group", user_id=11, value=1),
+                )
+            )
+        self.assertEqual(workflow.get(99)["state"], "select_client_group")
+        self.assertIn("устарел", callback.message.edit_text.await_args.args[0])
+
     def test_expired_admin_workflow_is_removed(self):
         self.db.set_admin_workflow(1, "input", "waiting", {}, ttl_hours=0)
         self.assertIsNone(self.db.get_admin_workflow(1, "input"))
@@ -593,6 +616,7 @@ class TelegramDatabaseTests(unittest.TestCase):
         self.assertIn("💸 Скидка", labels)
         self.assertIn("🗂 Конфиги", labels)
         self.assertIn("📅 Срок доступа", labels)
+        self.assertIn("👥 Группа", labels)
         self.assertEqual(location_config_filename("USA NY"), "USA-NY.conf")
         self.assertEqual(location_config_filename("Finland / Helsinki"), "Finland-Helsinki.conf")
         empty_keyboard, total = client_list_keyboard(self.db, view="details", page=0)
@@ -603,6 +627,18 @@ class TelegramDatabaseTests(unittest.TestCase):
         )
         error_keyboard = config_error_back_keyboard(10, 20)
         self.assertEqual(error_keyboard.inline_keyboard[0][0].text, "⬅️ Назад")
+        self.assertEqual(
+            client_group_label(
+                {"client_groups": "Basic, Premium", "unknown_group_count": 0}
+            ),
+            "несогласовано: Basic, Premium",
+        )
+        self.assertEqual(
+            client_group_label(
+                {"client_groups": "Basic", "unknown_group_count": 1}
+            ),
+            "не подтверждена",
+        )
 
     def test_admin_expiry_input_uses_moscow_time(self):
         self.assertEqual(
@@ -705,7 +741,76 @@ class TelegramDatabaseTests(unittest.TestCase):
         ]
 
         self.assertIn("📥 Скачать конфиг", labels)
+        self.assertIn("🗑 Удалить навсегда", labels)
         self.assertIn("Сервер: Finland (fin-1)", format_config(config, "Finland"))
+        self.assertIn("Группа: не подтверждена", format_config(config, "Finland"))
+
+    def test_admin_permanent_delete_is_owner_bound_and_audited(self):
+        self.db.save_client_peer(
+            10,
+            "fin-1",
+            "if-a",
+            "peer-a",
+            "key-a",
+            "alice_phone",
+            "additional",
+            config_name="Phone",
+            client_group="Basic",
+        )
+        peer_id = self.db.get_managed_client_configs(10)[0]["id"]
+        callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=99),
+            message=SimpleNamespace(edit_text=AsyncMock()),
+        )
+        router = SimpleNamespace(
+            delete_additional_config=AsyncMock(
+                return_value=(self.db.get_client_peer(peer_id, 10), False)
+            )
+        )
+        original_delete = router.delete_additional_config
+
+        async def delete_and_persist(user_id, selected_peer_id):
+            peer = self.db.get_client_peer(selected_peer_id, user_id)
+            self.db.delete_additional_config(selected_peer_id, user_id)
+            return peer, False
+
+        original_delete.side_effect = delete_and_persist
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                delete_additional_config(
+                    callback,
+                    self.db,
+                    router,
+                    AsyncMock(),
+                    AdminConfigCallback(
+                        action="delete_confirm", user_id=10, peer_id=peer_id
+                    ),
+                )
+            )
+
+        self.assertIsNone(self.db.get_client_peer(peer_id, 10))
+        self.assertIn("удалён навсегда", callback.message.edit_text.await_args.args[0])
+        with closing(sqlite3.connect(self.path)) as connection:
+            operation = connection.execute(
+                "SELECT operation FROM operation_logs ORDER BY id DESC LIMIT 1"
+            ).fetchone()[0]
+        self.assertEqual(operation, "admin_delete_config")
+
+        router.delete_additional_config.reset_mock()
+        router.delete_additional_config.side_effect = CascadeNotFound("not owned")
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                delete_additional_config(
+                    callback,
+                    self.db,
+                    router,
+                    AsyncMock(),
+                    AdminConfigCallback(
+                        action="delete_confirm", user_id=11, peer_id=peer_id
+                    ),
+                )
+            )
+        router.delete_additional_config.assert_awaited_once_with(11, peer_id)
 
     def test_admin_download_sends_file_privately_and_audits(self):
         self.db.ensure_subscription(10, "alice", "2000-01-01 00:00:00", "paid", "30_days", "stars")

@@ -88,6 +88,7 @@ class Database:
                     enabled INTEGER NOT NULL DEFAULT 1,
                     config_name TEXT,
                     admin_enabled INTEGER NOT NULL DEFAULT 1,
+                    client_group TEXT,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(server_key, interface_id, cascade_peer_id),
@@ -256,6 +257,7 @@ class Database:
                 "invoice_message_id": "INTEGER",
             }.items():
                 self._ensure_column(conn, "payments", column, definition)
+            self._ensure_column(conn, "client_peers", "client_group", "TEXT")
             conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_provisioning_claim
@@ -467,6 +469,7 @@ class Database:
         enabled: bool = True,
         config_name: str | None = None,
         admin_enabled: bool = True,
+        client_group: str | None = None,
     ) -> bool:
         self.upsert_client(user_id)
         try:
@@ -529,8 +532,9 @@ class Database:
                     """
                     INSERT INTO client_peers(
                         telegram_user_id, server_key, interface_id, cascade_peer_id,
-                        public_key, peer_name, role, enabled, config_name, admin_enabled
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        public_key, peer_name, role, enabled, config_name,
+                        admin_enabled, client_group
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(telegram_user_id, public_key) DO UPDATE SET
                         server_key=excluded.server_key,
                         interface_id=excluded.interface_id,
@@ -540,6 +544,7 @@ class Database:
                         enabled=excluded.enabled,
                         config_name=COALESCE(excluded.config_name, client_peers.config_name),
                         admin_enabled=excluded.admin_enabled,
+                        client_group=COALESCE(excluded.client_group, client_peers.client_group),
                         updated_at=CURRENT_TIMESTAMP
                     """,
                     (
@@ -553,6 +558,7 @@ class Database:
                         int(enabled),
                         config_name,
                         int(admin_enabled),
+                        client_group,
                     ),
                 )
                 conn.commit()
@@ -569,6 +575,32 @@ class Database:
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             return [dict(row) for row in conn.execute(sql, (user_id,)).fetchall()]
+
+    def set_client_peer_group(self, peer_id: int, group_name: str | None) -> bool:
+        """Store the last group verified for one managed Cascade peer."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE client_peers SET client_group=?, updated_at=CURRENT_TIMESTAMP
+                WHERE id=? AND role IN ('primary', 'additional')
+                """,
+                (group_name, peer_id),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
+
+    def set_client_peer_groups(self, user_id: int, group_name: str) -> int:
+        """Persist a verified unified group for all managed peers of one client."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE client_peers SET client_group=?, updated_at=CURRENT_TIMESTAMP
+                WHERE telegram_user_id=? AND role IN ('primary', 'additional')
+                """,
+                (group_name, user_id),
+            )
+            conn.commit()
+            return cursor.rowcount
 
     def get_primary_client_peer(self, user_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -675,6 +707,21 @@ class Database:
             conn.row_factory = sqlite3.Row
             return [dict(row) for row in conn.execute(sql, (user_id,)).fetchall()]
 
+    def get_all_managed_client_peers(self) -> list[dict[str, Any]]:
+        """Return all bound peers eligible for Cascade group reconciliation."""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT * FROM client_peers
+                WHERE role IN ('primary', 'additional')
+                  AND server_key IS NOT NULL AND interface_id IS NOT NULL
+                  AND cascade_peer_id IS NOT NULL
+                ORDER BY telegram_user_id, id
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def rename_managed_config(self, peer_id: int, user_id: int, name: str) -> bool:
         normalized = normalize_config_name(name)
         try:
@@ -721,6 +768,19 @@ class Database:
             conn.commit()
             return cursor.rowcount > 0
 
+    def delete_additional_config(self, peer_id: int, user_id: int) -> bool:
+        """Delete one additional configuration owned by the selected client."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM client_peers
+                WHERE id=? AND telegram_user_id=? AND role='additional'
+                """,
+                (peer_id, user_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
     def get_subscription_expiry(self, user_id: int) -> str | None:
         with self._connect() as conn:
             row = conn.execute(
@@ -745,6 +805,7 @@ class Database:
         operation: str,
         *,
         server_key: str | None = None,
+        client_group: str | None = None,
     ) -> None:
         details = json.dumps(
             {
@@ -752,6 +813,33 @@ class Database:
                 "client_id": user_id,
                 "peer_id": peer_id,
                 "server_key": server_key,
+                "client_group": client_group,
+            },
+            sort_keys=True,
+        )
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                (f"telegram:{user_id}", operation, details),
+            )
+            conn.commit()
+
+    def log_admin_client_group_change(
+        self,
+        admin_id: int,
+        user_id: int,
+        old_groups: list[str],
+        new_group: str,
+        peer_count: int,
+        operation: str = "admin_change_client_group",
+    ) -> None:
+        details = json.dumps(
+            {
+                "admin_id": admin_id,
+                "client_id": user_id,
+                "old_groups": sorted(old_groups),
+                "new_group": new_group,
+                "peer_count": peer_count,
             },
             sort_keys=True,
         )
@@ -953,6 +1041,27 @@ class Database:
                                ORDER BY peers.server_key
                            )
                        ) AS server_keys,
+                       (
+                           SELECT group_concat(client_group, ', ')
+                           FROM (
+                               SELECT DISTINCT peers.client_group
+                               FROM client_peers peers
+                               WHERE peers.telegram_user_id=c.telegram_user_id
+                                 AND peers.role IN ('primary', 'additional')
+                                 AND peers.server_key IS NOT NULL
+                                 AND peers.interface_id IS NOT NULL
+                                 AND peers.cascade_peer_id IS NOT NULL
+                                 AND peers.client_group IS NOT NULL
+                               ORDER BY peers.client_group
+                           )
+                       ) AS client_groups,
+                       (SELECT COUNT(*) FROM client_peers peers
+                        WHERE peers.telegram_user_id=c.telegram_user_id
+                          AND peers.role IN ('primary', 'additional')
+                          AND peers.server_key IS NOT NULL
+                          AND peers.interface_id IS NOT NULL
+                          AND peers.cascade_peer_id IS NOT NULL
+                          AND peers.client_group IS NULL) AS unknown_group_count,
                        (SELECT COUNT(*) FROM client_peers devices
                         WHERE devices.telegram_user_id=c.telegram_user_id) AS device_count
                 FROM clients c
@@ -987,6 +1096,27 @@ class Database:
                                ORDER BY peers.server_key
                            )
                        ) AS server_keys,
+                       (
+                           SELECT group_concat(client_group, ', ')
+                           FROM (
+                               SELECT DISTINCT peers.client_group
+                               FROM client_peers peers
+                               WHERE peers.telegram_user_id=c.telegram_user_id
+                                 AND peers.role IN ('primary', 'additional')
+                                 AND peers.server_key IS NOT NULL
+                                 AND peers.interface_id IS NOT NULL
+                                 AND peers.cascade_peer_id IS NOT NULL
+                                 AND peers.client_group IS NOT NULL
+                               ORDER BY peers.client_group
+                           )
+                       ) AS client_groups,
+                       (SELECT COUNT(*) FROM client_peers peers
+                        WHERE peers.telegram_user_id=c.telegram_user_id
+                          AND peers.role IN ('primary', 'additional')
+                          AND peers.server_key IS NOT NULL
+                          AND peers.interface_id IS NOT NULL
+                          AND peers.cascade_peer_id IS NOT NULL
+                          AND peers.client_group IS NULL) AS unknown_group_count,
                        (SELECT COUNT(*) FROM client_peers devices
                         WHERE devices.telegram_user_id=c.telegram_user_id) AS device_count
                 FROM clients c

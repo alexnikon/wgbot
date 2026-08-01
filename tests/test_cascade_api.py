@@ -74,6 +74,8 @@ class CascadeServerRegistryTests(unittest.TestCase):
                         "priority": 10,
                         "max_peers": 100,
                         "server_name": "Netherlands",
+                        "client_group": "Basic",
+                        "assignable_client_groups": ["Basic", "Premium"],
                     },
                 ]
             }
@@ -83,7 +85,29 @@ class CascadeServerRegistryTests(unittest.TestCase):
 
         self.assertEqual([server.server_key for server in servers], ["server-a", "server-b"])
         self.assertEqual(servers[0].server_name, "Netherlands")
+        self.assertEqual(servers[0].selectable_client_groups, ("Basic", "Premium"))
         self.assertEqual(servers[1].server_name, "server-b")
+        self.assertEqual(servers[1].selectable_client_groups, ("Basic",))
+
+    def test_rejects_duplicate_assignable_groups(self):
+        path = self._write_registry(
+            {
+                "servers": [
+                    {
+                        "server_key": "server-a",
+                        "base_url": "https://a.example/admin",
+                        "api_token": "a" * 32,
+                        "interface_id": "interface-a",
+                        "priority": 10,
+                        "max_peers": 100,
+                        "client_group": "Basic",
+                        "assignable_client_groups": ["Basic", "basic"],
+                    }
+                ]
+            }
+        )
+        with self.assertRaisesRegex(CascadeError, "unique printable"):
+            load_cascade_servers(path)
 
     def test_rejects_invalid_server_name(self):
         path = self._write_registry(
@@ -251,6 +275,62 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
             await api.create_peer("alice", "2030-01-01 00:00:00")
             payload = __import__("json").loads(requests[-1].content)
             self.assertEqual(payload["groupId"], "basic-id")
+        finally:
+            await api.close()
+
+    async def test_create_and_update_peer_use_selected_group(self):
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            if request.url.path.endswith("/aliases/client-groups"):
+                return httpx.Response(
+                    200,
+                    json={
+                        "groups": [
+                            {"id": "basic-id", "name": "Basic"},
+                            {"id": "premium-id", "name": "Premium"},
+                        ]
+                    },
+                )
+            if request.method == "POST":
+                return httpx.Response(
+                    201,
+                    json={
+                        "peer": {
+                            "id": "peer-id",
+                            "name": "alice_phone",
+                            "publicKey": "public-key",
+                        }
+                    },
+                )
+            return httpx.Response(200, json={"peer": {"id": "peer-id"}})
+
+        server = CascadeServer(
+            "server-a",
+            "https://vpn.example/admin",
+            "token",
+            "interface-a",
+            1,
+            10,
+            assignable_client_groups=("Basic", "Premium"),
+        )
+        api = CascadeAPI(server)
+        await api.client.aclose()
+        api.client = httpx.AsyncClient(
+            base_url=server.api_url.rstrip("/") + "/",
+            transport=httpx.MockTransport(handler),
+        )
+        try:
+            await api.create_peer(
+                "alice_phone",
+                "2030-01-01 00:00:00",
+                client_group="Premium",
+            )
+            await api.update_client_group("peer-id", "Basic")
+            payloads = [json.loads(request.content) for request in requests if request.content]
+            self.assertEqual(payloads[0]["groupId"], "premium-id")
+            self.assertEqual(payloads[1], {"groupId": "basic-id"})
         finally:
             await api.close()
 
@@ -472,6 +552,7 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
         os.close(handle)
         db = Database(path)
         db.upsert_client(10, "alice")
+        db.upsert_client(11)
         db.save_client_peer(
             10, "server-a", "if-a", "primary", "primary-key", "alice", "primary"
         )
@@ -515,6 +596,138 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
             additional = db.get_managed_client_configs(10)[1]
             self.assertEqual(additional["admin_enabled"], 0)
             self.assertEqual(additional["enabled"], 0)
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_permanent_delete_removes_additional_from_cascade_and_database(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.save_client_peer(
+            10, "server-a", "if-a", "primary", "key-a", "alice", "primary"
+        )
+        db.save_client_peer(
+            10,
+            "server-a",
+            "if-a",
+            "additional",
+            "key-b",
+            "alice_phone",
+            "additional",
+            config_name="Phone",
+        )
+        primary_id, additional_id = [
+            peer["id"] for peer in db.get_managed_client_configs(10)
+        ]
+
+        class DeleteAPI:
+            def __init__(self):
+                self.deleted = []
+
+            async def get_peer(self, peer_id, interface_id=None):
+                return {"id": peer_id}
+
+            async def delete_peer(self, peer_id, interface_id=None):
+                self.deleted.append((peer_id, interface_id))
+
+        api = DeleteAPI()
+        router = CascadeRouter(db, servers=[])
+        router.apis = {"server-a": api}
+        try:
+            with self.assertRaises(CascadeNotFound):
+                await router.delete_additional_config(11, additional_id)
+            self.assertEqual(api.deleted, [])
+
+            peer, was_missing = await router.delete_additional_config(
+                10, additional_id
+            )
+
+            self.assertEqual(peer["cascade_peer_id"], "additional")
+            self.assertFalse(was_missing)
+            self.assertEqual(api.deleted, [("additional", "if-a")])
+            self.assertIsNone(db.get_client_peer(additional_id, 10))
+            self.assertEqual(len(db.get_managed_client_configs(10)), 1)
+            with self.assertRaises(CascadeNotFound):
+                await router.delete_additional_config(10, primary_id)
+            self.assertEqual(api.deleted, [("additional", "if-a")])
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_permanent_delete_cleans_stale_local_additional_only(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.save_client_peer(
+            10,
+            "server-a",
+            "if-a",
+            "missing",
+            "key-b",
+            "alice_phone",
+            "additional",
+            config_name="Phone",
+        )
+        peer_id = db.get_managed_client_configs(10)[0]["id"]
+
+        class MissingAPI:
+            async def get_peer(self, cascade_peer_id, interface_id=None):
+                raise CascadeNotFound("missing")
+
+            async def delete_peer(self, cascade_peer_id, interface_id=None):
+                raise AssertionError("A missing peer must not be deleted again")
+
+        router = CascadeRouter(db, servers=[])
+        router.apis = {"server-a": MissingAPI()}
+        try:
+            _, was_missing = await router.delete_additional_config(10, peer_id)
+
+            self.assertTrue(was_missing)
+            self.assertIsNone(db.get_client_peer(peer_id, 10))
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_permanent_delete_preserves_database_on_cascade_failure(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.save_client_peer(
+            10,
+            "server-a",
+            "if-a",
+            "additional",
+            "key-b",
+            "alice_phone",
+            "additional",
+            config_name="Phone",
+        )
+        peer_id = db.get_managed_client_configs(10)[0]["id"]
+
+        class FailingAPI:
+            async def get_peer(self, cascade_peer_id, interface_id=None):
+                return {"id": cascade_peer_id}
+
+            async def delete_peer(self, cascade_peer_id, interface_id=None):
+                raise CascadeError("server unavailable")
+
+        router = CascadeRouter(db, servers=[])
+        router.apis = {"server-a": FailingAPI()}
+        try:
+            with self.assertRaises(CascadeError):
+                await router.delete_additional_config(10, peer_id)
+
+            self.assertIsNotNone(db.get_client_peer(peer_id, 10))
         finally:
             for suffix in ("", "-wal", "-shm"):
                 try:
@@ -632,6 +845,217 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(peers["primary"]["enabled"], 1)
             self.assertEqual(peers["additional"]["enabled"], 0)
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_readable_additional_peer_name_and_stable_suffix(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.upsert_client(10, "alice")
+
+        class NameAPI:
+            async def list_peers(self, interface_id=None):
+                return [{"name": "alice_Phone"}]
+
+        router = CascadeRouter(db, servers=[])
+        router.apis = {"server-a": NameAPI()}
+        try:
+            collision = await router.build_additional_peer_name(
+                10, "Phone", "server-a", "if-a"
+            )
+            long_name = await router.build_additional_peer_name(
+                10, "Очень длинное название конфигурации для телефона", "server-a", "if-a"
+            )
+            self.assertRegex(collision, r"^alice_Phone-[0-9a-f]{8}$")
+            self.assertEqual(
+                await router.build_additional_peer_name(
+                    11, "Tablet", "server-a", "if-a"
+                ),
+                "11_Tablet",
+            )
+            self.assertLessEqual(len(long_name), 50)
+            self.assertEqual(
+                long_name,
+                await router.build_additional_peer_name(
+                    10,
+                    "Очень длинное название конфигурации для телефона",
+                    "server-a",
+                    "if-a",
+                ),
+            )
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_change_client_group_updates_all_peers_without_enabling(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.save_client_peer(
+            10, "server-a", "if-a", "primary", "key-a", "alice", "primary",
+            client_group="Basic"
+        )
+        db.save_client_peer(
+            10, "server-b", "if-b", "additional", "key-b", "phone", "additional",
+            enabled=False, config_name="Phone", admin_enabled=False, client_group="Basic"
+        )
+
+        class GroupAPI:
+            def __init__(self):
+                self.groups = {"primary": "basic-id", "additional": "basic-id"}
+                self.changes = []
+
+            async def list_client_groups(self):
+                return [
+                    {"id": "basic-id", "name": "Basic"},
+                    {"id": "premium-id", "name": "Premium"},
+                ]
+
+            async def get_peer(self, peer_id, interface_id=None):
+                return {"id": peer_id, "groupId": self.groups[peer_id]}
+
+            async def resolve_client_group_name(self, group_id):
+                return {"basic-id": "Basic", "premium-id": "Premium"}.get(group_id)
+
+            async def update_client_group(self, peer_id, group_name, interface_id=None):
+                self.groups[peer_id] = f"{group_name.casefold()}-id"
+                self.changes.append((peer_id, group_name))
+                return {}
+
+        server_a = CascadeServer(
+            "server-a", "https://a.test/admin", "a", "if-a", 1, 10,
+            assignable_client_groups=("Basic", "Premium")
+        )
+        server_b = CascadeServer(
+            "server-b", "https://b.test/admin", "b", "if-b", 1, 10,
+            assignable_client_groups=("Basic", "Premium")
+        )
+        api = GroupAPI()
+        router = CascadeRouter(db, servers=[])
+        router.servers = [server_a, server_b]
+        router.apis = {"server-a": api, "server-b": api}
+        try:
+            self.assertEqual(await router.change_client_group(10, "Premium"), 2)
+            configs = db.get_managed_client_configs(10)
+            self.assertEqual({item["client_group"] for item in configs}, {"Premium"})
+            self.assertEqual(configs[1]["enabled"], 0)
+            self.assertEqual(configs[1]["admin_enabled"], 0)
+            self.assertEqual(
+                api.changes, [("primary", "Premium"), ("additional", "Premium")]
+            )
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_group_change_rolls_back_peers_changed_before_failure(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.save_client_peer(
+            10, "server-a", "if-a", "primary", "key-a", "alice", "primary",
+            client_group="Basic",
+        )
+        db.save_client_peer(
+            10, "server-b", "if-b", "additional", "key-b", "phone", "additional",
+            config_name="Phone", client_group="Basic",
+        )
+
+        class GroupAPI:
+            def __init__(self, peer_id, fail_premium=False):
+                self.peer_id = peer_id
+                self.group_id = "basic-id"
+                self.fail_premium = fail_premium
+                self.changes = []
+
+            async def list_client_groups(self):
+                return [
+                    {"id": "basic-id", "name": "Basic"},
+                    {"id": "premium-id", "name": "Premium"},
+                ]
+
+            async def get_peer(self, peer_id, interface_id=None):
+                return {"id": peer_id, "groupId": self.group_id}
+
+            async def resolve_client_group_name(self, group_id):
+                return {"basic-id": "Basic", "premium-id": "Premium"}.get(group_id)
+
+            async def update_client_group(self, peer_id, group_name, interface_id=None):
+                self.changes.append(group_name)
+                if group_name == "Premium" and self.fail_premium:
+                    raise CascadeError("group update failed")
+                self.group_id = f"{group_name.casefold()}-id"
+
+        servers = [
+            CascadeServer(
+                key, f"https://{key}.test/admin", key, interface, 1, 10,
+                assignable_client_groups=("Basic", "Premium"),
+            )
+            for key, interface in (("server-a", "if-a"), ("server-b", "if-b"))
+        ]
+        api_a = GroupAPI("primary")
+        api_b = GroupAPI("additional", fail_premium=True)
+        router = CascadeRouter(db, servers=[])
+        router.servers = servers
+        router.apis = {"server-a": api_a, "server-b": api_b}
+        try:
+            with self.assertRaises(CascadeError):
+                await router.change_client_group(10, "Premium")
+            self.assertEqual(api_a.changes, ["Premium", "Basic"])
+            self.assertEqual(api_b.changes, ["Premium"])
+            self.assertEqual(
+                {peer["client_group"] for peer in db.get_managed_client_configs(10)},
+                {"Basic"},
+            )
+            self.assertEqual(db.get_runtime_stats()["provisioning_pending"], 0)
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_group_reconciliation_only_updates_local_group(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.save_client_peer(
+            10, "server-a", "if-a", "primary", "key-a", "alice", "primary"
+        )
+
+        class ReconcileAPI:
+            def __init__(self):
+                self.mutations = 0
+
+            async def list_peers(self, interface_id=None):
+                return [{"id": "primary", "groupId": "premium-id"}]
+
+            async def resolve_client_group_name(self, group_id):
+                return "Premium" if group_id == "premium-id" else None
+
+            async def update_client_group(self, *args, **kwargs):
+                self.mutations += 1
+
+        api = ReconcileAPI()
+        router = CascadeRouter(db, servers=[])
+        router.apis = {"server-a": api}
+        try:
+            self.assertEqual(
+                await router.reconcile_client_groups(),
+                {"total": 1, "updated": 1, "unknown": 0},
+            )
+            self.assertEqual(db.get_primary_client_peer(10)["client_group"], "Premium")
+            self.assertEqual(api.mutations, 0)
         finally:
             for suffix in ("", "-wal", "-shm"):
                 try:

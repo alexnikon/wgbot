@@ -77,6 +77,16 @@ class ProvisioningWorker:
                 )
                 if result["failed"]:
                     raise RuntimeError(f"Failed peers: {result['failed']}")
+            elif task["operation"] == "restore_peer_groups":
+                await self.cascade_router.restore_peer_groups(
+                    user_id, payload["groups"]
+                )
+            elif task["operation"] == "delete_cascade_peer":
+                await self.cascade_router.delete_peer_by_identity(
+                    payload["server_key"],
+                    payload["interface_id"],
+                    payload["cascade_peer_id"],
+                )
             else:
                 raise RuntimeError(f"Unknown provisioning operation: {task['operation']}")
 

@@ -52,6 +52,11 @@ mkdir -p DB secrets
 cp cascade_servers.example.json secrets/cascade_servers.json
 ```
 
+Each server entry uses `client_group` as the default for automatically provisioned
+primary peers. `assignable_client_groups` is the protected allowlist shown to
+administrators when creating configurations or changing a client's unified group.
+Every allowlisted group must already exist on the corresponding Cascade server.
+
 Add your Telegram, YooKassa, tariff, support, administrator, and Cascade settings,
 then start the service:
 
