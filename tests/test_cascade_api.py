@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 
@@ -957,6 +958,31 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
                     os.remove(path + suffix)
                 except FileNotFoundError:
                     pass
+
+    async def test_inherited_group_verification_never_changes_cascade(self):
+        db = SimpleNamespace(
+            get_managed_client_configs=lambda _user_id: [
+                {"id": 1, "client_group": "Basic"},
+                {"id": 2, "client_group": "Basic"},
+            ]
+        )
+        router = CascadeRouter(db, servers=[])
+
+        async def list_groups(_user_id):
+            return ["Basic", "Premium"]
+
+        live_groups = iter(["Basic", "Basic"])
+
+        async def read_group(_peer):
+            return next(live_groups)
+
+        router.list_assignable_client_groups = list_groups
+        router._read_peer_group = read_group
+        await router._verify_client_group_unlocked(10, "Basic")
+
+        live_groups = iter(["Basic", "Premium"])
+        with self.assertRaisesRegex(CascadeError, "changed during creation"):
+            await router._verify_client_group_unlocked(10, "Basic")
 
     async def test_group_change_rolls_back_peers_changed_before_failure(self):
         handle, path = tempfile.mkstemp(suffix=".db")

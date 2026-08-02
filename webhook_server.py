@@ -317,7 +317,7 @@ async def process_successful_payment(payment_data: dict) -> None:
             ):
                 await send_telegram_message(
                     user_id,
-                    "✅ Доступ активирован, но конфиг не удалось отправить. Используй /connect.",
+                    "✅ Доступ активирован, но файл конфигурации не удалось отправить. Используй /connect.",
                     create_home_reply_markup(),
                 )
         except Exception as exc:

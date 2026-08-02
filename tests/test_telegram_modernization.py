@@ -45,12 +45,15 @@ from handlers.admin import (
     config_error_back_keyboard,
     config_list_keyboard,
     confirm_expiry_change,
+    confirmed_managed_client_group,
     delete_additional_config,
     download_paid_client_config,
     format_admin_expiry,
     format_config,
     parse_admin_expiry_input,
+    reject_legacy_config_group_selection,
     select_client_group_change,
+    select_config_interface,
 )
 from handlers.fallback import handle_unknown
 from handlers.navigation import cmd_start, handle_main_callback, home_message
@@ -116,7 +119,7 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(content, TelegramText)
         self.assertEqual(
             content.plain.splitlines()[0],
-            "⏰ Выбери период  доступа к сервису:",
+            "📅 Выбери период  доступа к сервису:",
         )
         labels = [row[0].text for row in keyboard.inline_keyboard[:-1:2]]
         self.assertEqual(labels, ["2 недели", "1 месяц", "3 месяца"])
@@ -513,7 +516,7 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
             panel.restore_or_create.assert_awaited_once()
             self.assertEqual(
                 panel.restore_or_create.await_args.args[2],
-                "📥 Выбери конфиг для скачивания.",
+            "📥 Выбери файл конфигурации для скачивания.",
             )
         finally:
             for suffix in ("", "-wal", "-shm"):
@@ -570,7 +573,7 @@ class TelegramDatabaseTests(unittest.TestCase):
         )
         active = home_message(self.db, 10)
         self.assertIn("📊 Статус подписки - Активна", active.plain)
-        self.assertIn("⏰ Осталось:", active.plain)
+        self.assertIn("📅 Осталось:", active.plain)
         self.assertNotIn("👋🏻 Привет!", active.plain)
 
         self.db.ensure_subscription(
@@ -578,7 +581,7 @@ class TelegramDatabaseTests(unittest.TestCase):
         )
         expired = home_message(self.db, 10)
         self.assertIn("📊 Статус подписки - Неактивна", expired.plain)
-        self.assertIn("⏰ Осталось: 0 мин.", expired.plain)
+        self.assertIn("📅 Осталось: 0 мин.", expired.plain)
         self.assertIn("Чтобы продолжить пользоваться сервисом", expired.plain)
 
     def test_home_message_keeps_status_for_invalid_saved_expiry(self):
@@ -639,9 +642,9 @@ class TelegramDatabaseTests(unittest.TestCase):
         content = renderer.edit_rich_or_text.await_args.kwargs["content"]
         lines = content.plain.splitlines()
         self.assertEqual(lines[0], "📊 Статус подписки - Активна")
-        self.assertTrue(lines[2].startswith("⏰ Осталось:"))
-        self.assertTrue(lines[3].startswith("⏰ Доступ закончится:"))
-        self.assertTrue(lines[4].startswith("⚙️Подключено устройств:"))
+        self.assertTrue(lines[2].startswith("📅 Осталось:"))
+        self.assertTrue(lines[3].startswith("📅 Доступ закончится:"))
+        self.assertTrue(lines[4].startswith("📱Подключено устройств:"))
 
     def test_group_callback_rejects_mismatched_client(self):
         workflow = AdminWorkflowService(self.db)
@@ -660,6 +663,133 @@ class TelegramDatabaseTests(unittest.TestCase):
                 )
             )
         self.assertEqual(workflow.get(99)["state"], "select_client_group")
+        self.assertIn("устарел", callback.message.edit_text.await_args.args[0])
+
+    def test_additional_config_inherits_confirmed_group_without_group_step(self):
+        self.db.save_client_peer(
+            10,
+            "fin-1",
+            "if-a",
+            "peer-a",
+            "key-a",
+            "alice_main",
+            "primary",
+            client_group="Basic",
+        )
+        workflow = AdminWorkflowService(self.db)
+        workflow.set(
+            99,
+            "select_config_interface",
+            user_id=10,
+            config_name="Телефон",
+            server_key="fin-1",
+            interfaces=[{"id": "if-b", "name": "wg1"}],
+        )
+        callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=99),
+            message=SimpleNamespace(edit_text=AsyncMock()),
+        )
+        cascade_router = SimpleNamespace(
+            list_assignable_client_groups=AsyncMock(
+                return_value=["Basic", "Premium"]
+            ),
+            build_additional_peer_name=AsyncMock(return_value="alice_Телефон"),
+        )
+
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                select_config_interface(
+                    callback,
+                    self.db,
+                    cascade_router,
+                    workflow,
+                    AsyncMock(),
+                    AdminConfigCallback(
+                        action="interface", user_id=10, value=0
+                    ),
+                )
+            )
+
+        flow = workflow.get(99)
+        self.assertEqual(flow["state"], "confirm_config_create")
+        self.assertEqual(flow["client_group"], "Basic")
+        self.assertNotIn("groups", flow)
+        self.assertIn("Группа: Basic", callback.message.edit_text.await_args.args[0])
+        cascade_router.list_assignable_client_groups.assert_awaited_once_with(
+            10, "fin-1"
+        )
+
+    def test_additional_config_blocks_unknown_or_inconsistent_group(self):
+        unknown = [{"client_group": None}]
+        inconsistent = [
+            {"client_group": "Basic"},
+            {"client_group": "Premium"},
+        ]
+        self.assertIsNone(confirmed_managed_client_group(unknown))
+        self.assertIsNone(confirmed_managed_client_group(inconsistent))
+
+        self.db.save_client_peer(
+            10,
+            "fin-1",
+            "if-a",
+            "peer-a",
+            "key-a",
+            "alice_main",
+            "primary",
+        )
+        workflow = AdminWorkflowService(self.db)
+        workflow.set(
+            99,
+            "select_config_interface",
+            user_id=10,
+            config_name="Телефон",
+            server_key="fin-1",
+            interfaces=[{"id": "if-b", "name": "wg1"}],
+        )
+        callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=99),
+            message=SimpleNamespace(edit_text=AsyncMock()),
+        )
+        cascade_router = SimpleNamespace(
+            list_assignable_client_groups=AsyncMock(),
+            build_additional_peer_name=AsyncMock(),
+        )
+
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                select_config_interface(
+                    callback,
+                    self.db,
+                    cascade_router,
+                    workflow,
+                    AsyncMock(),
+                    AdminConfigCallback(
+                        action="interface", user_id=10, value=0
+                    ),
+                )
+            )
+
+        self.assertIsNone(workflow.get(99))
+        self.assertIn("Изменить группу", callback.message.edit_text.await_args.args[0])
+        cascade_router.list_assignable_client_groups.assert_not_awaited()
+
+    def test_legacy_config_group_workflow_is_cleared(self):
+        workflow = AdminWorkflowService(self.db)
+        workflow.set(99, "select_config_group", user_id=10, groups=["Basic"])
+        callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=99),
+            message=SimpleNamespace(edit_text=AsyncMock()),
+        )
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                reject_legacy_config_group_selection(
+                    callback,
+                    workflow,
+                    AsyncMock(),
+                    AdminConfigCallback(action="group", user_id=10, value=0),
+                )
+            )
+        self.assertIsNone(workflow.get(99))
         self.assertIn("устарел", callback.message.edit_text.await_args.args[0])
 
     def test_expired_admin_workflow_is_removed(self):

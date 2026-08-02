@@ -425,7 +425,7 @@ async def handle_retry_peer_callback(
         logger.info("User %s requested provisioning retry task %s", user_id, task_id)
         await edit_bound_message(
             callback_query.message,
-            "🔄 Создание доступа поставлено в очередь. Бот отправит конфиг автоматически.",
+            "🔄 Создание доступа поставлено в очередь. Бот отправит файл конфигурации автоматически.",
             reply_markup=create_main_menu_keyboard(user_id),
         )
     except Exception as e:
@@ -602,7 +602,7 @@ async def process_successful_payment(
             filename=location_config_filename(server_name),
         ):
             await message.answer(
-                "✅ Доступ активирован, но конфиг не удалось отправить. "
+                "✅ Доступ активирован, но файл конфигурации не удалось отправить. "
                 "Попробуй получить его кнопкой в главном меню."
             )
         title = "🆕 Новый клиент подключился"

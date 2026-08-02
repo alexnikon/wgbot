@@ -665,6 +665,25 @@ class CascadeRouter:
                 )
             raise
 
+    async def _verify_client_group_unlocked(
+        self, user_id: int, group_name: str
+    ) -> None:
+        """Verify that every managed peer still has the inherited group."""
+        peers = self.db.get_managed_client_configs(user_id)
+        if not peers:
+            raise CascadeError("Client has no managed configurations")
+        available = await self.list_assignable_client_groups(user_id)
+        selected = next(
+            (name for name in available if name.casefold() == group_name.casefold()),
+            None,
+        )
+        if not selected:
+            raise CascadeError(f"Client group {group_name!r} is not assignable")
+        for peer in peers:
+            live_group = await self._read_peer_group(peer)
+            if live_group.casefold() != selected.casefold():
+                raise CascadeError("Managed client groups changed during creation")
+
     async def change_client_group(self, user_id: int, group_name: str) -> int:
         """Move every managed peer of one client to a single group."""
         user_lock = self._user_locks.get(user_id)
@@ -919,6 +938,8 @@ class CascadeRouter:
         server_key: str,
         interface_id: str,
         client_group: str | None = None,
+        *,
+        reassign_existing_group: bool = True,
     ) -> dict[str, Any]:
         config_name = normalize_config_name(config_name)
         primary = self.db.get_primary_client_peer(user_id)
@@ -955,11 +976,12 @@ class CascadeRouter:
             peer: dict[str, Any] | None = None
             saved = False
             try:
-                original_groups = (
-                    await self._change_client_group_unlocked(user_id, client_group)
-                    if explicit_group
-                    else {}
-                )
+                if explicit_group and reassign_existing_group:
+                    original_groups = await self._change_client_group_unlocked(
+                        user_id, client_group
+                    )
+                elif explicit_group:
+                    await self._verify_client_group_unlocked(user_id, client_group)
                 current_interfaces = await api.list_interfaces()
                 if not any(
                     str(item.get("id") or "") == interface_id

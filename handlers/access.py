@@ -113,7 +113,7 @@ async def handle_get_config_callback(
                 text = """
 ❌ У тебя нет активного доступа.
 
-💎 Чтобы получить конфиг, нужно оплатить доступ.
+💎 Чтобы получить файл конфигурации, нужно оплатить доступ.
                 """
             await safe_edit_callback_message(
                 callback_query.message,
@@ -125,13 +125,13 @@ async def handle_get_config_callback(
         if not count:
             await safe_edit_callback_message(
                 callback_query.message,
-                "❌ Сейчас нет доступных конфигов. Обратись в поддержку.",
+                "❌ Сейчас нет доступных файлов конфигурации. Обратись в поддержку.",
                 reply_markup=create_main_menu_keyboard(user_id),
             )
             return
         await safe_edit_callback_message(
             callback_query.message,
-            "📥 Выбери конфиг для скачивания.",
+            "📥 Выбери файл конфигурации для скачивания.",
             reply_markup=keyboard,
         )
 
@@ -156,7 +156,7 @@ async def return_to_client_configs(
             await chat_panel.restore_or_create(
                 callback_query.message.chat.id,
                 user_id,
-                "📥 Выбери конфиг для скачивания.",
+                "📥 Выбери файл конфигурации для скачивания.",
                 keyboard,
             )
             return
@@ -191,7 +191,7 @@ async def change_client_config_page(
     keyboard, _ = client_config_keyboard(db, user_id, callback_data.page)
     await safe_edit_callback_message(
         callback_query.message,
-        "📥 Выбери конфиг для скачивания.",
+        "📥 Выбери файл конфигурации для скачивания.",
         reply_markup=keyboard,
     )
 
@@ -226,7 +226,7 @@ async def download_client_config(
         ):
             await safe_edit_callback_message(
                 callback_query.message,
-                "❌ Этот конфиг больше недоступен.",
+                "❌ Этот файл конфигурации больше недоступен.",
                 reply_markup=create_main_menu_keyboard(user_id),
             )
             return
@@ -278,7 +278,7 @@ async def download_client_config(
         except CascadeNotFound:
             await safe_edit_callback_message(
                 callback_query.message,
-                "❌ Конфиг отсутствует на сервере. Администратор должен создать новый.",
+                "❌ Файл конфигурации отсутствует на сервере. Администратор должен создать новый.",
                 reply_markup=create_main_menu_keyboard(user_id),
             )
         except Exception:

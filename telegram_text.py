@@ -8,6 +8,11 @@ _PRICE_PATTERN = re.compile(
     r"(?<![\d>])(\d+(?:[.,]\d+)?)(?=\s*(?:Stars|зв[её]зд|руб\.))",
     re.IGNORECASE,
 )
+_TELEGRAM_ID_PATTERN = re.compile(r"(Telegram ID:\s*)(\d+)")
+
+
+def _style_telegram_ids(value: str) -> str:
+    return _TELEGRAM_ID_PATTERN.sub(r"\1<code>\2</code>", value)
 
 
 def _normalize(value: str) -> str:
@@ -17,6 +22,7 @@ def _normalize(value: str) -> str:
 def _style_plain_html(value: str) -> str:
     escaped = html.escape(value)
     escaped = _PRICE_PATTERN.sub(r"<code>\1</code>", escaped)
+    escaped = _style_telegram_ids(escaped)
     lines = escaped.splitlines()
     for index, line in enumerate(lines):
         if line.strip():
@@ -44,7 +50,9 @@ class TelegramText:
 
     @classmethod
     def from_html(cls, plain: str, rich_html: str) -> TelegramText:
-        normalized_html = _normalize(rich_html).replace("\n", "<br>")
+        normalized_html = _style_telegram_ids(
+            _normalize(rich_html).replace("\n", "<br>")
+        )
         return cls(plain=_normalize(plain), html=normalized_html)
 
     @classmethod

@@ -45,7 +45,7 @@ class TelegramTextTests(unittest.IsolatedAsyncioTestCase):
             initial_config_caption().plain,
             "✅ Это твой файл конфигурации для доступа к сервису.\n"
             "Добавь этот файл в приложение AmneziaWG.\n"
-            "‼ Обрати внимание, один конфиг может использоваться только на одном устройстве!",
+            "‼ Обрати внимание, один файл конфигурации может использоваться только на одном устройстве!",
         )
         self.assertIn("<br><br>", welcome_message().html)
         self.assertIn("\n\n", welcome_message().regular_html)
@@ -55,17 +55,17 @@ class TelegramTextTests(unittest.IsolatedAsyncioTestCase):
         content = payment_selection_message()
         self.assertEqual(
             content.plain,
-            "⏰ Выбери период  доступа к сервису:\n\n"
+            "📅 Выбери период  доступа к сервису:\n\n"
             "Тариф можно приобрести повторно, срок доступа добавится к текущей подписке:",
         )
         self.assertEqual(
             content.html,
-            "<b>⏰ Выбери период  доступа к сервису:</b><br><br>"
+            "<b>📅 Выбери период  доступа к сервису:</b><br><br>"
             "Тариф можно приобрести повторно, срок доступа добавится к текущей подписке:",
         )
         self.assertEqual(
             content.regular_html,
-            "<b>⏰ Выбери период  доступа к сервису:</b>\n\n"
+            "<b>📅 Выбери период  доступа к сервису:</b>\n\n"
             "Тариф можно приобрести повторно, срок доступа добавится к текущей подписке:",
         )
 
@@ -165,9 +165,9 @@ class TelegramTextTests(unittest.IsolatedAsyncioTestCase):
             "2️⃣ Скачай файл конфигурации:\n"
             '• Нажми "Получить конфигурацию"\n'
             "• Скачай .conf файл\n"
-            "• Учти то что один конфиг будет работать только на одном устройстве.\n"
+            "• Учти то что один файл конфигурации будет работать только на одном устройстве.\n"
             "• В стоимость подписки входит 3 устройства, для получения дополнительного "
-            "конфига, напиши в поддержку.\n\n"
+            "файла конфигурации, напиши в поддержку.\n\n"
             "3️⃣ Добавь файл конфигурации в приложение AmneziaWG:\n"
             "• Открой AmneziaWG\n"
             '• Нажми "Добавить туннель"\n'
@@ -222,7 +222,7 @@ class TelegramTextTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertIn(
-            "<b>⏰ Доступ к сервису истекает через 1 час!</b>",
+            "<b>📅 Доступ к сервису истекает через 1 час!</b>",
             content.html,
         )
         self.assertIn("2 &lt; недели", content.html)
@@ -240,18 +240,19 @@ class TelegramTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             expired.plain,
             "📊 Статус подписки - Неактивна\n\n"
-            "⏰ Осталось: 0 мин.\n"
-            "⏰ Доступ закончился: 29-07-2026\n"
-            "⚙️Подключено устройств: 1\n\n"
+            "📅 Осталось: 0 мин.\n"
+            "📅 Доступ закончился: 29-07-2026\n"
+            "📱Подключено устройств: 1\n\n"
             "Чтобы продолжить пользоваться сервисом, продли доступ.\n\n"
-            "Выбери варианты продления с помощью кнопок ниже 👇:",
+            "Нажми 💳 Купить доступ чтобы возобновить доступ к сервису",
         )
         self.assertTrue(
             expired.html.startswith(
                 "<b>📊 Статус подписки - Неактивна</b><br><br>"
             )
         )
-        self.assertIn("⚙️Подключено устройств: <b>1</b>", expired.html)
+        self.assertIn("📱Подключено устройств: <b>1</b>", expired.html)
+        self.assertIn("Нажми 💳 <b>Купить доступ</b>", expired.html)
         self.assertIn('format="d">29-07-2026</tg-time>', expired.html)
 
         active = active_subscription_status(
@@ -263,9 +264,9 @@ class TelegramTextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             active.plain,
             "📊 Статус подписки - Активна\n\n"
-            "⏰ Осталось: 6 дн. 14 ч. 48 мин.\n"
-            "⏰ Доступ закончится: 04-08-2026\n"
-            "⚙️Подключено устройств: 2\n\n"
+            "📅 Осталось: 6 дн. 14 ч. 48 мин.\n"
+            "📅 Доступ закончится: 04-08-2026\n"
+            "📱Подключено устройств: 2\n\n"
             "Ты можешь продлить действующую подписку, оплатив доступ еще раз, "
             "срок добавится к текущей подписке",
         )
@@ -274,22 +275,22 @@ class TelegramTextTests(unittest.IsolatedAsyncioTestCase):
                 "<b>📊 Статус подписки - Активна</b><br><br>"
             )
         )
-        self.assertIn("⚙️Подключено устройств: <b>2</b>", active.html)
+        self.assertIn("📱Подключено устройств: <b>2</b>", active.html)
         zero_devices = active_subscription_status(
             0,
             "2026-08-04 00:00:00",
             "04-08-2026",
             "9 мин.",
         )
-        self.assertIn("⚙️Подключено устройств: <b>0</b>", zero_devices.html)
+        self.assertIn("📱Подключено устройств: <b>0</b>", zero_devices.html)
 
         unavailable = unavailable_subscription_status(3, "invalid-date")
         self.assertEqual(
             unavailable.plain,
             "📊 Статус подписки - Не определена\n\n"
-            "⏰ Осталось: не определено\n"
-            "⏰ Доступ закончится: invalid-date\n"
-            "⚙️Подключено устройств: 3\n\n"
+            "📅 Осталось: не определено\n"
+            "📅 Доступ закончится: invalid-date\n"
+            "📱Подключено устройств: 3\n\n"
             "Не удалось определить текущее состояние подписки. Обратись в поддержку.",
         )
         self.assertTrue(
@@ -320,6 +321,21 @@ class TelegramTextTests(unittest.IsolatedAsyncioTestCase):
             content.html,
         )
         self.assertTrue(content.plain.endswith("только на одном устройстве!"))
+
+    def test_telegram_id_digits_are_monospace_only_in_rich_text(self):
+        content = TelegramText.from_plain(
+            "🆔 Telegram ID: 1033564912\nPayment ID: 987654\nУстройств: 2"
+        )
+        self.assertIn("Telegram ID: <code>1033564912</code>", content.html)
+        self.assertNotIn("<code>987654</code>", content.html)
+        self.assertNotIn("<code>2</code>", content.html)
+        self.assertIn("Telegram ID: 1033564912", content.plain)
+
+        explicit = TelegramText.from_html(
+            "Telegram ID: 42",
+            "Telegram ID: 42",
+        )
+        self.assertEqual(explicit.html, "Telegram ID: <code>42</code>")
 
     def test_date_entity_uses_stored_utc_timestamp(self):
         expected = int(datetime(2030, 1, 1, 9, 30, tzinfo=UTC).timestamp())
