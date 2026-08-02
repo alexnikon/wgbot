@@ -52,12 +52,15 @@ from handlers.admin import (
     select_client_group_change,
 )
 from handlers.fallback import handle_unknown
-from handlers.navigation import cmd_start
+from handlers.navigation import cmd_start, handle_main_callback, home_message
 from handlers.payments import (
     _parse_legacy_method,
     confirm_stars_refund,
     handle_pay_stars_callback,
     process_refunded_payment,
+)
+from handlers.payments import (
+    process_successful_payment as process_successful_stars_payment,
 )
 from payment import PaymentManager
 from stars import StarsReconciler
@@ -394,8 +397,10 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
         clear_admin_state = unittest.mock.Mock()
         message = SimpleNamespace(from_user=SimpleNamespace(id=42), chat=SimpleNamespace(id=42))
         keyboard = SimpleNamespace()
+        database = SimpleNamespace(get_peer_by_telegram_id=lambda _user_id: None)
         await cmd_start(
             message,
+            database,
             lambda _user_id: keyboard,
             panel,
             clear_admin_state,
@@ -427,9 +432,11 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
             chat=SimpleNamespace(id=42),
         )
         locks = UserActionLocks()
+        database = SimpleNamespace(get_peer_by_telegram_id=lambda _user_id: None)
         await asyncio.gather(
             cmd_start(
                 message,
+                database,
                 lambda _user_id: SimpleNamespace(),
                 panel,
                 clear_admin_state,
@@ -437,6 +444,7 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
             ),
             cmd_start(
                 message,
+                database,
                 lambda _user_id: SimpleNamespace(),
                 panel,
                 clear_admin_state,
@@ -552,6 +560,57 @@ class TelegramDatabaseTests(unittest.TestCase):
         self.assertEqual(second.get(1)["mode"], "all")
         second.clear(1)
         self.assertIsNone(first.get(1))
+
+    def test_home_message_switches_from_welcome_to_subscription_status(self):
+        self.assertIn("👋🏻 Привет!", home_message(self.db, 10).plain)
+
+        self.db.ensure_subscription(
+            10, "alice", "2099-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        active = home_message(self.db, 10)
+        self.assertIn("📊 Статус подписки", active.plain)
+        self.assertIn("⏰ Осталось:", active.plain)
+        self.assertNotIn("👋🏻 Привет!", active.plain)
+
+        self.db.ensure_subscription(
+            10, "alice", "2000-01-01 00:00:00", "expired", "30_days", "stars"
+        )
+        expired = home_message(self.db, 10)
+        self.assertIn("Чтобы продолжить пользоваться сервисом", expired.plain)
+
+    def test_home_message_keeps_status_for_invalid_saved_expiry(self):
+        self.db.ensure_subscription(
+            10, "alice", "invalid-date", "paid", "30_days", "stars"
+        )
+
+        content = home_message(self.db, 10)
+
+        self.assertIn("📊 Статус подписки", content.plain)
+        self.assertIn("Не удалось определить", content.plain)
+        self.assertNotIn("👋🏻 Привет!", content.plain)
+
+    def test_main_button_uses_subscription_status_after_access_was_granted(self):
+        self.db.ensure_subscription(
+            10, "alice", "2099-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        callback = SimpleNamespace(from_user=SimpleNamespace(id=10))
+        show_menu = AsyncMock()
+
+        asyncio.run(
+            handle_main_callback(
+                callback,
+                self.db,
+                AsyncMock(),
+                show_menu,
+                lambda _user_id: SimpleNamespace(),
+                lambda _user_id: False,
+                unittest.mock.Mock(),
+            )
+        )
+
+        content = show_menu.await_args.args[1]
+        self.assertIn("📊 Статус подписки", content.plain)
+        self.assertNotIn("👋🏻 Привет!", content.plain)
 
     def test_group_callback_rejects_mismatched_client(self):
         workflow = AdminWorkflowService(self.db)
@@ -1084,6 +1143,78 @@ class TelegramSenderTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_first_stars_payment_uses_unified_success_and_keeps_config_separate(self):
+        successful_payment = SimpleNamespace(
+            invoice_payload="payload",
+            telegram_payment_charge_id="charge",
+            provider_payment_charge_id="provider",
+            is_recurring=False,
+            is_first_recurring=False,
+            subscription_expiration_date=None,
+        )
+        message = SimpleNamespace(
+            from_user=SimpleNamespace(id=10, username="alice"),
+            chat=SimpleNamespace(id=10),
+            successful_payment=successful_payment,
+            bot=SimpleNamespace(delete_message=AsyncMock()),
+            answer=AsyncMock(),
+        )
+        database = SimpleNamespace(
+            get_payment_by_invoice_payload=lambda _payload: {
+                "payment_id": "payment-1",
+                "user_id": 10,
+                "amount": 100,
+                "currency": "XTR",
+                "payment_method": "stars",
+                "tariff_key": "14_days",
+                "invoice_message_id": None,
+            },
+            apply_verified_payment=lambda *_args, **_kwargs: {
+                "expire_date": "2099-01-01 00:00:00"
+            },
+            get_primary_client_peer=unittest.mock.Mock(
+                side_effect=[None, {"server_key": "fin-1"}]
+            ),
+            add_provisioning_task=unittest.mock.Mock(),
+            log_operation=unittest.mock.Mock(),
+        )
+        payment_manager = SimpleNamespace(
+            confirm_payment=AsyncMock(return_value=(True, "14_days", 100)),
+            parse_invoice_payload=lambda _payload: ("stars", "14_days", 10),
+            tariffs={
+                "14_days": {
+                    "days": 14,
+                    "name": "2 недели",
+                }
+            },
+        )
+        cascade_router = SimpleNamespace(
+            get_server_name=lambda _server_key: "Finland",
+            sync_user_access=AsyncMock(),
+        )
+        panel = SimpleNamespace(delete_user_message=AsyncMock(), render=AsyncMock())
+        send_config = AsyncMock(return_value=True)
+
+        await process_successful_stars_payment(
+            message,
+            database,
+            cascade_router,
+            payment_manager,
+            AsyncMock(return_value=(True, None, b"config")),
+            send_config,
+            AsyncMock(),
+            lambda *_args, **_kwargs: "admin notification",
+            user_action_locks=UserActionLocks(),
+            chat_panel=panel,
+            create_main_menu_keyboard=lambda _user_id: SimpleNamespace(),
+        )
+
+        success = panel.render.await_args.args[2]
+        self.assertTrue(success.plain.startswith("✅ Оплачено!"))
+        self.assertIn("продлен на 2 недели", success.plain)
+        send_config.assert_awaited_once()
+        message.answer.assert_not_awaited()
+
     def test_malformed_legacy_payment_callbacks_are_rejected(self):
         manager = SimpleNamespace(is_tariff_enabled=lambda tariff: tariff == "14_days")
         self.assertIsNone(_parse_legacy_method("pay_stars_bad", "stars", manager))

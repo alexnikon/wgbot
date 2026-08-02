@@ -13,12 +13,13 @@ from message_templates import (
     expired_period_notice,
     expired_subscription_status,
     format_remaining_time,
+    format_remaining_until,
     initial_config_caption,
     payment_selection_message,
+    payment_success_message,
     renewal_reminder,
     service_guide_message,
     welcome_message,
-    yookassa_extension_success_message,
     yookassa_refund_success_message,
 )
 from telegram_runtime import ChatPanelService, send_telegram_text
@@ -85,58 +86,69 @@ class TelegramTextTests(unittest.IsolatedAsyncioTestCase):
             'Нажми "ℹ️ Статус подписки" чтобы проверить информацию по твоей подписке:',
         )
 
-    def test_yookassa_extension_success_message_snapshots(self):
-        content = yookassa_extension_success_message(14)
+    def test_payment_success_message_snapshots(self):
+        content = payment_success_message("2 недели", "20 дн. 3 ч. 5 мин.")
         self.assertEqual(
             content.plain,
-            "✅ Платеж успешно обработан!\n\n"
-            "Продлили тебе доступ на 14 дней!\n"
-            "Способ оплаты: 💳 Банковская карта",
+            "✅ Оплачено!\n\n"
+            "Доступ к сервису продлен на 2 недели\n"
+            "📅 Осталось: 20 дн. 3 ч. 5 мин.",
         )
         self.assertEqual(
             content.html,
-            "<b>✅ Платеж успешно обработан!</b><br><br>"
-            "Продлили тебе доступ на 14 дней!<br>"
-            "Способ оплаты: 💳 Банковская карта",
+            "<b>✅ Оплачено!</b><br><br>"
+            "Доступ к сервису продлен на 2 недели<br>"
+            "📅 Осталось: 20 дн. 3 ч. 5 мин.",
         )
         self.assertEqual(
             content.regular_html,
-            "<b>✅ Платеж успешно обработан!</b>\n\n"
-            "Продлили тебе доступ на 14 дней!\n"
-            "Способ оплаты: 💳 Банковская карта",
+            "<b>✅ Оплачено!</b>\n\n"
+            "Доступ к сервису продлен на 2 недели\n"
+            "📅 Осталось: 20 дн. 3 ч. 5 мин.",
         )
+        for tariff_name in ("1 месяц", "3 месяца"):
+            self.assertIn(tariff_name, payment_success_message(tariff_name, "1 мин.").plain)
 
     def test_yookassa_refund_success_message_snapshots(self):
         active = yookassa_refund_success_message(
             "150.00",
-            14,
+            "2 недели",
             "6 дн. 14 ч. 48 мин.",
         )
         self.assertEqual(
             active.plain,
-            "💰 Возврат успешно обработан!\n\n"
+            "💰 Успешный возврат\n\n"
             "💳 Сумма возврата: 150.00 руб.\n"
-            "📉 Оплаченный период уменьшен на 14 дней.\n"
-            "⏰ Осталось: 6 дн. 14 ч. 48 мин.",
+            "📉 Оплаченный период уменьшен на 2 недели.\n"
+            "📅 Осталось: 6 дн. 14 ч. 48 мин.",
         )
         self.assertEqual(
             active.html,
-            "<b>💰 Возврат успешно обработан!</b><br><br>"
-            "💳 Сумма возврата: <code>150.00</code> руб.<br>"
-            "📉 Оплаченный период уменьшен на 14 дней.<br>"
-            "⏰ Осталось: 6 дн. 14 ч. 48 мин.",
+            "<b>💰 Успешный возврат</b><br><br>"
+            "💳 Сумма возврата: 150.00 руб.<br>"
+            "📉 Оплаченный период уменьшен на 2 недели.<br>"
+            "📅 Осталось: 6 дн. 14 ч. 48 мин.",
         )
         self.assertEqual(
             active.regular_html,
-            "<b>💰 Возврат успешно обработан!</b>\n\n"
-            "💳 Сумма возврата: <code>150.00</code> руб.\n"
-            "📉 Оплаченный период уменьшен на 14 дней.\n"
-            "⏰ Осталось: 6 дн. 14 ч. 48 мин.",
+            "<b>💰 Успешный возврат</b>\n\n"
+            "💳 Сумма возврата: 150.00 руб.\n"
+            "📉 Оплаченный период уменьшен на 2 недели.\n"
+            "📅 Осталось: 6 дн. 14 ч. 48 мин.",
         )
 
-        inactive = yookassa_refund_success_message("150.00", 14, None)
-        self.assertTrue(inactive.plain.endswith("Подписка не активна"))
-        self.assertTrue(inactive.html.endswith("Подписка не активна"))
+        inactive = yookassa_refund_success_message("150.00", "2 недели", None)
+        self.assertTrue(inactive.plain.endswith("📅 Осталось: подписка не активна."))
+        self.assertTrue(inactive.html.endswith("📅 Осталось: подписка не активна."))
+
+    def test_remaining_until_uses_existing_rounding_down(self):
+        self.assertEqual(
+            format_remaining_until(
+                "2030-01-15 00:00:00",
+                datetime(2030, 1, 1, 0, 0, 1, tzinfo=UTC),
+            ),
+            "13 дн. 23 ч. 59 мин.",
+        )
 
     def test_service_guide_message_snapshots(self):
         content = service_guide_message()

@@ -93,6 +93,110 @@ class WebhookDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<b>✅ Платеж обработан.</b>", rich_html)
         self.assertIn("<code>250</code> руб.", rich_html)
 
+    async def test_yookassa_extension_uses_unified_payment_message(self):
+        database = Mock()
+        database.get_payment_by_id.return_value = {
+            "payment_id": "payment-1",
+            "user_id": 10,
+            "tariff_key": "14_days",
+            "metadata": "{}",
+        }
+        database.apply_verified_payment.return_value = {
+            "expire_date": "2099-01-01 00:00:00"
+        }
+        database.get_primary_client_peer.return_value = {"id": 1}
+        cascade_router = SimpleNamespace(
+            sync_user_access=AsyncMock(return_value={"failed": 0})
+        )
+        send_message = AsyncMock(return_value=True)
+        notify = AsyncMock()
+        payment_data = {
+            "id": "payment-1",
+            "amount": {"value": "150.00", "currency": "RUB"},
+        }
+
+        with (
+            patch.object(webhook_server, "db", database),
+            patch.object(webhook_server, "cascade_router", cascade_router, create=True),
+            patch.object(
+                webhook_server,
+                "yookassa_client",
+                SimpleNamespace(get_payment_amount=lambda _data: 15000),
+                create=True,
+            ),
+            patch.object(webhook_server, "send_telegram_message", send_message),
+            patch.object(webhook_server, "notify_admins", notify),
+            patch.object(webhook_server, "delete_payment_message", AsyncMock()),
+            patch.object(
+                webhook_server,
+                "get_tariffs",
+                return_value={
+                    "14_days": {
+                        "days": 14,
+                        "name": "2 недели",
+                    }
+                },
+            ),
+        ):
+            await webhook_server.process_successful_payment(payment_data)
+
+        content = send_message.await_args_list[0].args[1]
+        self.assertTrue(content.plain.startswith("✅ Оплачено!"))
+        self.assertIn("продлен на 2 недели", content.plain)
+        self.assertIn("📅 Осталось:", content.plain)
+        cascade_router.sync_user_access.assert_awaited_once()
+
+    async def test_yookassa_first_payment_keeps_success_when_provisioning_fails(self):
+        database = Mock()
+        database.get_payment_by_id.return_value = {
+            "payment_id": "payment-1",
+            "user_id": 10,
+            "tariff_key": "30_days",
+            "metadata": "{}",
+        }
+        database.apply_verified_payment.return_value = {
+            "expire_date": "2099-01-01 00:00:00"
+        }
+        database.get_primary_client_peer.return_value = None
+        database.add_provisioning_task.return_value = "task-1"
+        cascade_router = SimpleNamespace(
+            create_user_peer=AsyncMock(side_effect=RuntimeError("offline"))
+        )
+        send_message = AsyncMock(return_value=True)
+        payment_data = {
+            "id": "payment-1",
+            "amount": {"value": "300.00", "currency": "RUB"},
+        }
+
+        with (
+            patch.object(webhook_server, "db", database),
+            patch.object(webhook_server, "cascade_router", cascade_router, create=True),
+            patch.object(
+                webhook_server,
+                "yookassa_client",
+                SimpleNamespace(get_payment_amount=lambda _data: 30000),
+                create=True,
+            ),
+            patch.object(webhook_server, "send_telegram_message", send_message),
+            patch.object(webhook_server, "notify_admins", AsyncMock()),
+            patch.object(webhook_server, "delete_payment_message", AsyncMock()),
+            patch.object(
+                webhook_server,
+                "get_tariffs",
+                return_value={
+                    "30_days": {
+                        "days": 30,
+                        "name": "1 месяц",
+                    }
+                },
+            ),
+        ):
+            await webhook_server.process_successful_payment(payment_data)
+
+        self.assertTrue(send_message.await_args_list[0].args[1].plain.startswith("✅ Оплачено!"))
+        self.assertIn("Платеж получен", send_message.await_args_list[1].args[1])
+        database.add_provisioning_task.assert_called_once()
+
     async def test_refund_webhook_reports_inactive_subscription_once(self):
         payment = {
             "payment_id": "payment-1",
@@ -128,7 +232,7 @@ class WebhookDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 webhook_server,
                 "get_tariffs",
-                return_value={"14_days": {"days": 14}},
+                return_value={"14_days": {"days": 14, "name": "2 недели"}},
             ),
         ):
             await webhook_server.process_refund_succeeded(refund_data)
@@ -141,7 +245,10 @@ class WebhookDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         )
         send_message.assert_awaited_once()
         content = send_message.await_args.args[1]
-        self.assertTrue(content.plain.endswith("Подписка не активна"))
+        self.assertTrue(
+            content.plain.endswith("📅 Осталось: подписка не активна.")
+        )
+        self.assertIn("уменьшен на 2 недели", content.plain)
 
     async def test_partial_refund_still_requires_manual_adjustment(self):
         database = Mock()

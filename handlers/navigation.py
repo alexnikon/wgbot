@@ -1,4 +1,5 @@
 import logging
+from datetime import UTC, datetime
 
 from aiogram import F, Router, types
 from aiogram.filters import CommandStart
@@ -6,22 +7,56 @@ from aiogram.filters import CommandStart
 from database import Database
 from message_templates import (
     active_access_message,
+    active_subscription_status,
     expired_subscription_status,
+    format_remaining_time,
     service_guide_message,
+    unavailable_subscription_status,
     welcome_message,
 )
 from payment import PaymentManager
 from telegram_runtime import serialized_user_action
+from telegram_text import TelegramText
 from utils import format_date_for_user
 
 logger = logging.getLogger(__name__)
 router = Router(name="navigation")
 
 
+def home_message(db: Database, user_id: int) -> TelegramText:
+    """Return welcome content until access exists, then subscription status."""
+    subscription = db.get_peer_by_telegram_id(user_id)
+    expire_date = str((subscription or {}).get("expire_date") or "").strip()
+    if not expire_date:
+        return welcome_message()
+    connected_devices = db.get_peer_count(user_id)
+    formatted_date = format_date_for_user(expire_date)
+    try:
+        expires_at = datetime.fromisoformat(expire_date)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        time_left = expires_at - datetime.now(UTC)
+    except ValueError, TypeError:
+        return unavailable_subscription_status(connected_devices, formatted_date)
+    if time_left.total_seconds() <= 0:
+        return expired_subscription_status(
+            connected_devices,
+            expire_date,
+            formatted_date,
+        )
+    return active_subscription_status(
+        connected_devices,
+        expire_date,
+        formatted_date,
+        format_remaining_time(time_left),
+    )
+
+
 @router.message(CommandStart())
 @serialized_user_action
 async def cmd_start(
     message: types.Message,
+    db: Database,
     create_main_menu_keyboard,
     chat_panel,
     clear_admin_state,
@@ -34,7 +69,7 @@ async def cmd_start(
     await chat_panel.restore_or_create(
         message.chat.id,
         user_id,
-        welcome_message(),
+        home_message(db, user_id),
         create_main_menu_keyboard(user_id),
     )
 
@@ -137,6 +172,7 @@ async def handle_guide_callback(
 @router.callback_query(F.data == "main")
 async def handle_main_callback(
     callback_query: types.CallbackQuery,
+    db: Database,
     safe_answer_callback,
     show_menu_from_callback,
     create_main_menu_keyboard,
@@ -152,6 +188,6 @@ async def handle_main_callback(
 
     await show_menu_from_callback(
         callback_query,
-        welcome_message(),
+        home_message(db, user_id),
         create_main_menu_keyboard(user_id),
     )

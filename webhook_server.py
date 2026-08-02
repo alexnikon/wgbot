@@ -22,8 +22,9 @@ from database import Database
 from logging_setup import configure_logging
 from message_templates import (
     format_remaining_time,
+    format_remaining_until,
     initial_config_caption,
-    yookassa_extension_success_message,
+    payment_success_message,
     yookassa_refund_success_message,
 )
 from services import AppServices
@@ -277,6 +278,14 @@ async def process_successful_payment(payment_data: dict) -> None:
         logger.info("Ignoring duplicate YooKassa payment event %s", payment_id)
         return
     expire_date = payment_result["expire_date"]
+    await send_telegram_message(
+        user_id,
+        payment_success_message(
+            str(tariff.get("name") or tariff_key),
+            format_remaining_until(expire_date),
+        ),
+        create_home_reply_markup(),
+    )
     primary = await asyncio.to_thread(db.get_primary_client_peer, user_id)
 
     if primary:
@@ -288,11 +297,6 @@ async def process_successful_payment(payment_data: dict) -> None:
                 {"expire_date": expire_date},
                 f"Failed peers: {result['failed']}",
             )
-        await send_telegram_message(
-            user_id,
-            yookassa_extension_success_message(int(tariff["days"])),
-            create_home_reply_markup(),
-        )
         title = "🔁 Клиент продлил подписку"
     else:
         peer_name = generate_peer_name(username, user_id)
@@ -424,7 +428,7 @@ async def process_refund_succeeded(refund_data: dict) -> None:
         user_id,
         yookassa_refund_success_message(
             amount,
-            int(tariff["days"]),
+            str(tariff.get("name") or payment.get("tariff_key") or ""),
             remaining,
         ),
         create_home_reply_markup(),

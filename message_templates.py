@@ -1,5 +1,5 @@
 from collections.abc import Mapping
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from telegram_text import (
@@ -59,44 +59,61 @@ def active_access_message() -> TelegramText:
     return TelegramText.from_html(plain, rich_html)
 
 
-def yookassa_extension_success_message(days: int) -> TelegramText:
+def payment_success_message(tariff_name: str, remaining: str) -> TelegramText:
+    remaining_text = remaining.rstrip(".")
     plain = (
-        "✅ Платеж успешно обработан!\n\n"
-        f"Продлили тебе доступ на {days} дней!\n"
-        "Способ оплаты: 💳 Банковская карта"
+        "✅ Оплачено!\n\n"
+        f"Доступ к сервису продлен на {tariff_name}\n"
+        f"📅 Осталось: {remaining_text}."
     )
     rich_html = (
-        f"{rich_bold('✅ Платеж успешно обработан!')}\n\n"
-        f"Продлили тебе доступ на {escape_rich_text(days)} дней!\n"
-        "Способ оплаты: 💳 Банковская карта"
+        f"{rich_bold('✅ Оплачено!')}\n\n"
+        f"Доступ к сервису продлен на {escape_rich_text(tariff_name)}\n"
+        f"📅 Осталось: {escape_rich_text(remaining_text)}."
     )
     return TelegramText.from_html(plain, rich_html)
 
 
 def yookassa_refund_success_message(
     amount: object,
-    days: int,
+    tariff_name: str,
     remaining: str | None,
 ) -> TelegramText:
-    status_line = f"⏰ Осталось: {remaining}" if remaining is not None else "Подписка не активна"
+    remaining_text = remaining.rstrip(".") if remaining is not None else None
+    status_line = (
+        f"📅 Осталось: {remaining_text}."
+        if remaining_text is not None
+        else "📅 Осталось: подписка не активна."
+    )
     plain = (
-        "💰 Возврат успешно обработан!\n\n"
+        "💰 Успешный возврат\n\n"
         f"💳 Сумма возврата: {amount} руб.\n"
-        f"📉 Оплаченный период уменьшен на {days} дней.\n"
+        f"📉 Оплаченный период уменьшен на {tariff_name}.\n"
         f"{status_line}"
     )
     rich_status_line = (
-        f"⏰ Осталось: {escape_rich_text(remaining)}"
-        if remaining is not None
-        else "Подписка не активна"
+        f"📅 Осталось: {escape_rich_text(remaining_text)}."
+        if remaining_text is not None
+        else "📅 Осталось: подписка не активна."
     )
     rich_html = (
-        f"{rich_bold('💰 Возврат успешно обработан!')}\n\n"
-        f"💳 Сумма возврата: {rich_code(amount)} руб.\n"
-        f"📉 Оплаченный период уменьшен на {escape_rich_text(days)} дней.\n"
+        f"{rich_bold('💰 Успешный возврат')}\n\n"
+        f"💳 Сумма возврата: {escape_rich_text(amount)} руб.\n"
+        f"📉 Оплаченный период уменьшен на {escape_rich_text(tariff_name)}.\n"
         f"{rich_status_line}"
     )
     return TelegramText.from_html(plain, rich_html)
+
+
+def format_remaining_until(expire_date: str, now: datetime | None = None) -> str:
+    """Format the non-negative time remaining until a stored UTC expiry."""
+    expires_at = datetime.fromisoformat(expire_date)
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    return format_remaining_time(max(expires_at - current, timedelta(0)))
 
 
 def service_guide_message() -> TelegramText:
@@ -230,6 +247,26 @@ def active_subscription_status(
         f"⏰ Осталось: {escape_rich_text(remaining)}\n\n"
         "Ты можешь продлить действующую подписку, оплатив доступ еще раз, "
         "срок добавится к текущей подписке"
+    )
+    return TelegramText.from_html(plain, rich_html)
+
+
+def unavailable_subscription_status(
+    connected_devices: int,
+    formatted_date: str,
+) -> TelegramText:
+    """Render a safe status card when a stored expiry cannot be parsed."""
+    plain = (
+        "📊 Статус подписки\n\n"
+        f"⚙️Подключено устройств: {connected_devices}\n"
+        f"📅 Дата окончания: {formatted_date}\n\n"
+        "Не удалось определить текущее состояние подписки. Обратись в поддержку."
+    )
+    rich_html = (
+        f"{rich_bold('📊 Статус подписки')}\n\n"
+        f"⚙️Подключено устройств: {rich_bold(connected_devices)}\n"
+        f"📅 Дата окончания: {escape_rich_text(formatted_date)}\n\n"
+        "Не удалось определить текущее состояние подписки. Обратись в поддержку."
     )
     return TelegramText.from_html(plain, rich_html)
 

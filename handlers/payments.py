@@ -15,6 +15,7 @@ from callbacks import (
 )
 from cascade_api import CascadeCapacityError, CascadeRouter
 from database import Database
+from message_templates import format_remaining_until, payment_success_message
 from payment import PaymentManager
 from stars import StarsReconciler
 from telegram_runtime import UserActionLocks, edit_bound_message, serialized_user_action
@@ -454,7 +455,6 @@ async def process_successful_payment(
     db: Database,
     cascade_router: CascadeRouter,
     payment_manager: PaymentManager,
-    create_home_keyboard,
     create_or_restore_peer_for_user,
     send_config_with_confirmation,
     notify_admins,
@@ -561,6 +561,15 @@ async def process_successful_payment(
         return
 
     expire_date = payment_result["expire_date"]
+    await chat_panel.render(
+        message.chat.id,
+        user_id,
+        payment_success_message(
+            str(tariff_data.get("name") or tariff_key),
+            format_remaining_until(expire_date),
+        ),
+        create_main_menu_keyboard(user_id),
+    )
     primary_peer = await asyncio.to_thread(db.get_primary_client_peer, user_id)
     if primary_peer:
         sync_result = await cascade_router.sync_user_access(user_id, expire_date)
@@ -571,30 +580,12 @@ async def process_successful_payment(
                 {"expire_date": expire_date},
                 f"Failed peers: {sync_result['failed']}",
             )
-        await chat_panel.render(
-            message.chat.id,
-            user_id,
-            f"✅ Платеж успешно обработан!\n"
-            f"🎉 Продлили тебе доступ на {tariff_data['days']} дней!\n"
-            f"💳 Способ оплаты: ⭐ Telegram Stars\n\n"
-            f"Текущая конфигурация остается актуальной.",
-            create_main_menu_keyboard(user_id),
-        )
         title = "🔁 Клиент продлил подписку"
     else:
-        await chat_panel.render(
-            message.chat.id,
-            user_id,
-            "🔄 Создаю VPN доступ...",
-            create_home_keyboard(),
-        )
         ok, error, config = await create_or_restore_peer_for_user(user_id, username, tariff_key)
         if not ok:
-            await chat_panel.render(
-                message.chat.id,
-                user_id,
-                f"⚠️ {error}. Мы повторим создание автоматически.",
-                create_main_menu_keyboard(user_id),
+            await message.answer(
+                f"⚠️ {error}. Мы повторим создание автоматически."
             )
             await notify_admins(
                 f"⚠️ Оплата получена, provisioning отложен\n\nTelegram ID: {user_id}\nПричина: {error}"
@@ -610,19 +601,9 @@ async def process_successful_payment(
             caption=None,
             filename=location_config_filename(server_name),
         ):
-            await chat_panel.render(
-                message.chat.id,
-                user_id,
+            await message.answer(
                 "✅ Доступ активирован, но конфиг не удалось отправить. "
-                "Попробуй получить его кнопкой в главном меню.",
-                create_main_menu_keyboard(user_id),
-            )
-        else:
-            await chat_panel.render(
-                message.chat.id,
-                user_id,
-                "✅ Платеж обработан, доступ создан, конфигурация отправлена файлом.",
-                create_main_menu_keyboard(user_id),
+                "Попробуй получить его кнопкой в главном меню."
             )
         title = "🆕 Новый клиент подключился"
 
