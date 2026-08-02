@@ -31,6 +31,7 @@ from database import Database
 from handlers.access import (
     client_config_keyboard,
     config_file_back_keyboard,
+    handle_status_callback,
     return_to_client_configs,
 )
 from handlers.admin import (
@@ -568,7 +569,7 @@ class TelegramDatabaseTests(unittest.TestCase):
             10, "alice", "2099-01-01 00:00:00", "paid", "30_days", "stars"
         )
         active = home_message(self.db, 10)
-        self.assertIn("📊 Статус подписки", active.plain)
+        self.assertIn("📊 Статус подписки - Активна", active.plain)
         self.assertIn("⏰ Осталось:", active.plain)
         self.assertNotIn("👋🏻 Привет!", active.plain)
 
@@ -576,6 +577,8 @@ class TelegramDatabaseTests(unittest.TestCase):
             10, "alice", "2000-01-01 00:00:00", "expired", "30_days", "stars"
         )
         expired = home_message(self.db, 10)
+        self.assertIn("📊 Статус подписки - Неактивна", expired.plain)
+        self.assertIn("⏰ Осталось: 0 мин.", expired.plain)
         self.assertIn("Чтобы продолжить пользоваться сервисом", expired.plain)
 
     def test_home_message_keeps_status_for_invalid_saved_expiry(self):
@@ -585,7 +588,7 @@ class TelegramDatabaseTests(unittest.TestCase):
 
         content = home_message(self.db, 10)
 
-        self.assertIn("📊 Статус подписки", content.plain)
+        self.assertIn("📊 Статус подписки - Не определена", content.plain)
         self.assertIn("Не удалось определить", content.plain)
         self.assertNotIn("👋🏻 Привет!", content.plain)
 
@@ -609,8 +612,36 @@ class TelegramDatabaseTests(unittest.TestCase):
         )
 
         content = show_menu.await_args.args[1]
-        self.assertIn("📊 Статус подписки", content.plain)
+        self.assertIn("📊 Статус подписки - Активна", content.plain)
         self.assertNotIn("👋🏻 Привет!", content.plain)
+
+    def test_status_button_uses_the_same_active_status_layout(self):
+        self.db.ensure_subscription(
+            10, "alice", "2099-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=10),
+            message=SimpleNamespace(),
+        )
+        renderer = SimpleNamespace(edit_rich_or_text=AsyncMock())
+
+        asyncio.run(
+            handle_status_callback(
+                callback,
+                self.db,
+                AsyncMock(),
+                AsyncMock(),
+                lambda _user_id: SimpleNamespace(),
+                renderer,
+            )
+        )
+
+        content = renderer.edit_rich_or_text.await_args.kwargs["content"]
+        lines = content.plain.splitlines()
+        self.assertEqual(lines[0], "📊 Статус подписки - Активна")
+        self.assertTrue(lines[2].startswith("⏰ Осталось:"))
+        self.assertTrue(lines[3].startswith("⏰ Доступ закончится:"))
+        self.assertTrue(lines[4].startswith("⚙️Подключено устройств:"))
 
     def test_group_callback_rejects_mismatched_client(self):
         workflow = AdminWorkflowService(self.db)

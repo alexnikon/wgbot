@@ -1,5 +1,4 @@
 import logging
-from datetime import UTC, datetime
 
 from aiogram import F, Router, types
 from aiogram.filters import CommandStart
@@ -7,49 +6,16 @@ from aiogram.filters import CommandStart
 from database import Database
 from message_templates import (
     active_access_message,
-    active_subscription_status,
     expired_subscription_status,
-    format_remaining_time,
     service_guide_message,
-    unavailable_subscription_status,
-    welcome_message,
 )
 from payment import PaymentManager
+from subscription_view import home_message
 from telegram_runtime import serialized_user_action
-from telegram_text import TelegramText
 from utils import format_date_for_user
 
 logger = logging.getLogger(__name__)
 router = Router(name="navigation")
-
-
-def home_message(db: Database, user_id: int) -> TelegramText:
-    """Return welcome content until access exists, then subscription status."""
-    subscription = db.get_peer_by_telegram_id(user_id)
-    expire_date = str((subscription or {}).get("expire_date") or "").strip()
-    if not expire_date:
-        return welcome_message()
-    connected_devices = db.get_peer_count(user_id)
-    formatted_date = format_date_for_user(expire_date)
-    try:
-        expires_at = datetime.fromisoformat(expire_date)
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=UTC)
-        time_left = expires_at - datetime.now(UTC)
-    except ValueError, TypeError:
-        return unavailable_subscription_status(connected_devices, formatted_date)
-    if time_left.total_seconds() <= 0:
-        return expired_subscription_status(
-            connected_devices,
-            expire_date,
-            formatted_date,
-        )
-    return active_subscription_status(
-        connected_devices,
-        expire_date,
-        formatted_date,
-        format_remaining_time(time_left),
-    )
 
 
 @router.message(CommandStart())

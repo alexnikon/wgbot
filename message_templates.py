@@ -210,16 +210,18 @@ def expired_subscription_status(
     except TypeError, ValueError:
         rich_expire_date = escape_rich_text(formatted_date)
     plain = (
-        "📊 Статус подписки\n"
-        f"⚙️Подключено устройств: {connected_devices}\n"
-        f"📅 Дата истечения: {formatted_date}\n"
+        "📊 Статус подписки - Неактивна\n\n"
+        "⏰ Осталось: 0 мин.\n"
+        f"⏰ Доступ закончился: {formatted_date}\n"
+        f"⚙️Подключено устройств: {connected_devices}\n\n"
         "Чтобы продолжить пользоваться сервисом, продли доступ.\n\n"
         "Выбери варианты продления с помощью кнопок ниже 👇:"
     )
     rich_html = (
-        f"{rich_bold('📊 Статус подписки')}\n"
-        f"⚙️Подключено устройств: {rich_bold(connected_devices)}\n"
-        f"📅 Дата истечения: {rich_expire_date}\n"
+        f"{rich_bold('📊 Статус подписки - Неактивна')}\n\n"
+        "⏰ Осталось: 0 мин.\n"
+        f"⏰ Доступ закончился: {rich_expire_date}\n"
+        f"⚙️Подключено устройств: {rich_bold(connected_devices)}\n\n"
         "Чтобы продолжить пользоваться сервисом, продли доступ.\n\n"
         "Выбери варианты продления с помощью кнопок ниже 👇:"
     )
@@ -233,18 +235,18 @@ def active_subscription_status(
     remaining: str,
 ) -> TelegramText:
     plain = (
-        "📊 Статус подписки\n\n"
-        f"⚙️Подключено устройств: {connected_devices}\n"
-        f"⏰ Доступ закончится: {formatted_date}\n\n"
-        f"⏰ Осталось: {remaining}\n\n"
+        "📊 Статус подписки - Активна\n\n"
+        f"⏰ Осталось: {remaining}\n"
+        f"⏰ Доступ закончится: {formatted_date}\n"
+        f"⚙️Подключено устройств: {connected_devices}\n\n"
         "Ты можешь продлить действующую подписку, оплатив доступ еще раз, "
         "срок добавится к текущей подписке"
     )
     rich_html = (
-        f"{rich_bold('📊 Статус подписки')}\n\n"
-        f"⚙️Подключено устройств: {rich_bold(connected_devices)}\n"
-        f"⏰ Доступ закончится: {rich_date(expire_date, formatted_date)}\n\n"
-        f"⏰ Осталось: {escape_rich_text(remaining)}\n\n"
+        f"{rich_bold('📊 Статус подписки - Активна')}\n\n"
+        f"⏰ Осталось: {escape_rich_text(remaining)}\n"
+        f"⏰ Доступ закончится: {rich_date(expire_date, formatted_date)}\n"
+        f"⚙️Подключено устройств: {rich_bold(connected_devices)}\n\n"
         "Ты можешь продлить действующую подписку, оплатив доступ еще раз, "
         "срок добавится к текущей подписке"
     )
@@ -257,15 +259,17 @@ def unavailable_subscription_status(
 ) -> TelegramText:
     """Render a safe status card when a stored expiry cannot be parsed."""
     plain = (
-        "📊 Статус подписки\n\n"
-        f"⚙️Подключено устройств: {connected_devices}\n"
-        f"📅 Дата окончания: {formatted_date}\n\n"
+        "📊 Статус подписки - Не определена\n\n"
+        "⏰ Осталось: не определено\n"
+        f"⏰ Доступ закончится: {formatted_date}\n"
+        f"⚙️Подключено устройств: {connected_devices}\n\n"
         "Не удалось определить текущее состояние подписки. Обратись в поддержку."
     )
     rich_html = (
-        f"{rich_bold('📊 Статус подписки')}\n\n"
-        f"⚙️Подключено устройств: {rich_bold(connected_devices)}\n"
-        f"📅 Дата окончания: {escape_rich_text(formatted_date)}\n\n"
+        f"{rich_bold('📊 Статус подписки - Не определена')}\n\n"
+        "⏰ Осталось: не определено\n"
+        f"⏰ Доступ закончится: {escape_rich_text(formatted_date)}\n"
+        f"⚙️Подключено устройств: {rich_bold(connected_devices)}\n\n"
         "Не удалось определить текущее состояние подписки. Обратись в поддержку."
     )
     return TelegramText.from_html(plain, rich_html)

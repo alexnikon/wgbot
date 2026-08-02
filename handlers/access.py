@@ -6,14 +6,10 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from callbacks import ClientConfigCallback
 from cascade_api import CascadeNotFound, CascadeRouter
 from database import Database
-from message_templates import (
-    active_subscription_status,
-    expired_subscription_status,
-    format_remaining_time,
-)
 from payment import PaymentManager
+from subscription_view import subscription_status_message
 from telegram_text import TelegramText, rich_date
-from utils import format_date_for_user, location_config_filename, parse_date_flexible
+from utils import format_date_for_user, location_config_filename
 
 logger = logging.getLogger(__name__)
 router = Router(name="access")
@@ -308,7 +304,6 @@ async def handle_extend_callback(
     await safe_answer_callback(callback_query)
 
     user_id = callback_query.from_user.id
-    # Check if the user has an active peer
     existing_peer = db.get_peer_by_telegram_id(user_id)
     if not existing_peer:
         error_text = """
@@ -362,9 +357,8 @@ async def handle_status_callback(
     await safe_answer_callback(callback_query)
 
     user_id = callback_query.from_user.id
-    # Check if the user has an active peer
-    existing_peer = db.get_peer_by_telegram_id(user_id)
-    if not existing_peer:
+    status_text = subscription_status_message(db, user_id)
+    if status_text is None:
         error_text = """
 ❌ У тебя нет активного VPN доступа.
 
@@ -379,58 +373,7 @@ async def handle_status_callback(
         )
         return
 
-    # Get peer info from the database
     try:
-        expire_date_str = existing_peer.get("expire_date", "Неизвестно")
-
-        # Format dates for display
-        expire_date_formatted = (
-            format_date_for_user(expire_date_str)
-            if expire_date_str != "Неизвестно"
-            else "Неизвестно"
-        )
-        connected_devices = db.get_peer_count(user_id)
-        # Check if access has expired
-        from datetime import datetime
-
-        is_expired = False
-        if expire_date_str and expire_date_str != "Неизвестно":
-            try:
-                expire_date = parse_date_flexible(expire_date_str)
-                now = datetime.now()
-                is_expired = expire_date <= now
-            except ValueError, TypeError:
-                pass
-
-        # Format peer info
-        if is_expired:
-            status_text = expired_subscription_status(
-                connected_devices,
-                expire_date_str,
-                expire_date_formatted,
-            )
-        else:
-            # Access active: calculate remaining time
-            try:
-                expire_date = parse_date_flexible(expire_date_str)
-                now = datetime.now()
-                time_left = expire_date - now
-                status_text = active_subscription_status(
-                    connected_devices,
-                    expire_date_str,
-                    expire_date_formatted,
-                    format_remaining_time(time_left),
-                )
-            except ValueError, TypeError:
-                status_text = f"""
-📊 Статус подписки
-
-⚙️Подключено устройств: {connected_devices}
-⏰ Доступ закончится: {expire_date_formatted}
-
-Ты можешь продлить действующую подписку, оплатив доступ еще раз, срок добавится к текущей подписке
-                """
-
         await ui_renderer.edit_rich_or_text(
             callback_query.message,
             content=status_text,

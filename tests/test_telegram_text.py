@@ -19,6 +19,7 @@ from message_templates import (
     payment_success_message,
     renewal_reminder,
     service_guide_message,
+    unavailable_subscription_status,
     welcome_message,
     yookassa_refund_success_message,
 )
@@ -238,11 +239,17 @@ class TelegramTextTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             expired.plain,
-            "📊 Статус подписки\n"
-            "⚙️Подключено устройств: 1\n"
-            "📅 Дата истечения: 29-07-2026\n"
+            "📊 Статус подписки - Неактивна\n\n"
+            "⏰ Осталось: 0 мин.\n"
+            "⏰ Доступ закончился: 29-07-2026\n"
+            "⚙️Подключено устройств: 1\n\n"
             "Чтобы продолжить пользоваться сервисом, продли доступ.\n\n"
             "Выбери варианты продления с помощью кнопок ниже 👇:",
+        )
+        self.assertTrue(
+            expired.html.startswith(
+                "<b>📊 Статус подписки - Неактивна</b><br><br>"
+            )
         )
         self.assertIn("⚙️Подключено устройств: <b>1</b>", expired.html)
         self.assertIn('format="d">29-07-2026</tg-time>', expired.html)
@@ -255,12 +262,17 @@ class TelegramTextTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             active.plain,
-            "📊 Статус подписки\n\n"
-            "⚙️Подключено устройств: 2\n"
-            "⏰ Доступ закончится: 04-08-2026\n\n"
-            "⏰ Осталось: 6 дн. 14 ч. 48 мин.\n\n"
+            "📊 Статус подписки - Активна\n\n"
+            "⏰ Осталось: 6 дн. 14 ч. 48 мин.\n"
+            "⏰ Доступ закончится: 04-08-2026\n"
+            "⚙️Подключено устройств: 2\n\n"
             "Ты можешь продлить действующую подписку, оплатив доступ еще раз, "
             "срок добавится к текущей подписке",
+        )
+        self.assertTrue(
+            active.html.startswith(
+                "<b>📊 Статус подписки - Активна</b><br><br>"
+            )
         )
         self.assertIn("⚙️Подключено устройств: <b>2</b>", active.html)
         zero_devices = active_subscription_status(
@@ -270,6 +282,21 @@ class TelegramTextTests(unittest.IsolatedAsyncioTestCase):
             "9 мин.",
         )
         self.assertIn("⚙️Подключено устройств: <b>0</b>", zero_devices.html)
+
+        unavailable = unavailable_subscription_status(3, "invalid-date")
+        self.assertEqual(
+            unavailable.plain,
+            "📊 Статус подписки - Не определена\n\n"
+            "⏰ Осталось: не определено\n"
+            "⏰ Доступ закончится: invalid-date\n"
+            "⚙️Подключено устройств: 3\n\n"
+            "Не удалось определить текущее состояние подписки. Обратись в поддержку.",
+        )
+        self.assertTrue(
+            unavailable.html.startswith(
+                "<b>📊 Статус подписки - Не определена</b><br><br>"
+            )
+        )
 
     def test_remaining_time_keeps_all_existing_variants(self):
         self.assertEqual(
