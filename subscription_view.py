@@ -15,6 +15,23 @@ from utils import format_date_for_user
 def subscription_status_message(db: Database, user_id: int) -> TelegramText | None:
     """Build one subscription status view for every Telegram entry point."""
     subscription = db.get_peer_by_telegram_id(user_id)
+    access_reader = getattr(db, "get_client_access_state", None)
+    access_state = access_reader(user_id) if callable(access_reader) else None
+    is_complimentary = (
+        access_state.source == "complimentary"
+        if access_state is not None
+        else bool(
+            subscription
+            and subscription.get("is_complimentary")
+            and not subscription.get("is_banned")
+        )
+    )
+    if is_complimentary:
+        return TelegramText.from_plain(
+            "🎁 Бесплатный доступ активен.\n\n"
+            f"Подключённых конфигов: {db.get_peer_count(user_id)}\n"
+            "Срок действия: без ограничений"
+        )
     expire_date = str((subscription or {}).get("expire_date") or "").strip()
     if not expire_date:
         return None

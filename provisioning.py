@@ -58,15 +58,13 @@ class ProvisioningWorker:
             payload = task["payload"]
             user_id = int(task["telegram_user_id"])
             if task["operation"] == "create_peer":
-                ban_checker = getattr(self.db, "is_client_banned", None)
-                ban_value = (
-                    await asyncio.to_thread(ban_checker, user_id)
-                    if callable(ban_checker)
-                    else False
+                access_reader = getattr(self.db, "get_client_access_state", None)
+                access = (
+                    await asyncio.to_thread(access_reader, user_id)
+                    if callable(access_reader)
+                    else None
                 )
-                if ban_value is True or (
-                    isinstance(ban_value, int) and ban_value == 1
-                ):
+                if access is not None and not access.active:
                     completed = await asyncio.to_thread(
                         self.db.complete_provisioning_task, task["id"], self.worker_id
                     )
@@ -75,18 +73,43 @@ class ProvisioningWorker:
                     if self.metrics:
                         self.metrics.provisioning_completed()
                     return
-                primary = await asyncio.to_thread(
-                    self.db.get_primary_client_peer, user_id
+                primary = (
+                    await asyncio.to_thread(self.db.get_primary_client_peer, user_id)
+                    if access is None
+                    else None
                 )
-                if primary:
-                    config = await self.cascade_router.get_primary_config(user_id)
-                else:
-                    _, config = await self.cascade_router.create_user_peer(
-                        user_id,
-                        payload.get("username"),
-                        payload["peer_name"],
-                        payload["expire_date"],
+                try:
+                    if primary:
+                        config = await self.cascade_router.get_primary_config(user_id)
+                    else:
+                        _, config = await self.cascade_router.create_user_peer(
+                            user_id,
+                            payload.get("username"),
+                            payload["peer_name"],
+                            str(access.cascade_expiry)
+                            if access and access.cascade_expiry
+                            else payload["expire_date"],
+                        )
+                except Exception:
+                    current_access = (
+                        await asyncio.to_thread(access_reader, user_id)
+                        if callable(access_reader)
+                        else None
                     )
+                    if current_access is not None and not current_access.active:
+                        completed = await asyncio.to_thread(
+                            self.db.complete_provisioning_task,
+                            task["id"],
+                            self.worker_id,
+                        )
+                        if not completed:
+                            raise RuntimeError(
+                                "Provisioning task lease ownership was lost"
+                            ) from None
+                        if self.metrics:
+                            self.metrics.provisioning_completed()
+                        return
+                    raise
                 config_sent = await self.send_config(user_id, config)
             elif task["operation"] == "sync_access":
                 result = await self.cascade_router.sync_user_access(

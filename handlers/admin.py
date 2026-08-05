@@ -8,11 +8,13 @@ from zoneinfo import ZoneInfo
 from aiogram import Bot, F, Router, types
 from aiogram.filters import BaseFilter
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.utils.deep_linking import create_start_link
 
 from callbacks import (
     AdminClientCallback,
     AdminConfigCallback,
     AdminDiscountCallback,
+    AdminInviteCallback,
     AdminPageCallback,
     RefundConfirmationCallback,
 )
@@ -134,6 +136,139 @@ def admin_dashboard_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def client_management_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="👥 Клиенты", callback_data="admin_client_list")],
+            [InlineKeyboardButton(text="➕ Добавить клиента", callback_data="admin_add_client")],
+            [
+                InlineKeyboardButton(
+                    text="⏳ Ожидают привязки", callback_data="admin_pending_clients"
+                )
+            ],
+            [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main")],
+        ]
+    )
+
+
+def pending_clients_keyboard(db: Database) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=(
+                    f"{'🟢' if item['display_status'] == 'claim_pending' else '⏳'} "
+                    f"@{item['expected_username']}"
+                ),
+                callback_data=AdminInviteCallback(
+                    action="view", invitation_id=int(item["id"])
+                ).pack(),
+            )
+        ]
+        for item in db.list_client_invitations()
+    ]
+    rows.append(
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_manage_clients")]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def invitation_details_keyboard(invitation: dict[str, Any]) -> InlineKeyboardMarkup:
+    invitation_id = int(invitation["id"])
+    rows: list[list[InlineKeyboardButton]] = []
+    if invitation["status"] == "claim_pending":
+        rows.extend(
+            [
+                [
+                    InlineKeyboardButton(
+                        text="✅ Подтвердить привязку",
+                        callback_data=AdminInviteCallback(
+                            action="approve", invitation_id=invitation_id
+                        ).pack(),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="❌ Отклонить заявку",
+                        callback_data=AdminInviteCallback(
+                            action="reject", invitation_id=invitation_id
+                        ).pack(),
+                    )
+                ],
+            ]
+        )
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🔄 Перевыпустить ссылку",
+                    callback_data=AdminInviteCallback(
+                        action="reissue", invitation_id=invitation_id
+                    ).pack(),
+                )
+            ]
+        )
+    rows.extend(
+        [
+            [
+                InlineKeyboardButton(
+                    text="💸 Скидка",
+                    callback_data=AdminInviteCallback(
+                        action="discount", invitation_id=invitation_id
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text=(
+                        "🎁 Убрать free"
+                        if invitation["is_complimentary"]
+                        else "🎁 Сделать free"
+                    ),
+                    callback_data=AdminInviteCallback(
+                        action="complimentary", invitation_id=invitation_id
+                    ).pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🗑 Удалить приглашение",
+                    callback_data=AdminInviteCallback(
+                        action="delete", invitation_id=invitation_id
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ К ожидающим", callback_data="admin_pending_clients"
+                )
+            ],
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def format_invitation(invitation: dict[str, Any], link: str | None = None) -> str:
+    status = {
+        "pending": "ожидает открытия ссылки",
+        "claim_pending": "ожидает подтверждения администратора",
+        "rejected": "заявка отклонена",
+        "expired": "ссылка истекла",
+    }.get(str(invitation.get("display_status") or invitation["status"]), "неизвестен")
+    text = (
+        "⏳ Предварительный клиент\n\n"
+        f"Username: @{invitation['expected_username']}\n"
+        f"Статус: {status}\n"
+        f"Скидка: {int(invitation['promo'])}%\n"
+        f"Бесплатный доступ: {'да' if invitation['is_complimentary'] else 'нет'}"
+    )
+    if invitation.get("claimant_user_id"):
+        text += (
+            f"\n\nЗаявка от ID: {invitation['claimant_user_id']}\n"
+            f"Фактический username: @{invitation.get('claimant_username') or 'нет'}"
+        )
+    if link:
+        text += f"\n\nОдноразовая ссылка (7 дней):\n{link}"
+    return text
+
+
 def cancel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -166,6 +301,8 @@ def client_list_keyboard(
         label = f"{user_id} | @{username}" if username else str(user_id)
         if client.get("is_banned"):
             label = f"🚫 {label}"
+        elif client.get("is_complimentary"):
+            label = f"🎁 {label}"
         rows.append(
             [
                 InlineKeyboardButton(
@@ -201,7 +338,9 @@ def client_list_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows), total
 
 
-def discount_keyboard(user_id: int) -> InlineKeyboardMarkup:
+def discount_keyboard(
+    user_id: int, is_complimentary: bool = False
+) -> InlineKeyboardMarkup:
     rows = []
     for values in ((0, 5, 10), (15, 20, 25)):
         rows.append(
@@ -218,6 +357,20 @@ def discount_keyboard(user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text="✏️ Другое значение",
                 callback_data=AdminClientCallback(action="custom_discount", user_id=user_id).pack(),
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=(
+                    "🎁 Отменить бесплатный доступ"
+                    if is_complimentary
+                    else "🎁 Сделать бесплатным"
+                ),
+                callback_data=AdminClientCallback(
+                    action="complimentary", user_id=user_id
+                ).pack(),
             )
         ]
     )
@@ -340,7 +493,12 @@ def config_list_keyboard(
 def config_details_keyboard(config: dict[str, Any]) -> InlineKeyboardMarkup:
     user_id = int(config["telegram_user_id"])
     peer_id = int(config["id"])
-    can_download = config.get("payment_status") == "paid"
+    can_download = bool(
+        config.get(
+            "has_active_access",
+            config.get("payment_status") == "paid" or config.get("is_complimentary"),
+        )
+    ) and not config.get("is_banned")
     rows = [
         *(
             [
@@ -489,6 +647,7 @@ def format_client(client: dict[str, Any]) -> TelegramText:
         f"Telegram ID: {client['telegram_user_id']}\n"
         f"Username: {identity}\n"
         f"Скидка: {int(client.get('promo') or 0)}%\n"
+        f"Бесплатный доступ: {'да' if client.get('is_complimentary') else 'нет'}\n"
         f"Сервер: {client.get('server_keys') or 'не назначен'}\n"
         f"Группа: {client_group_label(client)}\n"
         f"Устройств: {int(client.get('device_count') or 0)}\n"
@@ -530,7 +689,365 @@ async def open_clients(callback: types.CallbackQuery, db: Database, safe_answer_
         return
     await safe_answer_callback(callback)
     await edit_bound_message(
-        callback.message, "👥 Управление клиентами", reply_markup=admin_dashboard_keyboard()
+        callback.message,
+        "👥 Управление клиентами",
+        reply_markup=client_management_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "admin_add_client")
+async def start_add_client(
+    callback: types.CallbackQuery,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    admin_workflows.set(
+        callback.from_user.id,
+        "await_client_identity",
+        service_chat_id=callback.message.chat.id,
+        service_message_id=callback.message.message_id,
+    )
+    await edit_bound_message(
+        callback.message,
+        "Введи числовой Telegram ID или @username клиента.",
+        reply_markup=cancel_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "admin_pending_clients")
+async def show_pending_clients(
+    callback: types.CallbackQuery, db: Database, safe_answer_callback
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    invitations = db.list_client_invitations()
+    await edit_bound_message(
+        callback.message,
+        f"⏳ Ожидают привязки\n\nЗаписей: {len(invitations)}",
+        reply_markup=pending_clients_keyboard(db),
+    )
+
+
+@router.callback_query(AdminInviteCallback.filter(F.action == "view"))
+async def show_invitation(
+    callback: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    callback_data: AdminInviteCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    invitation = db.get_client_invitation(callback_data.invitation_id)
+    if not invitation or invitation["status"] == "claimed":
+        await edit_bound_message(callback.message, "❌ Приглашение не найдено.")
+        return
+    link = None
+    if invitation.get("token") and invitation.get("display_status") == "pending":
+        link = await create_start_link(
+            callback.bot, f"claim_{invitation['token']}", encode=False
+        )
+    await edit_bound_message(
+        callback.message,
+        format_invitation(invitation, link),
+        reply_markup=invitation_details_keyboard(invitation),
+    )
+
+
+@router.callback_query(AdminInviteCallback.filter(F.action == "reissue"))
+async def reissue_invitation(
+    callback: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    callback_data: AdminInviteCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    invitation = db.reissue_client_invitation(
+        callback_data.invitation_id, callback.from_user.id
+    )
+    if not invitation:
+        await edit_bound_message(callback.message, "❌ Приглашение не найдено.")
+        return
+    link = await create_start_link(
+        callback.bot, f"claim_{invitation['token']}", encode=False
+    )
+    await edit_bound_message(
+        callback.message,
+        format_invitation(invitation, link),
+        reply_markup=invitation_details_keyboard(invitation),
+    )
+
+
+@router.callback_query(AdminInviteCallback.filter(F.action == "approve"))
+async def approve_invitation(
+    callback: types.CallbackQuery,
+    db: Database,
+    cascade_router: CascadeRouter,
+    safe_answer_callback,
+    callback_data: AdminInviteCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    client = db.approve_client_invitation(
+        callback_data.invitation_id, callback.from_user.id
+    )
+    if not client:
+        await edit_bound_message(callback.message, "❌ Заявка устарела.")
+        return
+    warning = ""
+    if client.get("is_complimentary"):
+        sync_result = {"total": 1, "updated": 0, "missing": 0, "failed": 1}
+        try:
+            result = await cascade_router.ensure_client_access(
+                int(client["telegram_user_id"])
+            )
+            sync_result = result
+            if result["failed"]:
+                raise CascadeError("Complimentary provisioning failed")
+        except CascadeError as exc:
+            db.add_provisioning_task(
+                int(client["telegram_user_id"]),
+                "create_peer",
+                {
+                    "username": client.get("telegram_username") or "",
+                    "peer_name": client.get("telegram_username")
+                    or str(client["telegram_user_id"]),
+                    "expire_date": "2099-12-31 23:59:59",
+                    "tariff_key": "complimentary",
+                },
+                str(exc),
+            )
+            warning = "\n⚠️ Создание VPN поставлено в очередь."
+        db.log_client_state_sync(
+            callback.from_user.id,
+            int(client["telegram_user_id"]),
+            "admin_approve_complimentary_invitation_sync",
+            sync_result,
+        )
+    await edit_bound_message(
+        callback.message,
+        f"✅ Клиент привязан к Telegram ID {client['telegram_user_id']}.{warning}",
+        reply_markup=client_card_keyboard(
+            int(client["telegram_user_id"]), bool(client.get("is_banned"))
+        ),
+    )
+
+
+@router.callback_query(AdminInviteCallback.filter(F.action == "reject"))
+async def reject_invitation(
+    callback: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    callback_data: AdminInviteCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    if not db.reject_client_invitation(
+        callback_data.invitation_id, callback.from_user.id
+    ):
+        await edit_bound_message(callback.message, "❌ Заявка устарела.")
+        return
+    invitation = db.get_client_invitation(callback_data.invitation_id)
+    await edit_bound_message(
+        callback.message,
+        "✅ Заявка отклонена. Для новой попытки перевыпусти ссылку.",
+        reply_markup=invitation_details_keyboard(invitation)
+        if invitation
+        else pending_clients_keyboard(db),
+    )
+
+
+@router.callback_query(AdminInviteCallback.filter(F.action == "delete"))
+async def delete_invitation(
+    callback: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    callback_data: AdminInviteCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    db.delete_client_invitation(callback_data.invitation_id, callback.from_user.id)
+    await edit_bound_message(
+        callback.message,
+        "✅ Приглашение удалено.",
+        reply_markup=pending_clients_keyboard(db),
+    )
+
+
+@router.callback_query(AdminInviteCallback.filter(F.action == "discount"))
+async def show_invitation_discount(
+    callback: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    callback_data: AdminInviteCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    invitation = db.get_client_invitation(callback_data.invitation_id)
+    if not invitation:
+        await edit_bound_message(callback.message, "❌ Приглашение не найдено.")
+        return
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"{value}%",
+                callback_data=AdminInviteCallback(
+                    action="discount_set",
+                    invitation_id=callback_data.invitation_id,
+                    value=value,
+                ).pack(),
+            )
+            for value in values
+        ]
+        for values in ((0, 10, 25), (30, 50, 75))
+    ]
+    rows.extend(
+        [
+            [
+                InlineKeyboardButton(
+                    text="✏️ Другое значение",
+                    callback_data=AdminInviteCallback(
+                        action="discount_custom",
+                        invitation_id=callback_data.invitation_id,
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=AdminInviteCallback(
+                        action="view", invitation_id=callback_data.invitation_id
+                    ).pack(),
+                )
+            ],
+        ]
+    )
+    await edit_bound_message(
+        callback.message,
+        f"Скидка для @{invitation['expected_username']}: {invitation['promo']}%",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@router.callback_query(AdminInviteCallback.filter(F.action == "discount_set"))
+async def set_invitation_discount(
+    callback: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    callback_data: AdminInviteCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id) or not db.set_invitation_promo(
+        callback_data.invitation_id, callback.from_user.id, callback_data.value
+    ):
+        await edit_bound_message(callback.message, "❌ Не удалось сохранить скидку.")
+        return
+    invitation = db.get_client_invitation(callback_data.invitation_id)
+    await edit_bound_message(
+        callback.message,
+        f"✅ Скидка {callback_data.value}% сохранена.",
+        reply_markup=invitation_details_keyboard(invitation),
+    )
+
+
+@router.callback_query(AdminInviteCallback.filter(F.action == "discount_custom"))
+async def request_invitation_discount(
+    callback: types.CallbackQuery,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+    callback_data: AdminInviteCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    admin_workflows.set(
+        callback.from_user.id,
+        "await_invitation_discount",
+        invitation_id=callback_data.invitation_id,
+        service_chat_id=callback.message.chat.id,
+        service_message_id=callback.message.message_id,
+    )
+    await edit_bound_message(
+        callback.message,
+        "Введи скидку целым числом от 0 до 90.",
+        reply_markup=cancel_keyboard(),
+    )
+
+
+@router.callback_query(AdminInviteCallback.filter(F.action == "complimentary"))
+async def confirm_invitation_complimentary(
+    callback: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    callback_data: AdminInviteCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    invitation = db.get_client_invitation(callback_data.invitation_id)
+    if not invitation:
+        await edit_bound_message(callback.message, "❌ Приглашение не найдено.")
+        return
+    enabled = not bool(invitation["is_complimentary"])
+    await edit_bound_message(
+        callback.message,
+        ("Назначить бесплатный доступ?" if enabled else "Отменить бесплатный доступ?"),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Подтвердить",
+                        callback_data=AdminInviteCallback(
+                            action="complimentary_confirm",
+                            invitation_id=callback_data.invitation_id,
+                            value=int(enabled),
+                        ).pack(),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="⬅️ Назад",
+                        callback_data=AdminInviteCallback(
+                            action="view", invitation_id=callback_data.invitation_id
+                        ).pack(),
+                    )
+                ],
+            ]
+        ),
+    )
+
+
+@router.callback_query(
+    AdminInviteCallback.filter(F.action == "complimentary_confirm")
+)
+async def set_invitation_complimentary(
+    callback: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    callback_data: AdminInviteCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    enabled = bool(callback_data.value)
+    if not is_admin(callback.from_user.id) or not db.set_invitation_complimentary(
+        callback_data.invitation_id, callback.from_user.id, enabled
+    ):
+        await edit_bound_message(callback.message, "❌ Не удалось изменить доступ.")
+        return
+    invitation = db.get_client_invitation(callback_data.invitation_id)
+    await edit_bound_message(
+        callback.message,
+        "✅ Бесплатный статус обновлён.",
+        reply_markup=invitation_details_keyboard(invitation),
     )
 
 
@@ -843,10 +1360,21 @@ async def apply_client_ban(
         await edit_bound_message(callback.message, "❌ Клиент не найден.")
         return
     if result["failed"]:
+        primary = db.get_primary_client_peer(callback_data.user_id)
+        operation = "sync_client_state" if primary else "create_peer"
+        client = db.get_admin_client_details(callback_data.user_id) or {}
         db.add_provisioning_task(
             callback_data.user_id,
-            "sync_client_state",
-            {},
+            operation,
+            {}
+            if primary
+            else {
+                "username": client.get("telegram_username") or "",
+                "peer_name": client.get("telegram_username")
+                or str(callback_data.user_id),
+                "expire_date": "2099-12-31 23:59:59",
+                "tariff_key": "complimentary",
+            },
             f"Failed peers: {result['failed']}",
         )
     state = "забанен" if banned else "разбанен"
@@ -1206,7 +1734,116 @@ async def choose_discount_client(
         )
         return
     await edit_bound_message(
-        callback.message, format_client(client), reply_markup=discount_keyboard(user_id)
+        callback.message,
+        format_client(client),
+        reply_markup=discount_keyboard(
+            user_id, bool(client.get("is_complimentary"))
+        ),
+    )
+
+
+@router.callback_query(AdminClientCallback.filter(F.action == "complimentary"))
+async def confirm_client_complimentary(
+    callback: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    callback_data: AdminClientCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    client = db.get_admin_client_details(callback_data.user_id)
+    if not client:
+        await edit_bound_message(callback.message, "❌ Клиент не найден.")
+        return
+    enabled = not bool(client.get("is_complimentary"))
+    await edit_bound_message(
+        callback.message,
+        (
+            "Назначить клиенту бессрочный бесплатный доступ?"
+            if enabled
+            else "Отменить бесплатный доступ и вернуться к оплаченной подписке?"
+        ),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Подтвердить",
+                        callback_data=AdminClientCallback(
+                            action=(
+                                "complimentary_enable_confirm"
+                                if enabled
+                                else "complimentary_disable_confirm"
+                            ),
+                            user_id=callback_data.user_id,
+                        ).pack(),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="⬅️ Назад",
+                        callback_data=AdminClientCallback(
+                            action="discount", user_id=callback_data.user_id
+                        ).pack(),
+                    )
+                ],
+            ]
+        ),
+    )
+
+
+@router.callback_query(
+    AdminClientCallback.filter(
+        F.action.in_(
+            {"complimentary_enable_confirm", "complimentary_disable_confirm"}
+        )
+    )
+)
+async def set_client_complimentary(
+    callback: types.CallbackQuery,
+    db: Database,
+    cascade_router: CascadeRouter,
+    safe_answer_callback,
+    callback_data: AdminClientCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    client = db.get_admin_client_details(callback_data.user_id)
+    if not client:
+        await edit_bound_message(callback.message, "❌ Клиент не найден.")
+        return
+    enabled = callback_data.action == "complimentary_enable_confirm"
+    result = await cascade_router.set_client_complimentary(
+        callback_data.user_id, callback.from_user.id, enabled
+    )
+    warning = ""
+    if result["failed"]:
+        primary = db.get_primary_client_peer(callback_data.user_id)
+        operation = "sync_client_state" if primary else "create_peer"
+        payload = (
+            {}
+            if primary
+            else {
+                "username": client.get("telegram_username") or "",
+                "peer_name": client.get("telegram_username")
+                or str(callback_data.user_id),
+                "expire_date": "2099-12-31 23:59:59",
+                "tariff_key": "complimentary",
+            }
+        )
+        db.add_provisioning_task(
+            callback_data.user_id,
+            operation,
+            payload,
+            f"Failed peers: {result['failed']}",
+        )
+        warning = "\n⚠️ Синхронизация VPN поставлена в очередь."
+    await edit_bound_message(
+        callback.message,
+        ("✅ Бесплатный доступ назначен." if enabled else "✅ Бесплатный доступ отменён.")
+        + warning,
+        reply_markup=discount_keyboard(callback_data.user_id, enabled),
     )
 
 
@@ -1386,7 +2023,7 @@ async def download_paid_client_config(
             reply_markup=config_error_back_keyboard(callback_data.user_id, callback_data.peer_id),
         )
         return
-    if config.get("payment_status") != "paid":
+    if not db.has_active_access(callback_data.user_id):
         await edit_bound_message(
             callback.message,
             "❌ Скачивание доступно только для клиентов с подтверждённой оплатой.",
@@ -1455,8 +2092,9 @@ async def start_additional_config(
     await safe_answer_callback(callback)
     if not is_admin(callback.from_user.id):
         return
-    if not db.get_primary_client_peer(callback_data.user_id) or not db.get_subscription_expiry(
-        callback_data.user_id
+    access = db.get_client_access_state(callback_data.user_id)
+    if not db.get_primary_client_peer(callback_data.user_id) or not (
+        access.cascade_expiry or access.paid_expiry
     ):
         await edit_bound_message(
             callback.message,
@@ -1988,7 +2626,125 @@ async def capture_admin_input(
     if not flow:
         return
     state = flow["state"]
-    if state == "await_ban_reason":
+    if state == "await_client_identity":
+        identity = (message.text or "").strip()
+        if identity.isdigit():
+            user_id = int(identity)
+            if user_id <= 0:
+                await edit_telegram_text(
+                    bot,
+                    flow["service_chat_id"],
+                    flow["service_message_id"],
+                    "Telegram ID должен быть положительным числом.",
+                    reply_markup=cancel_keyboard(),
+                )
+                return
+            client = db.admin_add_client(user_id, message.from_user.id)
+            admin_workflows.clear(message.from_user.id)
+            await edit_telegram_text(
+                bot,
+                flow["service_chat_id"],
+                flow["service_message_id"],
+                format_client(client),
+                reply_markup=client_card_keyboard(
+                    user_id, bool(client.get("is_banned"))
+                ),
+            )
+        else:
+            username = identity.lstrip("@").casefold()
+            if not username:
+                await edit_telegram_text(
+                    bot,
+                    flow["service_chat_id"],
+                    flow["service_message_id"],
+                    "Введи числовой Telegram ID или @username.",
+                    reply_markup=cancel_keyboard(),
+                )
+                return
+            matches = db.find_clients_by_username(username)
+            if len(matches) == 1:
+                client = db.get_admin_client_details(
+                    int(matches[0]["telegram_user_id"])
+                )
+                admin_workflows.clear(message.from_user.id)
+                await edit_telegram_text(
+                    bot,
+                    flow["service_chat_id"],
+                    flow["service_message_id"],
+                    format_client(client),
+                    reply_markup=client_card_keyboard(
+                        int(client["telegram_user_id"]),
+                        bool(client.get("is_banned")),
+                    ),
+                )
+            elif len(matches) > 1:
+                await edit_telegram_text(
+                    bot,
+                    flow["service_chat_id"],
+                    flow["service_message_id"],
+                    "Найдено несколько клиентов с этим username. Используй Telegram ID.",
+                    reply_markup=cancel_keyboard(),
+                )
+                return
+            else:
+                try:
+                    invitation = db.create_client_invitation(
+                        username, message.from_user.id
+                    )
+                except ValueError:
+                    await edit_telegram_text(
+                        bot,
+                        flow["service_chat_id"],
+                        flow["service_message_id"],
+                        "Некорректный Telegram username.",
+                        reply_markup=cancel_keyboard(),
+                    )
+                    return
+                admin_workflows.clear(message.from_user.id)
+                link = (
+                    await create_start_link(
+                        bot, f"claim_{invitation['token']}", encode=False
+                    )
+                    if invitation.get("token")
+                    else None
+                )
+                await edit_telegram_text(
+                    bot,
+                    flow["service_chat_id"],
+                    flow["service_message_id"],
+                    format_invitation(invitation, link),
+                    reply_markup=invitation_details_keyboard(invitation),
+                )
+        with suppress(Exception):
+            await message.delete()
+    elif state == "await_invitation_discount":
+        try:
+            value = int((message.text or "").strip())
+        except ValueError:
+            value = -1
+        if not 0 <= value <= 90 or not db.set_invitation_promo(
+            int(flow["invitation_id"]), message.from_user.id, value
+        ):
+            await edit_telegram_text(
+                bot,
+                flow["service_chat_id"],
+                flow["service_message_id"],
+                "Скидка должна быть целым числом от 0 до 90.",
+                reply_markup=cancel_keyboard(),
+            )
+            return
+        invitation = db.get_client_invitation(int(flow["invitation_id"]))
+        admin_workflows.clear(message.from_user.id)
+        await edit_telegram_text(
+            bot,
+            flow["service_chat_id"],
+            flow["service_message_id"],
+            f"✅ Скидка {value}% сохранена.",
+            reply_markup=invitation_details_keyboard(invitation),
+        )
+        with suppress(Exception):
+            await message.delete()
+    elif state == "await_ban_reason":
         reason = " ".join((message.text or "").split())
         if not reason or len(reason) > 500:
             await edit_telegram_text(

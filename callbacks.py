@@ -53,6 +53,12 @@ class AdminConfigCallback(CallbackData, prefix="acfg"):
     value: int = 0
 
 
+class AdminInviteCallback(CallbackData, prefix="ainv"):
+    action: str
+    invitation_id: int
+    value: int = 0
+
+
 class ClientConfigCallback(CallbackData, prefix="cfg"):
     action: str
     peer_id: int = 0

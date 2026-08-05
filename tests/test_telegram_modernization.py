@@ -1116,7 +1116,9 @@ class TelegramDatabaseTests(unittest.TestCase):
         self.assertIn("Клиент не найден", callback.message.edit_text.await_args.args[0])
 
     def test_admin_download_sends_file_privately_and_audits(self):
-        self.db.ensure_subscription(10, "alice", "2000-01-01 00:00:00", "paid", "30_days", "stars")
+        self.db.ensure_subscription(
+            10, "alice", "2030-01-01 00:00:00", "paid", "30_days", "stars"
+        )
         self.db.save_client_peer(
             10,
             "fin-1",

@@ -54,6 +54,7 @@ async def handle_pay_stars_callback(
     user_action_locks: UserActionLocks,
     runtime_metrics,
     callback_data: PaymentMethodCallback | None = None,
+    db: Database | None = None,
 ):
     """Handle Telegram Stars payment selection."""
     # Extract tariff_key and user_id from callback_data (format: pay_stars_14_days_123456789)
@@ -72,6 +73,9 @@ async def handle_pay_stars_callback(
     # Ensure callback belongs to the correct user
     if callback_query.from_user.id != user_id:
         await safe_answer_callback(callback_query, "❌ Ошибка: неверный пользователь")
+        return
+    if db is not None and db.get_client_access_state(user_id).source == "complimentary":
+        await safe_answer_callback(callback_query, "🎁 Бесплатный доступ уже активен")
         return
 
     if not payment_manager.is_tariff_enabled(tariff_key):
@@ -134,6 +138,7 @@ async def handle_pay_yookassa_callback(
     user_action_locks: UserActionLocks,
     runtime_metrics,
     callback_data: PaymentMethodCallback | None = None,
+    db: Database | None = None,
 ):
     """Handle YooKassa payment selection."""
     # Extract tariff_key and user_id from callback_data (format: pay_yookassa_14_days_123456789)
@@ -152,6 +157,9 @@ async def handle_pay_yookassa_callback(
     # Ensure callback belongs to the correct user
     if callback_query.from_user.id != user_id:
         await safe_answer_callback(callback_query, "❌ Ошибка: неверный пользователь")
+        return
+    if db is not None and db.get_client_access_state(user_id).source == "complimentary":
+        await safe_answer_callback(callback_query, "🎁 Бесплатный доступ уже активен")
         return
 
     if not payment_manager.is_tariff_enabled(tariff_key):

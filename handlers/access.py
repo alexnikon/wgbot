@@ -522,7 +522,7 @@ async def confirm_client_config_deletion(
     config = db.get_client_peer(callback_data.peer_id, user_id)
     if (
         db.is_client_banned(user_id)
-        or not db.has_active_subscription(user_id)
+        or not db.has_active_access(user_id)
         or not config
         or config["role"] != "additional"
         or not config["admin_enabled"]
@@ -573,7 +573,7 @@ async def delete_client_config(
     config = db.get_client_peer(callback_data.peer_id, user_id)
     if (
         db.is_client_banned(user_id)
-        or not db.has_active_subscription(user_id)
+        or not db.has_active_access(user_id)
         or not config
         or config["role"] != "additional"
         or not config["admin_enabled"]
@@ -628,7 +628,7 @@ async def capture_client_config_name(
     flow = get_client_config_workflow(db, user_id)
     if not flow or flow.get("state") not in {"await_create_name", "await_rename_name"}:
         return
-    if db.is_client_banned(user_id) or not db.has_active_subscription(user_id):
+    if db.is_client_banned(user_id) or not db.has_active_access(user_id):
         clear_client_config_workflow(db, user_id)
         return
     try:
@@ -856,6 +856,13 @@ async def handle_extend_callback(
 
     user_id = callback_query.from_user.id
     existing_peer = db.get_peer_by_telegram_id(user_id)
+    if db.get_client_access_state(user_id).source == "complimentary":
+        await safe_edit_callback_message(
+            callback_query.message,
+            "🎁 У тебя действует бесплатный доступ без ограничения срока.",
+            reply_markup=create_main_menu_keyboard(user_id),
+        )
+        return
     if not existing_peer:
         error_text = """
 ❌ У тебя нет активного VPN доступа.

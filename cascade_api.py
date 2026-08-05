@@ -763,8 +763,10 @@ class CascadeRouter:
         async with user_lock:
             if not self.db.get_admin_client_details(user_id):
                 raise CascadeNotFound(f"No client profile for user {user_id}")
-            if self.db.is_client_banned(user_id):
-                raise CascadeError("Banned clients cannot be provisioned")
+            access = self.db.get_client_access_state(user_id)
+            if not access.active:
+                raise CascadeError("Client access is not active")
+            expire_date = access.cascade_expiry or expire_date
             existing = self.db.get_primary_client_peer(user_id)
             if existing:
                 try:
@@ -921,9 +923,9 @@ class CascadeRouter:
     ) -> tuple[dict[str, Any], bytes]:
         """Download a paid client's managed config without changing access state."""
         peer = self.db.get_admin_managed_config(peer_id, user_id)
-        if not peer or peer["payment_status"] != "paid":
+        if not peer or not self.db.has_active_access(user_id):
             raise CascadeNotFound(
-                f"No paid managed configuration {peer_id} for user {user_id}"
+                f"No active managed configuration {peer_id} for user {user_id}"
             )
         try:
             content = await self.get_api(peer["server_key"]).download_config(
@@ -974,7 +976,8 @@ class CascadeRouter:
     ) -> dict[str, Any]:
         config_name = normalize_config_name(config_name)
         primary = self.db.get_primary_client_peer(user_id)
-        expire_date = self.db.get_subscription_expiry(user_id)
+        access = self.db.get_client_access_state(user_id)
+        expire_date = access.cascade_expiry or access.paid_expiry
         if not primary or not expire_date:
             raise CascadeError(
                 "An additional configuration requires a primary peer and expiration date"
@@ -985,8 +988,8 @@ class CascadeRouter:
         if self_service_limit is not None:
             if self.db.is_client_banned(user_id):
                 raise CascadeError("Banned clients cannot create configurations")
-            if not self.db.has_active_subscription(user_id):
-                raise CascadeError("An active subscription is required")
+            if not self.db.has_active_access(user_id):
+                raise CascadeError("Active access is required")
             if self.db.count_additional_configs(user_id) >= self_service_limit:
                 raise CascadeCapacityError("Additional configuration limit reached")
             inherited_groups = {
@@ -1026,7 +1029,8 @@ class CascadeRouter:
             saved = False
             try:
                 primary = self.db.get_primary_client_peer(user_id)
-                expire_date = self.db.get_subscription_expiry(user_id)
+                access = self.db.get_client_access_state(user_id)
+                expire_date = access.cascade_expiry or access.paid_expiry
                 if not primary or not expire_date:
                     raise CascadeError(
                         "An additional configuration requires a primary peer and expiration date"
@@ -1034,8 +1038,8 @@ class CascadeRouter:
                 if self_service_limit is not None:
                     if self.db.is_client_banned(user_id):
                         raise CascadeError("Banned clients cannot create configurations")
-                    if not self.db.has_active_subscription(user_id):
-                        raise CascadeError("An active subscription is required")
+                    if not self.db.has_active_access(user_id):
+                        raise CascadeError("Active access is required")
                     if self.db.count_additional_configs(user_id) >= self_service_limit:
                         raise CascadeCapacityError("Additional configuration limit reached")
                     current_server = self.get_server(server_key)
@@ -1156,13 +1160,8 @@ class CascadeRouter:
         api = self.get_api(peer["server_key"])
         try:
             await api.get_peer(peer["cascade_peer_id"], peer["interface_id"])
-            expire_date = self.db.get_subscription_expiry(user_id)
-            is_future = bool(
-                expire_date
-                and datetime.fromisoformat(expire_date).replace(tzinfo=UTC)
-                > datetime.now(UTC)
-            )
-            enabled = active and is_future and not self.db.is_client_banned(user_id)
+            access = self.db.get_client_access_state(user_id)
+            enabled = active and access.active
             if enabled:
                 await api.enable_peer(peer["cascade_peer_id"], peer["interface_id"])
             else:
@@ -1297,6 +1296,9 @@ class CascadeRouter:
             user_lock = asyncio.Lock()
             self._user_locks[user_id] = user_lock
         async with user_lock:
+            access = self.db.get_client_access_state(user_id)
+            if access.source == "complimentary" and access.cascade_expiry:
+                expire_date = access.cascade_expiry
             return await self._sync_user_access_unlocked(user_id, expire_date)
 
     async def sync_client_state(self, user_id: int) -> dict[str, int]:
@@ -1308,8 +1310,111 @@ class CascadeRouter:
         async with user_lock:
             if not self.db.get_admin_client_details(user_id):
                 raise CascadeNotFound(f"No client profile for user {user_id}")
-            expire_date = self.db.get_subscription_expiry(user_id) or "1970-01-01 00:00:00"
+            access = self.db.get_client_access_state(user_id)
+            expire_date = access.cascade_expiry or "1970-01-01 00:00:00"
             return await self._sync_user_access_unlocked(user_id, expire_date)
+
+    async def set_client_complimentary(
+        self, user_id: int, admin_id: int, enabled: bool
+    ) -> dict[str, int]:
+        """Set complimentary access and reconcile or create the primary peer."""
+        user_lock = self._user_locks.get(user_id)
+        if user_lock is None:
+            user_lock = asyncio.Lock()
+            self._user_locks[user_id] = user_lock
+        async with user_lock:
+            client = self.db.get_admin_client_details(user_id)
+            if not client or not self.db.set_client_complimentary(
+                user_id, admin_id, enabled
+            ):
+                raise CascadeNotFound(f"No client profile for user {user_id}")
+            access = self.db.get_client_access_state(user_id)
+            primary = self.db.get_primary_client_peer(user_id)
+            if enabled and access.active and not primary:
+                peer_name = str(client.get("telegram_username") or user_id)[:50]
+                try:
+                    await self._create_user_peer_unlocked(
+                        user_id,
+                        str(client.get("telegram_username") or "") or None,
+                        peer_name,
+                        str(access.cascade_expiry),
+                    )
+                    result = {
+                        "total": 1,
+                        "updated": 1,
+                        "missing": 0,
+                        "failed": 0,
+                        "created": 1,
+                    }
+                    self.db.log_client_state_sync(
+                        admin_id,
+                        user_id,
+                        "admin_enable_complimentary_sync",
+                        result,
+                    )
+                    return result
+                except Exception:
+                    logger.exception(
+                        "Failed to provision complimentary client %s", user_id
+                    )
+                    result = {
+                        "total": 1,
+                        "updated": 0,
+                        "missing": 0,
+                        "failed": 1,
+                        "created": 0,
+                    }
+                    self.db.log_client_state_sync(
+                        admin_id,
+                        user_id,
+                        "admin_enable_complimentary_sync",
+                        result,
+                    )
+                    return result
+            expiry = access.cascade_expiry or "1970-01-01 00:00:00"
+            result = await self._sync_user_access_unlocked(user_id, expiry)
+            result["created"] = 0
+            self.db.log_client_state_sync(
+                admin_id,
+                user_id,
+                "admin_enable_complimentary_sync"
+                if enabled
+                else "admin_disable_complimentary_sync",
+                result,
+            )
+            return result
+
+    async def ensure_client_access(self, user_id: int) -> dict[str, int]:
+        """Create a missing primary or synchronize the current effective access."""
+        user_lock = self._user_locks.get(user_id)
+        if user_lock is None:
+            user_lock = asyncio.Lock()
+            self._user_locks[user_id] = user_lock
+        async with user_lock:
+            client = self.db.get_admin_client_details(user_id)
+            access = self.db.get_client_access_state(user_id)
+            if not client or not access.active:
+                raise CascadeError("Client access is not active")
+            if not self.db.get_primary_client_peer(user_id):
+                peer_name = str(client.get("telegram_username") or user_id)[:50]
+                await self._create_user_peer_unlocked(
+                    user_id,
+                    str(client.get("telegram_username") or "") or None,
+                    peer_name,
+                    str(access.cascade_expiry),
+                )
+                return {
+                    "total": 1,
+                    "updated": 1,
+                    "missing": 0,
+                    "failed": 0,
+                    "created": 1,
+                }
+            result = await self._sync_user_access_unlocked(
+                user_id, str(access.cascade_expiry)
+            )
+            result["created"] = 0
+            return result
 
     async def set_client_ban(
         self,
@@ -1328,7 +1433,39 @@ class CascadeRouter:
                 raise CascadeNotFound(f"No client profile for user {user_id}")
             if not self.db.set_client_ban(user_id, admin_id, banned, reason):
                 raise CascadeNotFound(f"No client profile for user {user_id}")
-            expire_date = self.db.get_subscription_expiry(user_id) or "1970-01-01 00:00:00"
+            access = self.db.get_client_access_state(user_id)
+            if not banned and access.active and not self.db.get_primary_client_peer(user_id):
+                client = self.db.get_admin_client_details(user_id) or {}
+                try:
+                    await self._create_user_peer_unlocked(
+                        user_id,
+                        str(client.get("telegram_username") or "") or None,
+                        str(client.get("telegram_username") or user_id)[:50],
+                        str(access.cascade_expiry),
+                    )
+                    result = {
+                        "total": 1,
+                        "updated": 1,
+                        "missing": 0,
+                        "failed": 0,
+                    }
+                    self.db.log_client_state_sync(
+                        admin_id, user_id, "admin_unban_client_sync", result
+                    )
+                    return result
+                except Exception:
+                    logger.exception("Failed to provision unbanned client %s", user_id)
+                    result = {
+                        "total": 1,
+                        "updated": 0,
+                        "missing": 0,
+                        "failed": 1,
+                    }
+                    self.db.log_client_state_sync(
+                        admin_id, user_id, "admin_unban_client_sync", result
+                    )
+                    return result
+            expire_date = access.cascade_expiry or "1970-01-01 00:00:00"
             result = await self._sync_user_access_unlocked(user_id, expire_date)
             self.db.log_client_state_sync(
                 admin_id,

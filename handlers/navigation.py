@@ -27,11 +27,46 @@ async def cmd_start(
     chat_panel,
     clear_admin_state,
     user_action_locks,
+    notify_admins=None,
 ):
     """Reset transient UI state and restore the main control panel."""
     user_id = message.from_user.id
     await chat_panel.delete_user_message(message)
     clear_admin_state(user_id)
+    parts = (getattr(message, "text", None) or "").split(maxsplit=1)
+    payload = parts[1].strip() if len(parts) == 2 else ""
+    if payload.startswith("claim_"):
+        invitation = db.claim_client_invitation(
+            payload.removeprefix("claim_"),
+            user_id,
+            getattr(message.from_user, "username", None),
+        )
+        if invitation:
+            if notify_admins is not None:
+                await notify_admins(
+                    "⏳ Новая заявка на привязку клиента\n\n"
+                    f"Ожидался: @{invitation['expected_username']}\n"
+                    f"Telegram ID: {user_id}\n"
+                    f"Username: @{getattr(message.from_user, 'username', None) or 'нет'}\n"
+                    "Подтверди её в разделе «Ожидают привязки»."
+                )
+            await chat_panel.restore_or_create(
+                message.chat.id,
+                user_id,
+                "✅ Заявка отправлена администратору. Доступ появится после подтверждения.",
+                create_main_menu_keyboard(user_id),
+            )
+            return
+        await chat_panel.restore_or_create(
+            message.chat.id,
+            user_id,
+            "❌ Ссылка недействительна или истекла. Попроси администратора перевыпустить её.",
+            create_main_menu_keyboard(user_id),
+        )
+        return
+    client_reader = getattr(db, "get_admin_client_details", None)
+    if callable(client_reader) and client_reader(user_id):
+        db.upsert_client(user_id, getattr(message.from_user, "username", None))
     await chat_panel.restore_or_create(
         message.chat.id,
         user_id,
@@ -44,6 +79,7 @@ async def cmd_start(
 @router.callback_query(F.data == "pay")
 async def handle_pay_callback(
     callback_query: types.CallbackQuery,
+    db: Database,
     payment_manager: PaymentManager,
     safe_answer_callback,
     safe_edit_callback_message,
@@ -52,6 +88,12 @@ async def handle_pay_callback(
     user_id = callback_query.from_user.id
 
     await safe_answer_callback(callback_query)
+    if db.get_client_access_state(user_id).source == "complimentary":
+        await safe_edit_callback_message(
+            callback_query.message,
+            "🎁 У тебя уже действует бесплатный доступ.",
+        )
+        return
 
     payment_text, keyboard = await payment_manager.get_payment_selection_view(user_id)
     await safe_edit_callback_message(

@@ -1,9 +1,11 @@
 import json
 import logging
+import secrets
 import sqlite3
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -12,6 +14,19 @@ from config import DATABASE_FILE
 logger = logging.getLogger(__name__)
 DEFAULT_PRIMARY_CONFIG_NAME = "Основной конфиг"
 MAX_CONFIG_NAME_LENGTH = 48
+COMPLIMENTARY_CASCADE_EXPIRY = "2099-12-31 23:59:59"
+
+
+@dataclass(frozen=True)
+class ClientAccessState:
+    """Effective access after applying ban, complimentary, and paid precedence."""
+
+    active: bool
+    source: str
+    cascade_expiry: str | None
+    is_banned: bool
+    is_complimentary: bool
+    paid_expiry: str | None
 
 
 def normalize_config_name(value: str) -> str:
@@ -157,6 +172,24 @@ class Database:
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
+                CREATE TABLE IF NOT EXISTS client_invitations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    expected_username TEXT NOT NULL,
+                    token TEXT UNIQUE,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    promo INTEGER NOT NULL DEFAULT 0,
+                    is_complimentary INTEGER NOT NULL DEFAULT 0,
+                    complimentary_at TEXT,
+                    complimentary_by INTEGER,
+                    claimant_user_id INTEGER,
+                    claimant_username TEXT,
+                    claimed_at TEXT,
+                    created_by INTEGER NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS star_transactions (
                     transaction_id TEXT NOT NULL,
                     direction TEXT NOT NULL,
@@ -214,6 +247,11 @@ class Database:
             self._ensure_column(conn, "clients", "banned_by", "INTEGER")
             self._ensure_column(conn, "clients", "ban_reason", "TEXT")
             self._ensure_column(
+                conn, "clients", "is_complimentary", "INTEGER NOT NULL DEFAULT 0"
+            )
+            self._ensure_column(conn, "clients", "complimentary_at", "TEXT")
+            self._ensure_column(conn, "clients", "complimentary_by", "INTEGER")
+            self._ensure_column(
                 conn, "clients", "telegram_reachability_updated_at", "TEXT"
             )
             self._ensure_column(conn, "client_peers", "config_name", "TEXT")
@@ -268,6 +306,13 @@ class Database:
                 """
                 CREATE INDEX IF NOT EXISTS idx_provisioning_claim
                 ON provisioning_tasks(status, next_attempt_at, lease_until)
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_active_invitation_username
+                ON client_invitations(lower(expected_username))
+                WHERE status IN ('pending', 'claim_pending')
                 """
             )
             conn.execute(
@@ -415,6 +460,444 @@ class Database:
                 (user_id,),
             ).fetchone()
         return row is not None
+
+    def get_client_access_state(self, user_id: int) -> ClientAccessState:
+        """Return the authoritative access state for one client."""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT c.is_banned, c.is_complimentary,
+                       s.expire_date, s.is_active, s.payment_status
+                FROM clients c
+                LEFT JOIN subscriptions s USING(telegram_user_id)
+                WHERE c.telegram_user_id=?
+                """,
+                (user_id,),
+            ).fetchone()
+        if not row:
+            return ClientAccessState(False, "none", None, False, False, None)
+        is_banned = bool(row["is_banned"])
+        is_complimentary = bool(row["is_complimentary"])
+        paid_expiry = str(row["expire_date"]) if row["expire_date"] else None
+        try:
+            paid_active = bool(
+                row["is_active"]
+                and row["payment_status"] == "paid"
+                and paid_expiry
+                and datetime.fromisoformat(paid_expiry).replace(tzinfo=UTC)
+                > datetime.now(UTC)
+            )
+        except ValueError:
+            paid_active = False
+        if is_banned:
+            return ClientAccessState(
+                False, "none", None, True, is_complimentary, paid_expiry
+            )
+        if is_complimentary:
+            return ClientAccessState(
+                True,
+                "complimentary",
+                COMPLIMENTARY_CASCADE_EXPIRY,
+                False,
+                True,
+                paid_expiry,
+            )
+        if paid_active:
+            return ClientAccessState(
+                True, "paid", paid_expiry, False, False, paid_expiry
+            )
+        return ClientAccessState(False, "none", None, False, False, paid_expiry)
+
+    def has_active_access(self, user_id: int) -> bool:
+        return self.get_client_access_state(user_id).active
+
+    def set_client_complimentary(
+        self, user_id: int, admin_id: int, enabled: bool
+    ) -> bool:
+        """Set complimentary access without mutating paid subscription history."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE clients SET is_complimentary=?,
+                    complimentary_at=CASE WHEN ?=1 THEN CURRENT_TIMESTAMP ELSE NULL END,
+                    complimentary_by=CASE WHEN ?=1 THEN ? ELSE NULL END,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE telegram_user_id=?
+                """,
+                (int(enabled), int(enabled), int(enabled), admin_id, user_id),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                return False
+            conn.execute(
+                "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                (
+                    f"telegram:{user_id}",
+                    "admin_enable_complimentary"
+                    if enabled
+                    else "admin_disable_complimentary",
+                    json.dumps(
+                        {"admin_id": admin_id, "client_id": user_id}, sort_keys=True
+                    ),
+                ),
+            )
+            conn.commit()
+        return True
+
+    def find_clients_by_username(self, username: str) -> list[dict[str, Any]]:
+        normalized = username.strip().lstrip("@").casefold()
+        if not normalized:
+            return []
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT * FROM clients
+                WHERE lower(telegram_username)=?
+                ORDER BY telegram_user_id
+                """,
+                (normalized,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def _new_invitation_token() -> str:
+        return secrets.token_urlsafe(18)
+
+    def create_client_invitation(
+        self, expected_username: str, admin_id: int, ttl_days: int = 7
+    ) -> dict[str, Any]:
+        normalized = expected_username.strip().lstrip("@").casefold()
+        if not normalized or not normalized.isascii() or len(normalized) > 32 or not all(
+            character.isalnum() or character == "_" for character in normalized
+        ):
+            raise ValueError("Invalid Telegram username")
+        token = self._new_invitation_token()
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                """
+                SELECT * FROM client_invitations
+                WHERE lower(expected_username)=?
+                  AND status IN ('pending', 'claim_pending')
+                """,
+                (normalized,),
+            ).fetchone()
+            if existing:
+                conn.rollback()
+                return dict(existing)
+            cursor = conn.execute(
+                """
+                INSERT INTO client_invitations(
+                    expected_username, token, created_by, expires_at
+                ) VALUES (?, ?, ?, datetime('now', ?))
+                """,
+                (normalized, token, admin_id, f"{int(ttl_days):+d} days"),
+            )
+            invitation_id = int(cursor.lastrowid)
+            conn.execute(
+                "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                (
+                    f"invite:{invitation_id}",
+                    "admin_create_client_invitation",
+                    json.dumps(
+                        {
+                            "admin_id": admin_id,
+                            "expected_username": normalized,
+                        },
+                        sort_keys=True,
+                    ),
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM client_invitations WHERE id=?", (invitation_id,)
+            ).fetchone()
+            conn.commit()
+        return dict(row)
+
+    def get_client_invitation(self, invitation_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT *, CASE
+                    WHEN status='pending' AND expires_at <= datetime('now') THEN 'expired'
+                    ELSE status END AS display_status
+                FROM client_invitations WHERE id=?
+                """,
+                (invitation_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_client_invitations(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT *, CASE
+                    WHEN status='pending' AND expires_at <= datetime('now') THEN 'expired'
+                    ELSE status END AS display_status
+                FROM client_invitations
+                WHERE status != 'claimed'
+                ORDER BY created_at DESC, id DESC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def reissue_client_invitation(
+        self, invitation_id: int, admin_id: int, ttl_days: int = 7
+    ) -> dict[str, Any] | None:
+        token = self._new_invitation_token()
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE client_invitations SET token=?, status='pending',
+                    claimant_user_id=NULL, claimant_username=NULL, claimed_at=NULL,
+                    expires_at=datetime('now', ?), updated_at=CURRENT_TIMESTAMP
+                WHERE id=? AND status != 'claimed'
+                """,
+                (token, f"{int(ttl_days):+d} days", invitation_id),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                return None
+            conn.execute(
+                "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                (
+                    f"invite:{invitation_id}",
+                    "admin_reissue_client_invitation",
+                    json.dumps({"admin_id": admin_id}, sort_keys=True),
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM client_invitations WHERE id=?", (invitation_id,)
+            ).fetchone()
+            conn.commit()
+        return dict(row)
+
+    def claim_client_invitation(
+        self, token: str, user_id: int, username: str | None
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT * FROM client_invitations
+                WHERE token=? AND status='pending' AND expires_at > datetime('now')
+                """,
+                (token,),
+            ).fetchone()
+            if not row:
+                conn.rollback()
+                return None
+            conn.execute(
+                """
+                UPDATE client_invitations SET token=NULL, status='claim_pending',
+                    claimant_user_id=?, claimant_username=?, claimed_at=CURRENT_TIMESTAMP,
+                    updated_at=CURRENT_TIMESTAMP WHERE id=?
+                """,
+                (user_id, (username or "").strip().lstrip("@"), int(row["id"])),
+            )
+            conn.execute(
+                "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                (
+                    f"invite:{int(row['id'])}",
+                    "client_claim_invitation",
+                    json.dumps(
+                        {"claimant_user_id": user_id, "claimant_username": username},
+                        sort_keys=True,
+                    ),
+                ),
+            )
+            claimed = conn.execute(
+                "SELECT * FROM client_invitations WHERE id=?", (int(row["id"]),)
+            ).fetchone()
+            conn.commit()
+        return dict(claimed)
+
+    def approve_client_invitation(
+        self, invitation_id: int, admin_id: int
+    ) -> dict[str, Any] | None:
+        """Atomically bind a reviewed invitation to its claimant."""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            invitation = conn.execute(
+                """
+                SELECT * FROM client_invitations
+                WHERE id=? AND status='claim_pending' AND claimant_user_id IS NOT NULL
+                """,
+                (invitation_id,),
+            ).fetchone()
+            if not invitation:
+                conn.rollback()
+                return None
+            user_id = int(invitation["claimant_user_id"])
+            username = str(invitation["claimant_username"] or "")
+            conn.execute(
+                """
+                INSERT INTO clients(
+                    telegram_user_id, telegram_username, promo, is_complimentary,
+                    complimentary_at, complimentary_by
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(telegram_user_id) DO UPDATE SET
+                    telegram_username=CASE WHEN excluded.telegram_username != ''
+                        THEN excluded.telegram_username ELSE clients.telegram_username END,
+                    promo=excluded.promo,
+                    is_complimentary=excluded.is_complimentary,
+                    complimentary_at=excluded.complimentary_at,
+                    complimentary_by=excluded.complimentary_by,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (
+                    user_id,
+                    username,
+                    int(invitation["promo"]),
+                    int(invitation["is_complimentary"]),
+                    invitation["complimentary_at"],
+                    invitation["complimentary_by"],
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO subscriptions(telegram_user_id, payment_status)
+                VALUES (?, 'unpaid') ON CONFLICT(telegram_user_id) DO NOTHING
+                """,
+                (user_id,),
+            )
+            conn.execute(
+                """
+                UPDATE client_invitations SET status='claimed',
+                    updated_at=CURRENT_TIMESTAMP WHERE id=?
+                """,
+                (invitation_id,),
+            )
+            conn.execute(
+                "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                (
+                    f"telegram:{user_id}",
+                    "admin_approve_client_invitation",
+                    json.dumps(
+                        {"admin_id": admin_id, "invitation_id": invitation_id},
+                        sort_keys=True,
+                    ),
+                ),
+            )
+            conn.commit()
+        return self.get_admin_client_details(user_id)
+
+    def reject_client_invitation(self, invitation_id: int, admin_id: int) -> bool:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE client_invitations SET status='rejected', token=NULL,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=? AND status='claim_pending'
+                """,
+                (invitation_id,),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                return False
+            conn.execute(
+                "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                (
+                    f"invite:{invitation_id}",
+                    "admin_reject_client_invitation",
+                    json.dumps({"admin_id": admin_id}, sort_keys=True),
+                ),
+            )
+            conn.commit()
+        return True
+
+    def set_invitation_promo(
+        self, invitation_id: int, admin_id: int, promo: int
+    ) -> bool:
+        if not 0 <= promo <= 90:
+            return False
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE client_invitations SET promo=?, updated_at=CURRENT_TIMESTAMP
+                WHERE id=? AND status != 'claimed'
+                """,
+                (promo, invitation_id),
+            )
+            if cursor.rowcount == 1:
+                conn.execute(
+                    "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                    (
+                        f"invite:{invitation_id}",
+                        "admin_set_invitation_discount",
+                        json.dumps(
+                            {"admin_id": admin_id, "promo": promo}, sort_keys=True
+                        ),
+                    ),
+                )
+            conn.commit()
+        return cursor.rowcount == 1
+
+    def set_invitation_complimentary(
+        self, invitation_id: int, admin_id: int, enabled: bool
+    ) -> bool:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE client_invitations SET is_complimentary=?,
+                    complimentary_at=CASE WHEN ?=1 THEN CURRENT_TIMESTAMP ELSE NULL END,
+                    complimentary_by=CASE WHEN ?=1 THEN ? ELSE NULL END,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=? AND status != 'claimed'
+                """,
+                (int(enabled), int(enabled), int(enabled), admin_id, invitation_id),
+            )
+            if cursor.rowcount == 1:
+                conn.execute(
+                    "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                    (
+                        f"invite:{invitation_id}",
+                        "admin_enable_invitation_complimentary"
+                        if enabled
+                        else "admin_disable_invitation_complimentary",
+                        json.dumps({"admin_id": admin_id}, sort_keys=True),
+                    ),
+                )
+            conn.commit()
+        return cursor.rowcount == 1
+
+    def delete_client_invitation(self, invitation_id: int, admin_id: int) -> bool:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT expected_username FROM client_invitations WHERE id=?",
+                (invitation_id,),
+            ).fetchone()
+            if not row:
+                conn.rollback()
+                return False
+            conn.execute("DELETE FROM client_invitations WHERE id=?", (invitation_id,))
+            conn.execute(
+                "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                (
+                    f"invite:{invitation_id}",
+                    "admin_delete_client_invitation",
+                    json.dumps(
+                        {"admin_id": admin_id, "expected_username": row[0]},
+                        sort_keys=True,
+                    ),
+                ),
+            )
+            conn.commit()
+        return True
 
     def get_telegram_ui_panel(self, user_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -760,9 +1243,17 @@ class Database:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 """
-                SELECT cp.*, s.payment_status
+                SELECT cp.*, s.payment_status, c.is_complimentary, c.is_banned,
+                       CASE WHEN c.is_banned=0 AND (
+                           c.is_complimentary=1 OR (
+                               s.is_active=1 AND s.payment_status='paid'
+                               AND s.expire_date IS NOT NULL
+                               AND datetime(s.expire_date) > datetime('now')
+                           )
+                       ) THEN 1 ELSE 0 END AS has_active_access
                 FROM client_peers cp
                 LEFT JOIN subscriptions s USING(telegram_user_id)
+                JOIN clients c USING(telegram_user_id)
                 WHERE cp.id=? AND cp.telegram_user_id=?
                   AND cp.role IN ('primary', 'additional')
                   AND cp.server_key IS NOT NULL
@@ -780,9 +1271,17 @@ class Database:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 """
-                SELECT cp.*, s.payment_status
+                SELECT cp.*, s.payment_status, c.is_complimentary, c.is_banned,
+                       CASE WHEN c.is_banned=0 AND (
+                           c.is_complimentary=1 OR (
+                               s.is_active=1 AND s.payment_status='paid'
+                               AND s.expire_date IS NOT NULL
+                               AND datetime(s.expire_date) > datetime('now')
+                           )
+                       ) THEN 1 ELSE 0 END AS has_active_access
                 FROM client_peers cp
                 LEFT JOIN subscriptions s USING(telegram_user_id)
+                JOIN clients c USING(telegram_user_id)
                 WHERE cp.telegram_user_id=?
                   AND cp.role IN ('primary', 'additional')
                   AND cp.server_key IS NOT NULL
@@ -1007,7 +1506,7 @@ class Database:
     def log_client_state_sync(
         self, admin_id: int, user_id: int, operation: str, result: dict[str, int]
     ) -> None:
-        """Audit Cascade synchronization performed for a ban transition."""
+        """Audit an administrative Cascade state synchronization."""
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
@@ -1172,6 +1671,8 @@ class Database:
             row = conn.execute(
                 """
                 SELECT c.telegram_user_id, c.telegram_username, c.promo,
+                       c.is_complimentary, c.complimentary_at, c.complimentary_by,
+                       c.is_banned,
                        s.*, cp.peer_name, cp.public_key, cp.cascade_peer_id,
                        cp.server_key, cp.interface_id, cp.role, cp.enabled
                 FROM clients c
@@ -1344,6 +1845,7 @@ class Database:
             rows = conn.execute(
                 f"""
                 SELECT c.telegram_user_id, c.telegram_username, c.promo,
+                       c.is_complimentary, c.complimentary_at, c.complimentary_by,
                        c.is_banned, c.banned_at, c.banned_by, c.ban_reason,
                        s.expire_date, s.is_active, s.payment_status,
                        cp.server_key, cp.interface_id, cp.peer_name,
@@ -1400,6 +1902,7 @@ class Database:
             row = conn.execute(
                 """
                 SELECT c.telegram_user_id, c.telegram_username, c.promo,
+                       c.is_complimentary, c.complimentary_at, c.complimentary_by,
                        c.is_banned, c.banned_at, c.banned_by, c.ban_reason,
                        s.expire_date, s.is_active, s.payment_status,
                        cp.server_key, cp.interface_id, cp.peer_name,
@@ -1458,6 +1961,41 @@ class Database:
             )
             conn.commit()
             return cursor.rowcount > 0
+
+    def admin_add_client(self, user_id: int, admin_id: int) -> dict[str, Any]:
+        """Create an unpaid client profile before their first bot interaction."""
+        if user_id <= 0:
+            raise ValueError("Telegram user ID must be positive")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            created = conn.execute(
+                "INSERT INTO clients(telegram_user_id) VALUES (?) ON CONFLICT DO NOTHING",
+                (user_id,),
+            )
+            conn.execute(
+                """
+                INSERT INTO subscriptions(telegram_user_id, payment_status)
+                VALUES (?, 'unpaid') ON CONFLICT(telegram_user_id) DO NOTHING
+                """,
+                (user_id,),
+            )
+            if created.rowcount == 1:
+                conn.execute(
+                    "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                    (
+                        f"telegram:{user_id}",
+                        "admin_add_client",
+                        json.dumps(
+                            {"admin_id": admin_id, "client_id": user_id},
+                            sort_keys=True,
+                        ),
+                    ),
+                )
+            conn.commit()
+        result = self.get_admin_client_details(user_id)
+        if not result:
+            raise RuntimeError("Created client could not be read")
+        return result
 
     def set_admin_subscription_expiry(
         self,
@@ -2036,9 +2574,12 @@ class Database:
                 """
                 UPDATE client_peers SET enabled=0, updated_at=CURRENT_TIMESTAMP
                 WHERE enabled=1 AND telegram_user_id IN (
-                    SELECT telegram_user_id FROM subscriptions
-                    WHERE is_active=1 AND payment_status='expired'
-                      AND expire_date IS NOT NULL AND expire_date <= datetime('now')
+                    SELECT s.telegram_user_id
+                    FROM subscriptions s JOIN clients c USING(telegram_user_id)
+                    WHERE s.is_active=1 AND s.payment_status='expired'
+                      AND s.expire_date IS NOT NULL
+                      AND s.expire_date <= datetime('now')
+                      AND c.is_complimentary=0
                 )
                 """
             )
@@ -2069,6 +2610,7 @@ class Database:
                 WHERE ({where})
                   AND (c.telegram_reachable IS NULL OR c.telegram_reachable=1)
                   AND c.is_banned=0
+                  AND c.is_complimentary=0
                 ORDER BY s.expire_date
                 """
             ).fetchall()

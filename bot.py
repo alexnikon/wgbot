@@ -509,6 +509,11 @@ def is_access_active(existing_peer: dict) -> bool:
         logger.debug("is_access_active: no existing_peer")
         return False
 
+    if existing_peer.get("is_banned"):
+        return False
+    if existing_peer.get("is_complimentary"):
+        return True
+
     payment_status = existing_peer.get("payment_status")
     if payment_status != "paid":
         logger.debug(f"is_access_active: payment_status={payment_status}, not 'paid'")
@@ -538,10 +543,12 @@ def is_access_active(existing_peer: dict) -> bool:
 # Build main menu keyboard
 def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     """Create the main menu inline keyboard."""
-    # Check whether the user has active (paid and not expired) access
-    # IMPORTANT: always fetch fresh data from the DB when building the keyboard
     existing_peer = db.get_peer_by_telegram_id(user_id)
-    has_active_access = is_access_active(existing_peer)
+    access_reader = getattr(db, "get_client_access_state", None)
+    access_state = access_reader(user_id) if callable(access_reader) else None
+    has_active_access = (
+        access_state.active if access_state is not None else is_access_active(existing_peer)
+    )
 
     # Debug logging
     if existing_peer:
@@ -554,18 +561,29 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
         )
 
     if has_active_access:
+        is_complimentary = (
+            access_state.source == "complimentary"
+            if access_state is not None
+            else bool(existing_peer and existing_peer.get("is_complimentary"))
+        )
         inline_keyboard = [
-            [InlineKeyboardButton(text="✅ Доступ приобретен", callback_data="already_paid")],
+            [
+                InlineKeyboardButton(
+                    text=("🎁 Бесплатный доступ" if is_complimentary else "✅ Доступ приобретен"),
+                    callback_data="already_paid",
+                )
+            ],
             [InlineKeyboardButton(text="ℹ️ Статус подписки", callback_data="status")],
         ]
     else:
         inline_keyboard = [
             [InlineKeyboardButton(text="💳 Купить доступ", callback_data="pay")],
         ]
-    if has_active_access:
+    if has_active_access and not is_complimentary:
         inline_keyboard.append(
             [InlineKeyboardButton(text="🔄 Продлить подписку", callback_data="extend")]
         )
+    if has_active_access:
         inline_keyboard.append(
             [InlineKeyboardButton(text="📥 Получить конфигурацию", callback_data="get_config")]
         )

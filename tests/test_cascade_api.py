@@ -385,6 +385,9 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
         db.save_client_peer(
             10, "server-a", "if-a", "old-peer", "old-key", "alice", "primary"
         )
+        db.ensure_subscription(
+            10, "alice", "2030-01-01 00:00:00", "paid", "30_days", "stars"
+        )
         old_primary = db.get_primary_client_peer(10)
         db.rename_managed_config(old_primary["id"], 10, "Ноутбук")
         servers = [
@@ -507,7 +510,7 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
         os.close(handle)
         db = Database(path)
         db.ensure_subscription(
-            10, "alice", "2000-01-01 00:00:00", "paid", "30_days", "stars"
+            10, "alice", "2030-01-01 00:00:00", "paid", "30_days", "stars"
         )
         db.save_client_peer(
             10,
