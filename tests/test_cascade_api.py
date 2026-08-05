@@ -998,6 +998,182 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
                 except FileNotFoundError:
                     pass
 
+    async def test_banned_client_sync_disables_all_admin_enabled_peers(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.ensure_subscription(
+            10, "alice", "2099-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        db.save_client_peer(
+            10, "server-a", "if-a", "primary", "key-a", "alice", "primary"
+        )
+
+        class StateAPI:
+            def __init__(self):
+                self.enabled = []
+                self.disabled = []
+
+            async def update_expiry(self, peer_id, expire_date, interface_id=None):
+                return None
+
+            async def enable_peer(self, peer_id, interface_id=None):
+                self.enabled.append(peer_id)
+
+            async def disable_peer(self, peer_id, interface_id=None):
+                self.disabled.append(peer_id)
+
+        api = StateAPI()
+        router = CascadeRouter(db, servers=[])
+        router.apis = {"server-a": api}
+        try:
+            result = await router.set_client_ban(10, 99, True, "test")
+            self.assertEqual(result["failed"], 0)
+            self.assertEqual(api.enabled, [])
+            self.assertEqual(api.disabled, ["primary"])
+            self.assertTrue(db.is_client_banned(10))
+
+            api.disabled.clear()
+            result = await router.set_client_ban(10, 99, False)
+            self.assertEqual(result["failed"], 0)
+            self.assertEqual(api.enabled, ["primary"])
+            self.assertFalse(db.is_client_banned(10))
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    def test_production_locations_use_configured_interface_only(self):
+        server = CascadeServer(
+            "server-a",
+            "https://a.test/admin",
+            "token",
+            "production-if",
+            1,
+            10,
+            server_name="Netherlands",
+        )
+        router = CascadeRouter(Database(":memory:"), servers=[server])
+        self.assertEqual(
+            router.get_client_production_locations(),
+            [
+                {
+                    "server_key": "server-a",
+                    "server_name": "Netherlands",
+                    "interface_id": "production-if",
+                }
+            ],
+        )
+
+    async def test_self_service_creation_uses_production_interface_and_limit(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.ensure_subscription(
+            10, "alice", "2099-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        db.save_client_peer(
+            10,
+            "server-a",
+            "production-if",
+            "primary",
+            "key-primary",
+            "alice",
+            "primary",
+            client_group="Basic",
+        )
+
+        class SelfServiceAPI:
+            def __init__(self):
+                self.created_interfaces = []
+                self.created = 0
+
+            async def list_interfaces(self):
+                return [
+                    {"id": "production-if"},
+                    {"id": "admin-only-if"},
+                ]
+
+            async def list_peers(self, interface_id=None):
+                return []
+
+            async def list_client_groups(self):
+                return [{"id": "basic-id", "name": "Basic"}]
+
+            async def get_peer(self, peer_id, interface_id=None):
+                return {"id": peer_id, "groupId": "basic-id"}
+
+            async def resolve_client_group_name(self, group_id):
+                return "Basic" if group_id == "basic-id" else None
+
+            async def create_peer(
+                self, name, expired_at, interface_id=None, client_group=None
+            ):
+                self.created += 1
+                self.created_interfaces.append(interface_id)
+                return {
+                    "id": f"additional-{self.created}",
+                    "name": name,
+                    "publicKey": f"key-{self.created}",
+                }
+
+            async def download_config(self, peer_id, interface_id=None):
+                return b"config"
+
+            async def delete_peer(self, peer_id, interface_id=None):
+                return None
+
+        server = CascadeServer(
+            "server-a",
+            "https://a.test/admin",
+            "token",
+            "production-if",
+            1,
+            10,
+            client_group="Basic",
+        )
+        api = SelfServiceAPI()
+        router = CascadeRouter(db, servers=[server])
+        router.apis = {"server-a": api}
+        try:
+            with self.assertRaisesRegex(CascadeError, "production interface"):
+                await router.create_additional_config(
+                    10,
+                    "Forbidden",
+                    "server-a",
+                    "admin-only-if",
+                    self_service_limit=2,
+                    production_only=True,
+                )
+            for name in ("Phone", "Tablet"):
+                await router.create_additional_config(
+                    10,
+                    name,
+                    "server-a",
+                    "production-if",
+                    self_service_limit=2,
+                    production_only=True,
+                )
+            with self.assertRaisesRegex(CascadeError, "limit reached"):
+                await router.create_additional_config(
+                    10,
+                    "Laptop",
+                    "server-a",
+                    "production-if",
+                    self_service_limit=2,
+                    production_only=True,
+                )
+            self.assertEqual(
+                api.created_interfaces, ["production-if", "production-if"]
+            )
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
     async def test_readable_additional_peer_name_and_stable_suffix(self):
         handle, path = tempfile.mkstemp(suffix=".db")
         os.close(handle)

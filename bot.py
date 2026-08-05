@@ -183,6 +183,37 @@ class OperationLoggingMiddleware:
         return await handler(event, data)
 
 
+class BannedClientMiddleware:
+    """Block the interactive bot surface for administratively banned clients."""
+
+    async def __call__(
+        self,
+        handler: Callable[[Any, dict[str, Any]], Awaitable[Any]],
+        event: Any,
+        data: dict[str, Any],
+    ) -> Any:
+        user = getattr(event, "from_user", None)
+        if not user or not db.is_client_banned(int(user.id)):
+            return await handler(event, data)
+        if isinstance(event, types.Message) and (
+            event.successful_payment or event.refunded_payment
+        ):
+            return await handler(event, data)
+        text = "⛔ Доступ к боту ограничен. Если это ошибка, обратись в поддержку."
+        markup = None
+        if SUPPORT_URL:
+            markup = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="💬 Поддержка", url=SUPPORT_URL)]
+                ]
+            )
+        if isinstance(event, types.CallbackQuery):
+            await event.answer(text, show_alert=True)
+        elif isinstance(event, types.Message):
+            await event.answer(text, reply_markup=markup)
+        return None
+
+
 class ConcurrencyMetricsMiddleware:
     """Track active Telegram handlers and concurrency-limit saturation."""
 
@@ -223,6 +254,8 @@ class PanelTrackingMiddleware:
 
 dp.message.outer_middleware(OperationLoggingMiddleware())
 dp.callback_query.outer_middleware(OperationLoggingMiddleware())
+dp.message.outer_middleware(BannedClientMiddleware())
+dp.callback_query.outer_middleware(BannedClientMiddleware())
 dp.callback_query.outer_middleware(PanelTrackingMiddleware())
 dp.update.outer_middleware(ConcurrencyMetricsMiddleware())
 

@@ -455,6 +455,17 @@ class CascadeRouter:
         server = self.get_server(server_key)
         return server.server_name or server.server_key
 
+    def get_client_production_locations(self) -> list[dict[str, str]]:
+        """Return enabled locations bound to configured production interfaces."""
+        return [
+            {
+                "server_key": server.server_key,
+                "server_name": server.server_name or server.server_key,
+                "interface_id": server.interface_id,
+            }
+            for server in self.get_enabled_servers()
+        ]
+
     async def list_server_interfaces(self, server_key: str) -> list[dict[str, Any]]:
         server = self.get_server(server_key)
         if not server.enabled:
@@ -752,6 +763,8 @@ class CascadeRouter:
         async with user_lock:
             if not self.db.get_admin_client_details(user_id):
                 raise CascadeNotFound(f"No client profile for user {user_id}")
+            if self.db.is_client_banned(user_id):
+                raise CascadeError("Banned clients cannot be provisioned")
             existing = self.db.get_primary_client_peer(user_id)
             if existing:
                 try:
@@ -956,6 +969,8 @@ class CascadeRouter:
         client_group: str | None = None,
         *,
         reassign_existing_group: bool = True,
+        self_service_limit: int | None = None,
+        production_only: bool = False,
     ) -> dict[str, Any]:
         config_name = normalize_config_name(config_name)
         primary = self.db.get_primary_client_peer(user_id)
@@ -965,6 +980,24 @@ class CascadeRouter:
                 "An additional configuration requires a primary peer and expiration date"
             )
         server = self.get_server(server_key)
+        if production_only and interface_id != server.interface_id:
+            raise CascadeError("Self-service requires the configured production interface")
+        if self_service_limit is not None:
+            if self.db.is_client_banned(user_id):
+                raise CascadeError("Banned clients cannot create configurations")
+            if not self.db.has_active_subscription(user_id):
+                raise CascadeError("An active subscription is required")
+            if self.db.count_additional_configs(user_id) >= self_service_limit:
+                raise CascadeCapacityError("Additional configuration limit reached")
+            inherited_groups = {
+                str(item["client_group"])
+                for item in self.db.get_managed_client_configs(user_id)
+                if item.get("client_group")
+            }
+            if len(inherited_groups) != 1:
+                raise CascadeError("Client configurations do not have one confirmed group")
+            client_group = next(iter(inherited_groups))
+            reassign_existing_group = False
         explicit_group = client_group is not None
         client_group = client_group or server.client_group
         if not server.enabled:
@@ -992,6 +1025,29 @@ class CascadeRouter:
             peer: dict[str, Any] | None = None
             saved = False
             try:
+                primary = self.db.get_primary_client_peer(user_id)
+                expire_date = self.db.get_subscription_expiry(user_id)
+                if not primary or not expire_date:
+                    raise CascadeError(
+                        "An additional configuration requires a primary peer and expiration date"
+                    )
+                if self_service_limit is not None:
+                    if self.db.is_client_banned(user_id):
+                        raise CascadeError("Banned clients cannot create configurations")
+                    if not self.db.has_active_subscription(user_id):
+                        raise CascadeError("An active subscription is required")
+                    if self.db.count_additional_configs(user_id) >= self_service_limit:
+                        raise CascadeCapacityError("Additional configuration limit reached")
+                    current_server = self.get_server(server_key)
+                    if not current_server.enabled or interface_id != current_server.interface_id:
+                        raise CascadeError("Production location is no longer available")
+                    inherited_groups = {
+                        str(item["client_group"])
+                        for item in self.db.get_managed_client_configs(user_id)
+                        if item.get("client_group")
+                    }
+                    if inherited_groups != {str(client_group)}:
+                        raise CascadeError("Client group changed during creation")
                 if explicit_group and reassign_existing_group:
                     original_groups = await self._change_client_group_unlocked(
                         user_id, client_group
@@ -1106,7 +1162,7 @@ class CascadeRouter:
                 and datetime.fromisoformat(expire_date).replace(tzinfo=UTC)
                 > datetime.now(UTC)
             )
-            enabled = active and is_future
+            enabled = active and is_future and not self.db.is_client_banned(user_id)
             if enabled:
                 await api.enable_peer(peer["cascade_peer_id"], peer["interface_id"])
             else:
@@ -1243,17 +1299,59 @@ class CascadeRouter:
         async with user_lock:
             return await self._sync_user_access_unlocked(user_id, expire_date)
 
+    async def sync_client_state(self, user_id: int) -> dict[str, int]:
+        """Synchronize every peer from the client's current subscription and ban state."""
+        user_lock = self._user_locks.get(user_id)
+        if user_lock is None:
+            user_lock = asyncio.Lock()
+            self._user_locks[user_id] = user_lock
+        async with user_lock:
+            if not self.db.get_admin_client_details(user_id):
+                raise CascadeNotFound(f"No client profile for user {user_id}")
+            expire_date = self.db.get_subscription_expiry(user_id) or "1970-01-01 00:00:00"
+            return await self._sync_user_access_unlocked(user_id, expire_date)
+
+    async def set_client_ban(
+        self,
+        user_id: int,
+        admin_id: int,
+        banned: bool,
+        reason: str | None = None,
+    ) -> dict[str, int]:
+        """Persist a ban transition and immediately synchronize all managed peers."""
+        user_lock = self._user_locks.get(user_id)
+        if user_lock is None:
+            user_lock = asyncio.Lock()
+            self._user_locks[user_id] = user_lock
+        async with user_lock:
+            if not self.db.get_admin_client_details(user_id):
+                raise CascadeNotFound(f"No client profile for user {user_id}")
+            if not self.db.set_client_ban(user_id, admin_id, banned, reason):
+                raise CascadeNotFound(f"No client profile for user {user_id}")
+            expire_date = self.db.get_subscription_expiry(user_id) or "1970-01-01 00:00:00"
+            result = await self._sync_user_access_unlocked(user_id, expire_date)
+            self.db.log_client_state_sync(
+                admin_id,
+                user_id,
+                "admin_ban_client_sync" if banned else "admin_unban_client_sync",
+                result,
+            )
+            return result
+
     async def _sync_user_access_unlocked(
         self, user_id: int, expire_date: str
     ) -> dict[str, int]:
         peers = self.db.get_client_peers(user_id, bound_only=True)
         result = {"total": len(peers), "updated": 0, "missing": 0, "failed": 0}
         is_future = datetime.fromisoformat(expire_date).replace(tzinfo=UTC) > datetime.now(UTC)
+        is_banned = self.db.is_client_banned(user_id)
         for peer in peers:
             try:
                 api = self.get_api(peer["server_key"])
                 await api.update_expiry(peer["cascade_peer_id"], expire_date, peer["interface_id"])
-                should_enable = is_future and bool(peer.get("admin_enabled", 1))
+                should_enable = (
+                    is_future and not is_banned and bool(peer.get("admin_enabled", 1))
+                )
                 if should_enable:
                     await api.enable_peer(peer["cascade_peer_id"], peer["interface_id"])
                 else:

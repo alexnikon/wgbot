@@ -249,22 +249,29 @@ class StarsReconciler:
         if not applied:
             return True, False
         payment_user_id = int(payment["user_id"])
+        banned = await asyncio.to_thread(
+            self.db.is_client_banned, payment_user_id
+        )
         primary = await asyncio.to_thread(
             self.db.get_primary_client_peer, payment_user_id
         )
         if primary:
-            sync_result = await self.cascade_router.sync_user_access(
-                payment_user_id, applied["expire_date"]
+            sync_result = (
+                await self.cascade_router.sync_client_state(payment_user_id)
+                if banned
+                else await self.cascade_router.sync_user_access(
+                    payment_user_id, applied["expire_date"]
+                )
             )
             if sync_result["failed"]:
                 await asyncio.to_thread(
                     self.db.add_provisioning_task,
                     payment_user_id,
-                    "sync_access",
-                    {"expire_date": applied["expire_date"]},
+                    "sync_client_state" if banned else "sync_access",
+                    {} if banned else {"expire_date": applied["expire_date"]},
                     f"Failed peers: {sync_result['failed']}",
                 )
-        else:
+        elif not banned:
             await asyncio.to_thread(
                 self.db.add_provisioning_task,
                 payment_user_id,

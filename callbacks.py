@@ -57,6 +57,7 @@ class ClientConfigCallback(CallbackData, prefix="cfg"):
     action: str
     peer_id: int = 0
     page: int = 0
+    value: int = 0
 
 
 class RefundConfirmationCallback(CallbackData, prefix="refund"):

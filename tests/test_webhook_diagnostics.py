@@ -146,6 +146,58 @@ class WebhookDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("📅 Осталось:", content.plain)
         cascade_router.sync_user_access.assert_awaited_once()
 
+    async def test_banned_yookassa_payment_extends_without_user_reply_or_provisioning(self):
+        database = Mock()
+        database.get_payment_by_id.return_value = {
+            "payment_id": "payment-1",
+            "user_id": 10,
+            "tariff_key": "14_days",
+            "metadata": "{}",
+        }
+        database.apply_verified_payment.return_value = {
+            "expire_date": "2099-01-01 00:00:00"
+        }
+        database.is_client_banned.return_value = True
+        database.get_primary_client_peer.return_value = {"id": 1}
+        cascade_router = SimpleNamespace(
+            sync_client_state=AsyncMock(
+                return_value={"updated": 1, "missing": 0, "failed": 0}
+            ),
+            create_user_peer=AsyncMock(),
+        )
+        send_message = AsyncMock(return_value=True)
+        notify = AsyncMock()
+        payment_data = {
+            "id": "payment-1",
+            "amount": {"value": "150.00", "currency": "RUB"},
+        }
+
+        with (
+            patch.object(webhook_server, "db", database),
+            patch.object(webhook_server, "cascade_router", cascade_router, create=True),
+            patch.object(
+                webhook_server,
+                "yookassa_client",
+                SimpleNamespace(get_payment_amount=lambda _data: 15000),
+                create=True,
+            ),
+            patch.object(webhook_server, "send_telegram_message", send_message),
+            patch.object(webhook_server, "notify_admins", notify),
+            patch.object(webhook_server, "delete_payment_message", AsyncMock()),
+            patch.object(
+                webhook_server,
+                "get_tariffs",
+                return_value={"14_days": {"days": 14, "name": "2 недели"}},
+            ),
+        ):
+            await webhook_server.process_successful_payment(payment_data)
+
+        database.apply_verified_payment.assert_called_once()
+        send_message.assert_not_awaited()
+        cascade_router.sync_client_state.assert_awaited_once_with(10)
+        cascade_router.create_user_peer.assert_not_awaited()
+        notify.assert_awaited_once()
+
     async def test_yookassa_first_payment_keeps_success_when_provisioning_fails(self):
         database = Mock()
         database.get_payment_by_id.return_value = {

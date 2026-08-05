@@ -465,6 +465,9 @@ async def process_successful_payment(
 ):
     """Handle a successful Telegram Stars payment and synchronize Cascade."""
     user_id = message.from_user.id
+    ban_checker = getattr(db, "is_client_banned", None)
+    ban_value = await asyncio.to_thread(ban_checker, user_id) if callable(ban_checker) else False
+    is_banned = ban_value is True or (isinstance(ban_value, int) and ban_value == 1)
     username = message.from_user.username
     successful_payment = message.successful_payment
     await chat_panel.delete_user_message(message)
@@ -473,23 +476,25 @@ async def process_successful_payment(
     )
     parsed = payment_manager.parse_invoice_payload(successful_payment.invoice_payload)
     if not confirmed or not parsed or parsed[0] != "stars":
-        await chat_panel.render(
-            message.chat.id,
-            user_id,
-            "❌ Ошибка при обработке платежа.",
-            create_main_menu_keyboard(user_id),
-        )
+        if not is_banned:
+            await chat_panel.render(
+                message.chat.id,
+                user_id,
+                "❌ Ошибка при обработке платежа.",
+                create_main_menu_keyboard(user_id),
+            )
         return
 
     tariff_key = parsed[1]
     tariff_data = payment_manager.tariffs.get(tariff_key)
     if not tariff_data:
-        await chat_panel.render(
-            message.chat.id,
-            user_id,
-            "❌ Ошибка в данных платежа.",
-            create_main_menu_keyboard(user_id),
-        )
+        if not is_banned:
+            await chat_panel.render(
+                message.chat.id,
+                user_id,
+                "❌ Ошибка в данных платежа.",
+                create_main_menu_keyboard(user_id),
+            )
         return
 
     payment = await asyncio.to_thread(
@@ -497,12 +502,13 @@ async def process_successful_payment(
     )
     if not payment:
         logger.error("Stars payment has no matching intent")
-        await chat_panel.render(
-            message.chat.id,
-            user_id,
-            "⚠️ Платеж получен и передан администратору на сверку.",
-            create_main_menu_keyboard(user_id),
-        )
+        if not is_banned:
+            await chat_panel.render(
+                message.chat.id,
+                user_id,
+                "⚠️ Платеж получен и передан администратору на сверку.",
+                create_main_menu_keyboard(user_id),
+            )
         return
     intent_matches = (
         int(payment["user_id"]) == user_id
@@ -523,12 +529,13 @@ async def process_successful_payment(
             "⚠️ Stars payment requires manual review\n\n"
             f"Payment ID: {payment['payment_id']}\nTelegram ID: {user_id}"
         )
-        await chat_panel.render(
-            message.chat.id,
-            user_id,
-            "⚠️ Платеж получен и передан администратору на сверку.",
-            create_main_menu_keyboard(user_id),
-        )
+        if not is_banned:
+            await chat_panel.render(
+                message.chat.id,
+                user_id,
+                "⚠️ Платеж получен и передан администратору на сверку.",
+                create_main_menu_keyboard(user_id),
+            )
         return
     invoice_message_id = payment.get("invoice_message_id")
     if invoice_message_id:
@@ -561,6 +568,29 @@ async def process_successful_payment(
         return
 
     expire_date = payment_result["expire_date"]
+    if is_banned:
+        primary_peer = await asyncio.to_thread(db.get_primary_client_peer, user_id)
+        if primary_peer:
+            sync_result = await cascade_router.sync_client_state(user_id)
+            if sync_result["failed"]:
+                db.add_provisioning_task(
+                    user_id,
+                    "sync_client_state",
+                    {},
+                    f"Failed peers: {sync_result['failed']}",
+                )
+        await notify_admins(
+            format_admin_payment_notification(
+                "🚫 Забаненный клиент оплатил подписку",
+                user_id=user_id,
+                username=username,
+                tariff_name=tariff_data.get("name", tariff_key),
+                amount=f"{amount_paid} Stars",
+                payment_method="Telegram Stars",
+                expire_date=expire_date,
+            )
+        )
+        return
     await chat_panel.render(
         message.chat.id,
         user_id,
@@ -660,6 +690,8 @@ async def process_refunded_payment(
         f"Telegram ID: {message.from_user.id if message.from_user else 'unknown'}\n"
         "Доступ автоматически не изменен."
     )
+    if await asyncio.to_thread(db.is_client_banned, user_id):
+        return
     await chat_panel.render(
         message.chat.id,
         user_id,

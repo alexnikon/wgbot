@@ -109,6 +109,63 @@ class DatabaseTests(unittest.TestCase):
             )
         )
 
+    def test_client_ban_is_reversible_audited_and_filters_outbound(self):
+        self.db.ensure_subscription(
+            10, "alice", "2099-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        self.assertTrue(self.db.has_active_subscription(10))
+        self.assertTrue(self.db.set_client_ban(10, 99, True, "  abuse   report  "))
+        self.assertTrue(self.db.is_client_banned(10))
+        self.assertNotIn(10, self.db.get_client_telegram_ids())
+        details = self.db.get_admin_client_details(10)
+        self.assertEqual(details["ban_reason"], "abuse report")
+        self.assertEqual(details["banned_by"], 99)
+
+        self.assertTrue(self.db.set_client_ban(10, 99, False))
+        self.assertFalse(self.db.is_client_banned(10))
+        self.assertIn(10, self.db.get_client_telegram_ids())
+        with closing(sqlite3.connect(self.path)) as conn:
+            operations = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT operation FROM operation_logs WHERE peer_name='telegram:10'"
+                )
+            ]
+        self.assertEqual(
+            operations[-2:], ["admin_ban_client", "admin_unban_client"]
+        )
+
+    def test_additional_config_limit_counts_hidden_and_inactive_records(self):
+        self.db.upsert_client(10, "alice")
+        self.db.save_client_peer(
+            10,
+            "server-a",
+            "if-a",
+            "additional-a",
+            "key-a",
+            "phone",
+            "additional",
+            enabled=False,
+            config_name="Phone",
+            admin_enabled=False,
+        )
+        self.db.save_client_peer(
+            10,
+            "server-b",
+            "if-b",
+            "additional-b",
+            "key-b",
+            "tablet",
+            "additional",
+            enabled=True,
+            config_name="Tablet",
+        )
+        self.assertEqual(self.db.count_additional_configs(10), 2)
+        self.assertEqual(
+            [item["config_name"] for item in self.db.get_client_visible_configs(10)],
+            ["Tablet"],
+        )
+
     def test_notification_windows_do_not_label_near_expiry_as_tomorrow(self):
         now = datetime.now(UTC).replace(tzinfo=None)
         subscriptions = {

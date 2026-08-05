@@ -93,6 +93,10 @@ class TelegramSender:
         *,
         retry_safe: bool = True,
     ) -> T | None:
+        banned = getattr(self.db, "is_client_banned", None)
+        if banned is not None and await asyncio.to_thread(banned, user_id):
+            logger.info("Skipping outbound Telegram operation for banned user %s", user_id)
+            return None
         attempts = 3 if retry_safe else 1
         for attempt in range(attempts):
             try:

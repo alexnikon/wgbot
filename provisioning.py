@@ -58,6 +58,23 @@ class ProvisioningWorker:
             payload = task["payload"]
             user_id = int(task["telegram_user_id"])
             if task["operation"] == "create_peer":
+                ban_checker = getattr(self.db, "is_client_banned", None)
+                ban_value = (
+                    await asyncio.to_thread(ban_checker, user_id)
+                    if callable(ban_checker)
+                    else False
+                )
+                if ban_value is True or (
+                    isinstance(ban_value, int) and ban_value == 1
+                ):
+                    completed = await asyncio.to_thread(
+                        self.db.complete_provisioning_task, task["id"], self.worker_id
+                    )
+                    if not completed:
+                        raise RuntimeError("Provisioning task lease ownership was lost")
+                    if self.metrics:
+                        self.metrics.provisioning_completed()
+                    return
                 primary = await asyncio.to_thread(
                     self.db.get_primary_client_peer, user_id
                 )
@@ -75,6 +92,10 @@ class ProvisioningWorker:
                 result = await self.cascade_router.sync_user_access(
                     user_id, payload["expire_date"]
                 )
+                if result["failed"]:
+                    raise RuntimeError(f"Failed peers: {result['failed']}")
+            elif task["operation"] == "sync_client_state":
+                result = await self.cascade_router.sync_client_state(user_id)
                 if result["failed"]:
                     raise RuntimeError(f"Failed peers: {result['failed']}")
             elif task["operation"] == "restore_peer_groups":

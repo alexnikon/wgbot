@@ -89,6 +89,11 @@ def create_home_reply_markup() -> dict:
 async def send_telegram_message(
     chat_id: int, text: TelegramTextLike, reply_markup: dict | None = None
 ) -> bool:
+    ban_checker = getattr(db, "is_client_banned", None)
+    ban_value = await asyncio.to_thread(ban_checker, chat_id) if callable(ban_checker) else False
+    if ban_value is True or (isinstance(ban_value, int) and ban_value == 1):
+        logger.info("Skipping webhook Telegram message for banned user %s", chat_id)
+        return False
     rendered = ensure_telegram_text(text)
     candidates = (
         (
@@ -278,6 +283,30 @@ async def process_successful_payment(payment_data: dict) -> None:
         logger.info("Ignoring duplicate YooKassa payment event %s", payment_id)
         return
     expire_date = payment_result["expire_date"]
+    ban_checker = getattr(db, "is_client_banned", None)
+    ban_value = await asyncio.to_thread(ban_checker, user_id) if callable(ban_checker) else False
+    if ban_value is True or (isinstance(ban_value, int) and ban_value == 1):
+        primary = await asyncio.to_thread(db.get_primary_client_peer, user_id)
+        if primary:
+            result = await cascade_router.sync_client_state(user_id)
+            if result["failed"]:
+                db.add_provisioning_task(
+                    user_id,
+                    "sync_client_state",
+                    {},
+                    f"Failed peers: {result['failed']}",
+                )
+        await notify_admins(
+            admin_payment_text(
+                "🚫 Забаненный клиент оплатил подписку",
+                user_id,
+                username,
+                tariff.get("name", tariff_key),
+                f"{amount_text} руб.",
+                expire_date,
+            )
+        )
+        return
     await send_telegram_message(
         user_id,
         payment_success_message(

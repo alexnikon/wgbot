@@ -164,6 +164,8 @@ def client_list_keyboard(
         user_id = int(client["telegram_user_id"])
         username = str(client.get("telegram_username") or "")
         label = f"{user_id} | @{username}" if username else str(user_id)
+        if client.get("is_banned"):
+            label = f"🚫 {label}"
         rows.append(
             [
                 InlineKeyboardButton(
@@ -230,9 +232,17 @@ def discount_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def client_card_keyboard(user_id: int) -> InlineKeyboardMarkup:
+def client_card_keyboard(user_id: int, is_banned: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="♻️ Разбанить" if is_banned else "🚫 Забанить",
+                    callback_data=AdminClientCallback(
+                        action="unban" if is_banned else "ban", user_id=user_id
+                    ).pack(),
+                )
+            ],
             [
                 InlineKeyboardButton(
                     text="💸 Скидка",
@@ -472,6 +482,8 @@ def format_client(client: dict[str, Any]) -> TelegramText:
     identity = f"@{username}" if username else "без username"
     expiry = client.get("expire_date")
     formatted_expiry = format_date_for_user(expiry) if expiry else "нет"
+    banned = bool(client.get("is_banned"))
+    ban_status = "забанен" if banned else "не забанен"
     plain = (
         "👤 Клиент\n\n"
         f"Telegram ID: {client['telegram_user_id']}\n"
@@ -480,8 +492,19 @@ def format_client(client: dict[str, Any]) -> TelegramText:
         f"Сервер: {client.get('server_keys') or 'не назначен'}\n"
         f"Группа: {client_group_label(client)}\n"
         f"Устройств: {int(client.get('device_count') or 0)}\n"
-        f"Доступ до: {formatted_expiry}"
+        f"Доступ до: {formatted_expiry}\n"
+        f"Бан: {ban_status}"
     )
+    if banned:
+        banned_at = str(client.get("banned_at") or "")
+        formatted_banned_at = (
+            format_date_for_user(banned_at) if banned_at else "неизвестно"
+        )
+        plain += (
+            f"\nВремя бана: {formatted_banned_at}"
+            f"\nЗабанил: {client.get('banned_by') or 'неизвестно'}"
+            f"\nПричина: {client.get('ban_reason') or 'не указана'}"
+        )
     if not expiry:
         return TelegramText.from_plain(plain)
     return TelegramText.from_plain_with_replacements(
@@ -609,7 +632,9 @@ async def show_client_details(
     await edit_bound_message(
         callback.message,
         format_client(client),
-        reply_markup=client_card_keyboard(callback_data.user_id),
+        reply_markup=client_card_keyboard(
+            callback_data.user_id, bool(client.get("is_banned"))
+        ),
     )
 
 
@@ -668,6 +693,174 @@ async def confirm_client_deletion(
         "из базы данных. Платёжная история и аудит сохранятся. "
         "Это действие нельзя отменить.",
         reply_markup=keyboard,
+    )
+
+
+@router.callback_query(AdminClientCallback.filter(F.action.in_({"ban", "unban"})))
+async def show_client_ban_confirmation(
+    callback: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    callback_data: AdminClientCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    client = db.get_admin_client_details(callback_data.user_id)
+    if not client:
+        await edit_bound_message(callback.message, "❌ Клиент не найден.")
+        return
+    if callback_data.user_id == callback.from_user.id:
+        await edit_bound_message(
+            callback.message,
+            "❌ Нельзя забанить собственный Telegram ID.",
+            reply_markup=client_card_keyboard(
+                callback_data.user_id, bool(client.get("is_banned"))
+            ),
+        )
+        return
+    if callback_data.action == "unban":
+        rows = [
+            [
+                InlineKeyboardButton(
+                    text="✅ Подтвердить разбан",
+                    callback_data=AdminClientCallback(
+                        action="unban_confirm", user_id=callback_data.user_id
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=AdminClientCallback(
+                        action="details", user_id=callback_data.user_id
+                    ).pack(),
+                )
+            ],
+        ]
+        text = f"♻️ Разбанить клиента {callback_data.user_id}?"
+    else:
+        rows = [
+            [
+                InlineKeyboardButton(
+                    text="🚫 Забанить без причины",
+                    callback_data=AdminClientCallback(
+                        action="ban_confirm", user_id=callback_data.user_id
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Указать причину",
+                    callback_data=AdminClientCallback(
+                        action="ban_reason", user_id=callback_data.user_id
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=AdminClientCallback(
+                        action="details", user_id=callback_data.user_id
+                    ).pack(),
+                )
+            ],
+        ]
+        text = (
+            f"🚫 Забанить клиента {callback_data.user_id}?\n\n"
+            "Бот станет недоступен, а все VPN-конфиги будут отключены."
+        )
+    await edit_bound_message(
+        callback.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
+    )
+
+
+@router.callback_query(AdminClientCallback.filter(F.action == "ban_reason"))
+async def request_client_ban_reason(
+    callback: types.CallbackQuery,
+    db: Database,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+    callback_data: AdminClientCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if (
+        not is_admin(callback.from_user.id)
+        or callback_data.user_id == callback.from_user.id
+        or not db.get_admin_client_details(callback_data.user_id)
+    ):
+        return
+    admin_workflows.set(
+        callback.from_user.id,
+        "await_ban_reason",
+        user_id=callback_data.user_id,
+        service_chat_id=callback.message.chat.id,
+        service_message_id=callback.message.message_id,
+    )
+    await edit_bound_message(
+        callback.message,
+        "Введи причину бана (до 500 символов). Клиент её не увидит.",
+        reply_markup=cancel_keyboard(),
+    )
+
+
+@router.callback_query(
+    AdminClientCallback.filter(F.action.in_({"ban_confirm", "unban_confirm"}))
+)
+async def apply_client_ban(
+    callback: types.CallbackQuery,
+    db: Database,
+    cascade_router: CascadeRouter,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+    callback_data: AdminClientCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    admin_id = callback.from_user.id
+    banned = callback_data.action == "ban_confirm"
+    if not is_admin(admin_id):
+        return
+    client = db.get_admin_client_details(callback_data.user_id)
+    if not client:
+        await edit_bound_message(callback.message, "❌ Клиент не найден.")
+        return
+    if callback_data.user_id == admin_id:
+        await edit_bound_message(callback.message, "❌ Нельзя забанить себя.")
+        return
+    flow = admin_workflows.get(admin_id)
+    reason = None
+    if banned and flow and flow.get("state") == "confirm_ban":
+        if int(flow.get("user_id", 0)) != callback_data.user_id:
+            await edit_bound_message(callback.message, "❌ Подтверждение устарело.")
+            return
+        reason = str(flow.get("reason") or "") or None
+    admin_workflows.clear(admin_id)
+    try:
+        result = await cascade_router.set_client_ban(
+            callback_data.user_id, admin_id, banned, reason
+        )
+    except CascadeNotFound:
+        await edit_bound_message(callback.message, "❌ Клиент не найден.")
+        return
+    if result["failed"]:
+        db.add_provisioning_task(
+            callback_data.user_id,
+            "sync_client_state",
+            {},
+            f"Failed peers: {result['failed']}",
+        )
+    state = "забанен" if banned else "разбанен"
+    warning = (
+        "\n⚠️ Часть VPN-конфигов будет синхронизирована автоматически."
+        if result["failed"]
+        else ""
+    )
+    await edit_bound_message(
+        callback.message,
+        f"✅ Клиент {state}.\n\n"
+        f"Обновлено: {result['updated']} · Отсутствует: {result['missing']} · "
+        f"Ошибок: {result['failed']}{warning}",
+        reply_markup=client_card_keyboard(callback_data.user_id, banned),
     )
 
 
@@ -955,6 +1148,7 @@ async def start_expiry_change(
 @router.callback_query(F.data.regexp(r"^admin_message_client_[0-9]+$"))
 async def choose_message_client(
     callback: types.CallbackQuery,
+    db: Database,
     admin_workflows: AdminWorkflowService,
     safe_answer_callback,
     callback_data: AdminClientCallback | None = None,
@@ -967,6 +1161,13 @@ async def choose_message_client(
         if callback_data
         else int((callback.data or "").removeprefix("admin_message_client_"))
     )
+    if db.is_client_banned(user_id):
+        await edit_bound_message(
+            callback.message,
+            "❌ Забаненным клиентам нельзя отправлять сообщения.",
+            reply_markup=admin_dashboard_keyboard(),
+        )
+        return
     admin_workflows.set(
         callback.from_user.id,
         "await_message",
@@ -1787,7 +1988,52 @@ async def capture_admin_input(
     if not flow:
         return
     state = flow["state"]
-    if state == "await_expiry":
+    if state == "await_ban_reason":
+        reason = " ".join((message.text or "").split())
+        if not reason or len(reason) > 500:
+            await edit_telegram_text(
+                bot,
+                chat_id=flow["service_chat_id"],
+                message_id=flow["service_message_id"],
+                text="Причина должна содержать от 1 до 500 символов.",
+                reply_markup=cancel_keyboard(),
+            )
+            with suppress(Exception):
+                await message.delete()
+            return
+        admin_workflows.set(
+            message.from_user.id,
+            "confirm_ban",
+            **{key: value for key, value in flow.items() if key != "state"},
+            reason=reason,
+        )
+        await edit_telegram_text(
+            bot,
+            chat_id=flow["service_chat_id"],
+            message_id=flow["service_message_id"],
+            text=(
+                f"Подтверди бан клиента {flow['user_id']}.\n\n"
+                f"Причина: {reason}"
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🚫 Подтвердить бан",
+                            callback_data=AdminClientCallback(
+                                action="ban_confirm", user_id=int(flow["user_id"])
+                            ).pack(),
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="❌ Отмена", callback_data="admin_flow_cancel"
+                        )
+                    ],
+                ]
+            ),
+        )
+    elif state == "await_expiry":
         try:
             expire_date = parse_admin_expiry_input(message.text or "")
         except ValueError:

@@ -208,6 +208,12 @@ class Database:
             self._ensure_column(conn, "clients", "telegram_blocked_at", "TEXT")
             self._ensure_column(conn, "clients", "last_telegram_error", "TEXT")
             self._ensure_column(
+                conn, "clients", "is_banned", "INTEGER NOT NULL DEFAULT 0"
+            )
+            self._ensure_column(conn, "clients", "banned_at", "TEXT")
+            self._ensure_column(conn, "clients", "banned_by", "INTEGER")
+            self._ensure_column(conn, "clients", "ban_reason", "TEXT")
+            self._ensure_column(
                 conn, "clients", "telegram_reachability_updated_at", "TEXT"
             )
             self._ensure_column(conn, "client_peers", "config_name", "TEXT")
@@ -335,6 +341,80 @@ class Database:
                 (error_type[:100], user_id),
             )
             conn.commit()
+
+    def is_client_banned(self, user_id: int) -> bool:
+        """Return whether an existing client is administratively banned."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT is_banned FROM clients WHERE telegram_user_id=?", (user_id,)
+            ).fetchone()
+        return bool(row and row[0])
+
+    def set_client_ban(
+        self,
+        user_id: int,
+        admin_id: int,
+        banned: bool,
+        reason: str | None = None,
+    ) -> bool:
+        """Persist a reversible ban and its audit record atomically."""
+        normalized_reason = " ".join((reason or "").split()) or None
+        if normalized_reason and len(normalized_reason) > 500:
+            raise ValueError("Ban reason must not exceed 500 characters")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE clients SET is_banned=?,
+                    banned_at=CASE WHEN ?=1 THEN CURRENT_TIMESTAMP ELSE NULL END,
+                    banned_by=CASE WHEN ?=1 THEN ? ELSE NULL END,
+                    ban_reason=CASE WHEN ?=1 THEN ? ELSE NULL END,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE telegram_user_id=?
+                """,
+                (
+                    int(banned),
+                    int(banned),
+                    int(banned),
+                    admin_id,
+                    int(banned),
+                    normalized_reason,
+                    user_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                return False
+            conn.execute(
+                "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                (
+                    f"telegram:{user_id}",
+                    "admin_ban_client" if banned else "admin_unban_client",
+                    json.dumps(
+                        {
+                            "admin_id": admin_id,
+                            "client_id": user_id,
+                            "reason": normalized_reason,
+                        },
+                        sort_keys=True,
+                    ),
+                ),
+            )
+            conn.commit()
+        return True
+
+    def has_active_subscription(self, user_id: int) -> bool:
+        """Return whether paid access is currently valid."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM subscriptions
+                WHERE telegram_user_id=? AND is_active=1 AND payment_status='paid'
+                  AND expire_date IS NOT NULL AND datetime(expire_date) > datetime('now')
+                """,
+                (user_id,),
+            ).fetchone()
+        return row is not None
 
     def get_telegram_ui_panel(self, user_id: int) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -751,6 +831,34 @@ class Database:
             conn.row_factory = sqlite3.Row
             return [dict(row) for row in conn.execute(sql, (user_id,)).fetchall()]
 
+    def get_client_visible_configs(self, user_id: int) -> list[dict[str, Any]]:
+        """Return configurations a client may manage, including missing peers."""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT * FROM client_peers
+                WHERE telegram_user_id=? AND role IN ('primary', 'additional')
+                  AND admin_enabled=1
+                ORDER BY CASE role WHEN 'primary' THEN 0 ELSE 1 END, id
+                """,
+                (user_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_additional_configs(self, user_id: int) -> int:
+        """Count all additional records, including inactive admin-created ones."""
+        with self._connect() as conn:
+            return int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) FROM client_peers
+                    WHERE telegram_user_id=? AND role='additional'
+                    """,
+                    (user_id,),
+                ).fetchone()[0]
+            )
+
     def get_all_managed_client_peers(self) -> list[dict[str, Any]]:
         """Return all bound peers eligible for Cascade group reconciliation."""
         with self._connect() as conn:
@@ -865,6 +973,52 @@ class Database:
             conn.execute(
                 "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
                 (f"telegram:{user_id}", operation, details),
+            )
+            conn.commit()
+
+    def log_client_config_change(
+        self,
+        user_id: int,
+        peer_id: int,
+        operation: str,
+        *,
+        server_key: str | None = None,
+        config_name: str | None = None,
+        cascade_missing: bool | None = None,
+    ) -> None:
+        """Audit a self-service configuration mutation."""
+        details = json.dumps(
+            {
+                "client_id": user_id,
+                "peer_id": peer_id,
+                "server_key": server_key,
+                "config_name": config_name,
+                "cascade_missing": cascade_missing,
+            },
+            sort_keys=True,
+        )
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                (f"telegram:{user_id}", operation, details),
+            )
+            conn.commit()
+
+    def log_client_state_sync(
+        self, admin_id: int, user_id: int, operation: str, result: dict[str, int]
+    ) -> None:
+        """Audit Cascade synchronization performed for a ban transition."""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                (
+                    f"telegram:{user_id}",
+                    operation,
+                    json.dumps(
+                        {"admin_id": admin_id, "client_id": user_id, **result},
+                        sort_keys=True,
+                    ),
+                ),
             )
             conn.commit()
 
@@ -1052,7 +1206,8 @@ class Database:
                 for row in conn.execute(
                     """
                     SELECT telegram_user_id FROM clients
-                    WHERE telegram_reachable IS NULL OR telegram_reachable=1
+                    WHERE (telegram_reachable IS NULL OR telegram_reachable=1)
+                      AND is_banned=0
                     ORDER BY telegram_user_id
                     """
                 )
@@ -1189,6 +1344,7 @@ class Database:
             rows = conn.execute(
                 f"""
                 SELECT c.telegram_user_id, c.telegram_username, c.promo,
+                       c.is_banned, c.banned_at, c.banned_by, c.ban_reason,
                        s.expire_date, s.is_active, s.payment_status,
                        cp.server_key, cp.interface_id, cp.peer_name,
                        cp.cascade_peer_id,
@@ -1244,6 +1400,7 @@ class Database:
             row = conn.execute(
                 """
                 SELECT c.telegram_user_id, c.telegram_username, c.promo,
+                       c.is_banned, c.banned_at, c.banned_by, c.ban_reason,
                        s.expire_date, s.is_active, s.payment_status,
                        cp.server_key, cp.interface_id, cp.peer_name,
                        cp.cascade_peer_id,
@@ -1911,6 +2068,7 @@ class Database:
                 FROM subscriptions s JOIN clients c USING(telegram_user_id)
                 WHERE ({where})
                   AND (c.telegram_reachable IS NULL OR c.telegram_reachable=1)
+                  AND c.is_banned=0
                 ORDER BY s.expire_date
                 """
             ).fetchall()
