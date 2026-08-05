@@ -37,6 +37,78 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(self.db.cleanup_expired_reservations(), 1)
         self.assertIsNone(self.db.get_active_reservation(10))
 
+    def test_client_operational_delete_preserves_finance_and_audit(self):
+        self.db.ensure_subscription(
+            10, "alice", "2030-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        self.db.save_client_peer(
+            10, "server-a", "if-a", "primary", "key-a", "alice", "primary"
+        )
+        self.db.save_client_peer(
+            10, "server-a", "if-a", "legacy", "key-b", "legacy", "manual"
+        )
+        self.db.create_reservation(10, "server-a", "if-a", 30)
+        self.db.add_provisioning_task(
+            10, "sync_access", {"expire_date": "2030-01-01 00:00:00"}, "test"
+        )
+        self.db.set_telegram_ui_panel(10, 10, 100)
+        self.db.set_admin_workflow(10, "own", "active", {"value": 1})
+        self.db.set_admin_workflow(99, "target", "active", {"user_id": 10})
+        self.db.set_admin_workflow(99, "other", "active", {"user_id": 11})
+        self.db.add_payment("payment-10", 10, 100, "stars", "14_days")
+        self.db.record_star_transaction(
+            "stars-10", "incoming", 100, 1, user_id=10
+        )
+        self.db.log_admin_client_deletion(
+            99,
+            10,
+            "previous_audit",
+            deleted=0,
+            already_missing=0,
+            failed=1,
+        )
+
+        counts = self.db.delete_client_operational_data(
+            99, 10, deleted=1, already_missing=1
+        )
+
+        self.assertEqual(counts["peers"], 2)
+        self.assertIsNone(self.db.get_admin_client_details(10))
+        self.assertIsNone(self.db.get_active_reservation(10))
+        self.assertIsNone(self.db.get_telegram_ui_panel(10))
+        self.assertIsNone(self.db.get_admin_workflow(10, "own"))
+        self.assertIsNone(self.db.get_admin_workflow(99, "target"))
+        self.assertIsNotNone(self.db.get_admin_workflow(99, "other"))
+        self.assertIsNotNone(self.db.get_payment_by_id("payment-10"))
+        with closing(sqlite3.connect(self.path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM star_transactions WHERE user_id=10"
+                ).fetchone()[0],
+                1,
+            )
+            operations = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT operation FROM operation_logs WHERE peer_name='telegram:10'"
+                )
+            }
+            self.assertIn("previous_audit", operations)
+            self.assertIn("admin_delete_client", operations)
+
+        self.db.upsert_client(10, "alice-returned")
+        self.assertEqual(
+            self.db.get_admin_client_details(10)["telegram_username"],
+            "alice-returned",
+        )
+
+    def test_client_operational_delete_requires_existing_client(self):
+        self.assertIsNone(
+            self.db.delete_client_operational_data(
+                99, 404, deleted=0, already_missing=0
+            )
+        )
+
     def test_notification_windows_do_not_label_near_expiry_as_tomorrow(self):
         now = datetime.now(UTC).replace(tzinfo=None)
         subscriptions = {

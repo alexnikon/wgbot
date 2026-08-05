@@ -576,6 +576,50 @@ class Database:
             conn.row_factory = sqlite3.Row
             return [dict(row) for row in conn.execute(sql, (user_id,)).fetchall()]
 
+    def get_client_cascade_peers(self, user_id: int) -> list[dict[str, Any]]:
+        """Return every known Cascade peer, including queued orphan cleanup targets."""
+        peers = self.get_client_peers(user_id, bound_only=True)
+        identities = {
+            (
+                str(peer["server_key"]),
+                str(peer["interface_id"]),
+                str(peer["cascade_peer_id"]),
+            )
+            for peer in peers
+        }
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT payload FROM provisioning_tasks
+                WHERE telegram_user_id=? AND operation='delete_cascade_peer'
+                """,
+                (user_id,),
+            ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row[0])
+                if not isinstance(payload, dict):
+                    continue
+                identity = (
+                    str(payload.get("server_key") or "").strip(),
+                    str(payload.get("interface_id") or "").strip(),
+                    str(payload.get("cascade_peer_id") or "").strip(),
+                )
+            except (TypeError, ValueError):
+                continue
+            if not all(identity) or identity in identities:
+                continue
+            identities.add(identity)
+            peers.append(
+                {
+                    "server_key": identity[0],
+                    "interface_id": identity[1],
+                    "cascade_peer_id": identity[2],
+                    "role": "orphan_cleanup",
+                }
+            )
+        return peers
+
     def set_client_peer_group(self, peer_id: int, group_name: str | None) -> bool:
         """Store the last group verified for one managed Cascade peer."""
         with self._connect() as conn:
@@ -849,6 +893,123 @@ class Database:
                 (f"telegram:{user_id}", operation, details),
             )
             conn.commit()
+
+    def log_admin_client_deletion(
+        self,
+        admin_id: int,
+        user_id: int,
+        operation: str,
+        *,
+        deleted: int,
+        already_missing: int,
+        failed: int,
+    ) -> None:
+        """Audit a successful or failed administrative client deletion."""
+        details = json.dumps(
+            {
+                "admin_id": admin_id,
+                "client_id": user_id,
+                "deleted": deleted,
+                "already_missing": already_missing,
+                "failed": failed,
+            },
+            sort_keys=True,
+        )
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                (f"telegram:{user_id}", operation, details),
+            )
+            conn.commit()
+
+    def delete_client_operational_data(
+        self,
+        admin_id: int,
+        user_id: int,
+        *,
+        deleted: int,
+        already_missing: int,
+    ) -> dict[str, int] | None:
+        """Atomically remove client runtime state while retaining finance and audit data."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            exists = conn.execute(
+                "SELECT 1 FROM clients WHERE telegram_user_id=?", (user_id,)
+            ).fetchone()
+            if not exists:
+                conn.rollback()
+                return None
+
+            counts = {
+                "peers": int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM client_peers WHERE telegram_user_id=?",
+                        (user_id,),
+                    ).fetchone()[0]
+                ),
+                "reservations": int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM server_reservations WHERE telegram_user_id=?",
+                        (user_id,),
+                    ).fetchone()[0]
+                ),
+                "provisioning_tasks": int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM provisioning_tasks WHERE telegram_user_id=?",
+                        (user_id,),
+                    ).fetchone()[0]
+                ),
+                "telegram_ui_panels": int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM telegram_ui_panels WHERE telegram_user_id=?",
+                        (user_id,),
+                    ).fetchone()[0]
+                ),
+            }
+            workflow_cursor = conn.execute(
+                """
+                DELETE FROM admin_workflows
+                WHERE admin_id=?
+                   OR CAST(json_extract(data, '$.user_id') AS INTEGER)=?
+                """,
+                (user_id, user_id),
+            )
+            counts["admin_workflows"] = workflow_cursor.rowcount
+            conn.execute(
+                "DELETE FROM server_reservations WHERE telegram_user_id=?", (user_id,)
+            )
+            conn.execute(
+                "DELETE FROM provisioning_tasks WHERE telegram_user_id=?", (user_id,)
+            )
+            conn.execute(
+                "DELETE FROM telegram_ui_panels WHERE telegram_user_id=?", (user_id,)
+            )
+            client_cursor = conn.execute(
+                "DELETE FROM clients WHERE telegram_user_id=?", (user_id,)
+            )
+            if client_cursor.rowcount != 1:
+                conn.rollback()
+                return None
+            details = json.dumps(
+                {
+                    "admin_id": admin_id,
+                    "client_id": user_id,
+                    "deleted": deleted,
+                    "already_missing": already_missing,
+                    "failed": 0,
+                    "operational_rows": counts,
+                },
+                sort_keys=True,
+            )
+            conn.execute(
+                """
+                INSERT INTO operation_logs(peer_name, operation, details)
+                VALUES (?, 'admin_delete_client', ?)
+                """,
+                (f"telegram:{user_id}", details),
+            )
+            conn.commit()
+            return counts
 
     def get_peer_by_telegram_id(self, telegram_user_id: int) -> dict[str, Any] | None:
         """Return a compatibility view consumed by existing bot UI handlers."""

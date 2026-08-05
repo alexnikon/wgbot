@@ -26,7 +26,7 @@ from callbacks import (
     PaymentMethodCallback,
     RefundConfirmationCallback,
 )
-from cascade_api import CascadeNotFound
+from cascade_api import CascadeNotFound, ClientDeletionResult
 from database import Database
 from handlers.access import (
     client_config_keyboard,
@@ -44,9 +44,11 @@ from handlers.admin import (
     config_details_keyboard,
     config_error_back_keyboard,
     config_list_keyboard,
+    confirm_client_deletion,
     confirm_expiry_change,
     confirmed_managed_client_group,
     delete_additional_config,
+    delete_client,
     download_paid_client_config,
     format_admin_expiry,
     format_config,
@@ -837,6 +839,7 @@ class TelegramDatabaseTests(unittest.TestCase):
         self.assertIn("🗂 Конфиги", labels)
         self.assertIn("📅 Срок доступа", labels)
         self.assertIn("👥 Группа", labels)
+        self.assertIn("🗑 Удалить клиента", labels)
         self.assertEqual(location_config_filename("USA NY"), "USA-NY.conf")
         self.assertEqual(location_config_filename("Finland / Helsinki"), "Finland-Helsinki.conf")
         empty_keyboard, total = client_list_keyboard(self.db, view="details", page=0)
@@ -1031,6 +1034,86 @@ class TelegramDatabaseTests(unittest.TestCase):
                 )
             )
         router.delete_additional_config.assert_awaited_once_with(11, peer_id)
+
+    def test_admin_client_delete_confirmation_and_self_protection(self):
+        self.db.upsert_client(10, "alice")
+        callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=99),
+            message=SimpleNamespace(edit_text=AsyncMock()),
+        )
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                confirm_client_deletion(
+                    callback,
+                    self.db,
+                    AsyncMock(),
+                    AdminClientCallback(action="delete", user_id=10),
+                )
+            )
+        confirmation = callback.message.edit_text.await_args.args[0]
+        self.assertIn("Telegram ID: 10", confirmation)
+        self.assertIn("Платёжная история и аудит сохранятся", confirmation)
+
+        self_callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=10),
+            message=SimpleNamespace(edit_text=AsyncMock()),
+        )
+        cascade_router = SimpleNamespace(delete_client=AsyncMock())
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                delete_client(
+                    self_callback,
+                    self.db,
+                    cascade_router,
+                    AsyncMock(),
+                    AdminClientCallback(action="delete_confirm", user_id=10),
+                )
+            )
+        cascade_router.delete_client.assert_not_awaited()
+        self.assertIn(
+            "Нельзя удалить собственный профиль",
+            self_callback.message.edit_text.await_args.args[0],
+        )
+
+    def test_admin_client_delete_reports_success_and_stale_callback(self):
+        self.db.upsert_client(10, "alice")
+        callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=99),
+            message=SimpleNamespace(edit_text=AsyncMock()),
+        )
+
+        async def delete_and_persist(user_id, admin_id):
+            self.db.delete_client_operational_data(
+                admin_id, user_id, deleted=2, already_missing=1
+            )
+            return ClientDeletionResult(deleted=2, already_missing=1)
+
+        cascade_router = SimpleNamespace(delete_client=AsyncMock(side_effect=delete_and_persist))
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                delete_client(
+                    callback,
+                    self.db,
+                    cascade_router,
+                    AsyncMock(),
+                    AdminClientCallback(action="delete_confirm", user_id=10),
+                )
+            )
+        self.assertIn("Клиент удалён навсегда", callback.message.edit_text.await_args.args[0])
+
+        cascade_router.delete_client.reset_mock()
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                delete_client(
+                    callback,
+                    self.db,
+                    cascade_router,
+                    AsyncMock(),
+                    AdminClientCallback(action="delete_confirm", user_id=10),
+                )
+            )
+        cascade_router.delete_client.assert_not_awaited()
+        self.assertIn("Клиент не найден", callback.message.edit_text.await_args.args[0])
 
     def test_admin_download_sends_file_privately_and_audits(self):
         self.db.ensure_subscription(10, "alice", "2000-01-01 00:00:00", "paid", "30_days", "stars")

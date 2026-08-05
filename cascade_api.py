@@ -36,6 +36,15 @@ class CascadeCapacityError(CascadeError):
 
 
 @dataclass(frozen=True)
+class ClientDeletionResult:
+    """Summarize an administrative client deletion attempt."""
+
+    deleted: int = 0
+    already_missing: int = 0
+    failed: int = 0
+
+
+@dataclass(frozen=True)
 class CascadeServer:
     server_key: str
     base_url: str
@@ -621,9 +630,14 @@ class CascadeRouter:
     async def restore_peer_groups(
         self, user_id: int, original_groups: dict[str, str]
     ) -> None:
-        await self._restore_peer_groups(
-            user_id, {int(peer_id): group for peer_id, group in original_groups.items()}
-        )
+        user_lock = self._user_locks.get(user_id)
+        if user_lock is None:
+            user_lock = asyncio.Lock()
+            self._user_locks[user_id] = user_lock
+        async with user_lock:
+            await self._restore_peer_groups(
+                user_id, {int(peer_id): group for peer_id, group in original_groups.items()}
+            )
 
     async def _change_client_group_unlocked(
         self, user_id: int, group_name: str
@@ -736,6 +750,8 @@ class CascadeRouter:
             user_lock = asyncio.Lock()
             self._user_locks[user_id] = user_lock
         async with user_lock:
+            if not self.db.get_admin_client_details(user_id):
+                raise CascadeNotFound(f"No client profile for user {user_id}")
             existing = self.db.get_primary_client_peer(user_id)
             if existing:
                 try:
@@ -1137,6 +1153,76 @@ class CascadeRouter:
                 raise CascadeError("Failed to remove the deleted configuration locally")
             return peer, cascade_peer_missing
 
+    async def delete_client(
+        self, user_id: int, admin_id: int
+    ) -> ClientDeletionResult:
+        """Delete all Cascade peers and then the client's operational database state."""
+        user_lock = self._user_locks.get(user_id)
+        if user_lock is None:
+            user_lock = asyncio.Lock()
+            self._user_locks[user_id] = user_lock
+        async with user_lock:
+            if not self.db.get_admin_client_details(user_id):
+                raise CascadeNotFound(f"No client profile for user {user_id}")
+
+            deleted = 0
+            already_missing = 0
+            failed = 0
+            for peer in self.db.get_client_cascade_peers(user_id):
+                try:
+                    api = self.get_api(str(peer["server_key"]))
+                    try:
+                        await api.get_peer(
+                            str(peer["cascade_peer_id"]), str(peer["interface_id"])
+                        )
+                    except CascadeNotFound:
+                        already_missing += 1
+                        continue
+                    try:
+                        await api.delete_peer(
+                            str(peer["cascade_peer_id"]), str(peer["interface_id"])
+                        )
+                        deleted += 1
+                    except CascadeNotFound:
+                        already_missing += 1
+                except Exception as exc:
+                    failed += 1
+                    logger.error(
+                        "Failed to delete Cascade peer %s for user %s: %s",
+                        peer.get("cascade_peer_id"),
+                        user_id,
+                        type(exc).__name__,
+                    )
+
+            result = ClientDeletionResult(
+                deleted=deleted,
+                already_missing=already_missing,
+                failed=failed,
+            )
+            if failed:
+                self.db.log_admin_client_deletion(
+                    admin_id,
+                    user_id,
+                    "admin_delete_client_failed",
+                    deleted=deleted,
+                    already_missing=already_missing,
+                    failed=failed,
+                )
+                return result
+
+            try:
+                removed = self.db.delete_client_operational_data(
+                    admin_id,
+                    user_id,
+                    deleted=deleted,
+                    already_missing=already_missing,
+                )
+            except Exception as exc:
+                raise CascadeError("Failed to remove client data locally") from exc
+            if removed is None:
+                raise CascadeNotFound(f"No client profile for user {user_id}")
+            return result
+
     async def primary_peer_exists(self, user_id: int) -> bool:
         peer = self.db.get_primary_client_peer(user_id)
         if not peer:
@@ -1150,6 +1236,16 @@ class CascadeRouter:
             return False
 
     async def sync_user_access(self, user_id: int, expire_date: str) -> dict[str, int]:
+        user_lock = self._user_locks.get(user_id)
+        if user_lock is None:
+            user_lock = asyncio.Lock()
+            self._user_locks[user_id] = user_lock
+        async with user_lock:
+            return await self._sync_user_access_unlocked(user_id, expire_date)
+
+    async def _sync_user_access_unlocked(
+        self, user_id: int, expire_date: str
+    ) -> dict[str, int]:
         peers = self.db.get_client_peers(user_id, bound_only=True)
         result = {"total": len(peers), "updated": 0, "missing": 0, "failed": 0}
         is_future = datetime.fromisoformat(expire_date).replace(tzinfo=UTC) > datetime.now(UTC)

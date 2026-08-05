@@ -414,6 +414,31 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
                 except FileNotFoundError:
                     pass
 
+    async def test_stale_provisioning_cannot_recreate_deleted_client(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.upsert_client(10, "alice")
+        db.delete_client_operational_data(99, 10, deleted=0, already_missing=0)
+        api = ProvisioningCascadeAPI()
+        router = CascadeRouter(db, servers=[])
+        router.servers = [
+            CascadeServer("server-a", "https://a.test/admin", "a", "if-a", 1, 10)
+        ]
+        router.apis = {"server-a": api}
+        try:
+            with self.assertRaises(CascadeNotFound):
+                await router.create_user_peer(
+                    10, "alice", "alice", "2030-01-01 00:00:00"
+                )
+            self.assertEqual(api.created, 0)
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
     async def test_additional_config_is_created_on_selected_interface(self):
         handle, path = tempfile.mkstemp(suffix=".db")
         os.close(handle)
@@ -729,6 +754,126 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
                 await router.delete_additional_config(10, peer_id)
 
             self.assertIsNotNone(db.get_client_peer(peer_id, 10))
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_client_delete_removes_all_roles_across_servers(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.save_client_peer(
+            10, "server-a", "if-a", "primary", "key-a", "alice", "primary"
+        )
+        db.save_client_peer(
+            10, "server-b", "if-b", "additional", "key-b", "phone", "additional"
+        )
+        db.save_client_peer(
+            10, "server-a", "if-a", "legacy", "key-c", "legacy", "manual"
+        )
+        db.add_provisioning_task(
+            10,
+            "delete_cascade_peer",
+            {
+                "server_key": "server-b",
+                "interface_id": "if-orphan",
+                "cascade_peer_id": "orphan",
+            },
+            "cleanup retry",
+        )
+
+        class DeleteAPI:
+            def __init__(self, missing=()):
+                self.missing = set(missing)
+                self.deleted = []
+
+            async def get_peer(self, peer_id, interface_id=None):
+                if peer_id in self.missing:
+                    raise CascadeNotFound("missing")
+                return {"id": peer_id}
+
+            async def delete_peer(self, peer_id, interface_id=None):
+                self.deleted.append((peer_id, interface_id))
+
+        api_a = DeleteAPI(missing={"legacy"})
+        api_b = DeleteAPI()
+        router = CascadeRouter(db, servers=[])
+        router.apis = {"server-a": api_a, "server-b": api_b}
+        try:
+            result = await router.delete_client(10, 99)
+
+            self.assertEqual(result.deleted, 3)
+            self.assertEqual(result.already_missing, 1)
+            self.assertEqual(result.failed, 0)
+            self.assertEqual(api_a.deleted, [("primary", "if-a")])
+            self.assertEqual(
+                api_b.deleted,
+                [("additional", "if-b"), ("orphan", "if-orphan")],
+            )
+            self.assertIsNone(db.get_admin_client_details(10))
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_client_delete_preserves_database_until_retry_succeeds(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.save_client_peer(
+            10, "server-a", "if-a", "peer-a", "key-a", "alice", "primary"
+        )
+        db.save_client_peer(
+            10, "server-b", "if-b", "peer-b", "key-b", "phone", "additional"
+        )
+
+        class DeleteAPI:
+            def __init__(self, failing=False):
+                self.failing = failing
+                self.present = True
+
+            async def get_peer(self, peer_id, interface_id=None):
+                if not self.present:
+                    raise CascadeNotFound("missing")
+                return {"id": peer_id}
+
+            async def delete_peer(self, peer_id, interface_id=None):
+                if self.failing:
+                    raise CascadeError("unavailable")
+                self.present = False
+
+        api_a = DeleteAPI()
+        api_b = DeleteAPI(failing=True)
+        router = CascadeRouter(db, servers=[])
+        router.apis = {"server-a": api_a, "server-b": api_b}
+        try:
+            first = await router.delete_client(10, 99)
+
+            self.assertEqual(first.deleted, 1)
+            self.assertEqual(first.failed, 1)
+            self.assertIsNotNone(db.get_admin_client_details(10))
+
+            api_b.failing = False
+            second = await router.delete_client(10, 99)
+
+            self.assertEqual(second.deleted, 1)
+            self.assertEqual(second.already_missing, 1)
+            self.assertEqual(second.failed, 0)
+            self.assertIsNone(db.get_admin_client_details(10))
+            with db._connect() as conn:
+                operations = [
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT operation FROM operation_logs WHERE peer_name='telegram:10'"
+                    )
+                ]
+            self.assertIn("admin_delete_client_failed", operations)
+            self.assertIn("admin_delete_client", operations)
         finally:
             for suffix in ("", "-wal", "-shm"):
                 try:

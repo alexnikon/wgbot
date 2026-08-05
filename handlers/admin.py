@@ -253,6 +253,12 @@ def client_card_keyboard(user_id: int) -> InlineKeyboardMarkup:
                     callback_data=AdminClientCallback(action="group", user_id=user_id).pack(),
                 ),
             ],
+            [
+                InlineKeyboardButton(
+                    text="🗑 Удалить клиента",
+                    callback_data=AdminClientCallback(action="delete", user_id=user_id).pack(),
+                )
+            ],
             [InlineKeyboardButton(text="⬅️ К списку", callback_data="admin_client_list")],
         ]
     )
@@ -604,6 +610,127 @@ async def show_client_details(
         callback.message,
         format_client(client),
         reply_markup=client_card_keyboard(callback_data.user_id),
+    )
+
+
+@router.callback_query(AdminClientCallback.filter(F.action == "delete"))
+async def confirm_client_deletion(
+    callback: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    callback_data: AdminClientCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    if callback.from_user.id == callback_data.user_id:
+        await edit_bound_message(
+            callback.message,
+            "❌ Нельзя удалить собственный профиль администратора.",
+            reply_markup=client_card_keyboard(callback_data.user_id),
+        )
+        return
+    client = db.get_admin_client_details(callback_data.user_id)
+    if not client:
+        await edit_bound_message(
+            callback.message, "❌ Клиент не найден.", reply_markup=admin_dashboard_keyboard()
+        )
+        return
+    username = str(client.get("telegram_username") or "")
+    identity = f"@{username}" if username else "без username"
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🗑 Удалить навсегда",
+                    callback_data=AdminClientCallback(
+                        action="delete_confirm", user_id=callback_data.user_id
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=AdminClientCallback(
+                        action="details", user_id=callback_data.user_id
+                    ).pack(),
+                )
+            ],
+        ]
+    )
+    await edit_bound_message(
+        callback.message,
+        "Удалить клиента навсегда?\n\n"
+        f"Telegram ID: {callback_data.user_id}\n"
+        f"Клиент: {identity}\n"
+        f"Конфигов: {int(client.get('device_count') or 0)}\n\n"
+        "Все peer'ы будут удалены из Cascade, а профиль, подписка и конфиги — "
+        "из базы данных. Платёжная история и аудит сохранятся. "
+        "Это действие нельзя отменить.",
+        reply_markup=keyboard,
+    )
+
+
+@router.callback_query(AdminClientCallback.filter(F.action == "delete_confirm"))
+async def delete_client(
+    callback: types.CallbackQuery,
+    db: Database,
+    cascade_router: CascadeRouter,
+    safe_answer_callback,
+    callback_data: AdminClientCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    if callback.from_user.id == callback_data.user_id:
+        await edit_bound_message(
+            callback.message,
+            "❌ Нельзя удалить собственный профиль администратора.",
+            reply_markup=client_card_keyboard(callback_data.user_id),
+        )
+        return
+    if not db.get_admin_client_details(callback_data.user_id):
+        await edit_bound_message(
+            callback.message, "❌ Клиент не найден.", reply_markup=admin_dashboard_keyboard()
+        )
+        return
+    try:
+        result = await cascade_router.delete_client(
+            callback_data.user_id, callback.from_user.id
+        )
+    except CascadeNotFound:
+        await edit_bound_message(
+            callback.message, "❌ Клиент не найден.", reply_markup=admin_dashboard_keyboard()
+        )
+        return
+    except CascadeError:
+        logger.exception("Failed to delete client")
+        await edit_bound_message(
+            callback.message,
+            "❌ Не удалось завершить удаление клиента. Локальные данные сохранены; "
+            "попробуй повторить.",
+            reply_markup=client_card_keyboard(callback_data.user_id),
+        )
+        return
+    if result.failed:
+        await edit_bound_message(
+            callback.message,
+            "❌ Не все peer'ы удалось удалить из Cascade. Локальные данные сохранены.\n\n"
+            f"Удалено: {result.deleted}\n"
+            f"Уже отсутствовало: {result.already_missing}\n"
+            f"Ошибок: {result.failed}\n\n"
+            "Повтори удаление, когда серверы будут доступны.",
+            reply_markup=client_card_keyboard(callback_data.user_id),
+        )
+        return
+    keyboard, total = client_list_keyboard(db, view="details", page=0)
+    await edit_bound_message(
+        callback.message,
+        "✅ Клиент удалён навсегда.\n\n"
+        f"Удалено из Cascade: {result.deleted}\n"
+        f"Уже отсутствовало: {result.already_missing}\n\n"
+        f"Клиентов осталось: {total}",
+        reply_markup=keyboard,
     )
 
 
