@@ -13,7 +13,7 @@ from callbacks import (
     StarApprovalCallback,
     YooKassaCancelCallback,
 )
-from cascade_api import CascadeCapacityError, CascadeRouter
+from cascade_api import CascadeRouter
 from database import Database
 from message_templates import format_remaining_until, payment_success_message
 from payment import PaymentManager
@@ -46,7 +46,6 @@ def _parse_legacy_method(
 async def handle_pay_stars_callback(
     callback_query: types.CallbackQuery,
     payment_manager: PaymentManager,
-    cascade_router: CascadeRouter,
     safe_answer_callback,
     safe_edit_callback_message,
     create_back_to_menu_keyboard,
@@ -90,16 +89,6 @@ async def handle_pay_stars_callback(
     await safe_answer_callback(callback_query)
 
     async with user_action_locks.hold(user_id):
-        try:
-            await cascade_router.ensure_reservation(user_id)
-        except CascadeCapacityError:
-            await safe_edit_callback_message(
-                callback_query.message,
-                "⚠️ Все VPN серверы временно заполнены. Оплата сейчас недоступна, попробуй позже.",
-                reply_markup=create_back_to_menu_keyboard(),
-            )
-            return
-
         success = await payment_manager.send_stars_payment_request(
             callback_query.message.chat.id, user_id, tariff_key, username
         )
@@ -130,7 +119,6 @@ async def handle_pay_stars_callback(
 async def handle_pay_yookassa_callback(
     callback_query: types.CallbackQuery,
     payment_manager: PaymentManager,
-    cascade_router: CascadeRouter,
     safe_answer_callback,
     safe_edit_callback_message,
     create_back_to_menu_keyboard,
@@ -172,17 +160,6 @@ async def handle_pay_yookassa_callback(
         return
 
     await safe_answer_callback(callback_query)
-
-    async with user_action_locks.hold(user_id):
-        try:
-            await cascade_router.ensure_reservation(user_id)
-        except CascadeCapacityError:
-            await safe_edit_callback_message(
-                callback_query.message,
-                "⚠️ Все VPN серверы временно заполнены. Оплата сейчас недоступна, попробуй позже.",
-                reply_markup=create_back_to_menu_keyboard(),
-            )
-            return
 
     # Check if YooKassa is configured
     if (
@@ -315,7 +292,6 @@ async def handle_cancel_yookassa_callback(
             payment_id,
         )
         if canceled:
-            await asyncio.to_thread(payment_manager.db.release_reservation, user_id)
             await safe_answer_callback(callback_query, "✅ Платеж отменен")
         else:
             payment = await asyncio.to_thread(

@@ -287,7 +287,7 @@ class ComplimentaryDatabaseTests(unittest.TestCase):
         self.db.sync_expired_access_statuses()
 
         self.assertEqual(self.db.get_client_access_state(10).source, "complimentary")
-        self.assertEqual(self.db.get_primary_client_peer(10)["enabled"], 1)
+        self.assertEqual(self.db.get_managed_client_configs(10)[0]["enabled"], 1)
 
     def test_complimentary_menu_hides_purchase_and_extension(self):
         import bot as bot_module
@@ -302,7 +302,7 @@ class ComplimentaryDatabaseTests(unittest.TestCase):
             button.text for row in keyboard.inline_keyboard for button in row
         }
         self.assertIn("🎁 Бесплатный доступ", labels)
-        self.assertIn("Создать файл конфигурации", labels)
+        self.assertIn("📥 Создать файл конфигурации", labels)
         self.assertNotIn("💳 Купить доступ", labels)
         self.assertNotIn("🔄 Продлить подписку", labels)
 
@@ -322,8 +322,8 @@ class ComplimentaryDatabaseTests(unittest.TestCase):
         labels = {
             button.text for row in keyboard.inline_keyboard for button in row
         }
-        self.assertIn("Файлы конфигурации", labels)
-        self.assertNotIn("Создать файл конфигурации", labels)
+        self.assertIn("📥 Файлы конфигурации", labels)
+        self.assertNotIn("📥 Создать файл конфигурации", labels)
 
 
 class RecordingCascadeAPI:
@@ -427,7 +427,6 @@ class ComplimentaryCascadeTests(unittest.IsolatedAsyncioTestCase):
             is_tariff_enabled=lambda _tariff: True,
             send_stars_payment_request=AsyncMock(return_value=True),
         )
-        cascade_router = SimpleNamespace(ensure_reservation=AsyncMock())
         callback = SimpleNamespace(
             from_user=SimpleNamespace(id=10, username="alice"),
             message=SimpleNamespace(chat=SimpleNamespace(id=10)),
@@ -436,7 +435,6 @@ class ComplimentaryCascadeTests(unittest.IsolatedAsyncioTestCase):
         await handle_pay_stars_callback(
             callback,
             payment_manager,
-            cascade_router,
             answer,
             AsyncMock(),
             lambda: None,
@@ -451,7 +449,6 @@ class ComplimentaryCascadeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         answer.assert_awaited_once_with(callback, "🎁 Бесплатный доступ уже активен")
-        cascade_router.ensure_reservation.assert_not_awaited()
         payment_manager.send_stars_payment_request.assert_not_awaited()
 
     async def test_stale_free_provisioning_task_does_not_restore_access(self):
@@ -472,7 +469,6 @@ class ComplimentaryCascadeTests(unittest.IsolatedAsyncioTestCase):
             self.db,
             worker_router,
             AsyncMock(),
-            AsyncMock(),
             interval_seconds=60,
             lease_seconds=30,
         )
@@ -481,7 +477,7 @@ class ComplimentaryCascadeTests(unittest.IsolatedAsyncioTestCase):
 
         await worker._process(tasks[0])
 
-        worker_router.create_user_peer.assert_not_awaited()
+        self.assertEqual(worker_router.mock_calls, [])
         self.assertFalse(self.db.get_client_access_state(20).active)
         with sqlite3.connect(self.path) as connection:
             status = connection.execute(
@@ -598,7 +594,7 @@ class ComplimentaryCascadeTests(unittest.IsolatedAsyncioTestCase):
         client = self.db.get_admin_client_details(30)
         self.assertEqual(client["identity_source"], "username_invite")
         self.assertEqual(client["is_complimentary"], 1)
-        self.assertIsNone(self.db.get_primary_client_peer(30))
+        self.assertEqual(self.db.get_managed_client_configs(30), [])
         notify_admins.assert_awaited_once()
         self.assertIn(
             "автоматически привязан",

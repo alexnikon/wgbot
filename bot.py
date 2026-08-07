@@ -572,9 +572,9 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text=(
-                        "Создать файл конфигурации"
+                        "📥 Создать файл конфигурации"
                         if config_count == 0
-                        else "Файлы конфигурации"
+                        else "📥 Файлы конфигурации"
                     ),
                     callback_data=(
                         ClientConfigCallback(action="create").pack()
@@ -701,14 +701,9 @@ async def check_expired_peers():
 
 async def retry_provisioning_tasks() -> None:
     """Run the durable Cascade provisioning worker."""
-
-    async def send_worker_config(user_id: int, config: bytes) -> bool:
-        return await send_config_with_confirmation(user_id, config, caption=None)
-
     worker = ProvisioningWorker(
         db,
         cascade_router,
-        send_worker_config,
         notify_admins,
         CASCADE_RETRY_INTERVAL_SECONDS,
         PROVISIONING_LEASE_SECONDS,

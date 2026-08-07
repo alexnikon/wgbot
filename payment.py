@@ -293,7 +293,6 @@ class PaymentManager:
             Payment ID and URL, or None on error
         """
         try:
-            reservation = self.db.get_active_reservation(user_id)
             if not self.yookassa_client.shop_id or not self.yookassa_client.secret_key:
                 logger.error("YooKassa is not configured")
                 return None
@@ -327,9 +326,6 @@ class PaymentManager:
                 "username": effective_username,
                 "description": f"Доступ к сервису на {tariff_data['name']}",
             }
-            if reservation:
-                metadata["server_key"] = reservation["server_key"]
-                metadata["interface_id"] = reservation["interface_id"]
             if payment_chat_id is not None:
                 metadata["payment_chat_id"] = str(payment_chat_id)
             if payment_message_id is not None:
@@ -552,13 +548,6 @@ class PaymentManager:
             if pre_checkout_query.currency != expected_currency:
                 await pre_checkout_query.answer(ok=False, error_message="Неверная валюта платежа")
                 return False
-            if not self.db.get_active_reservation(user_id):
-                await pre_checkout_query.answer(
-                    ok=False,
-                    error_message="Счет устарел. Вернитесь в бот и создайте новый счет.",
-                )
-                return False
-
             tariff_data = self.get_user_tariffs(user_id).get(tariff_key)
             if not tariff_data:
                 await pre_checkout_query.answer(ok=False, error_message="Тариф недоступен")

@@ -2518,7 +2518,7 @@ async def confirm_config_deletion(
 
 
 @router.callback_query(AdminConfigCallback.filter(F.action == "delete_confirm"))
-async def delete_additional_config(
+async def delete_managed_config_handler(
     callback: types.CallbackQuery,
     db: Database,
     cascade_router: CascadeRouter,

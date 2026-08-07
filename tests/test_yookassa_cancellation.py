@@ -61,9 +61,8 @@ class YooKassaCancellationTests(unittest.IsolatedAsyncioTestCase):
             YooKassaCancelCallback(payment_id=payment_id),
         )
 
-    async def test_cancel_callback_marks_attempt_and_releases_reservation(self):
+    async def test_cancel_callback_marks_attempt(self):
         self.add_payment()
-        self.db.create_reservation(7, "server-a", "interface-a", 30)
         manager = SimpleNamespace(
             db=self.db,
             get_payment_selection_view=AsyncMock(return_value=("Tariffs", "Keyboard")),
@@ -85,7 +84,6 @@ class YooKassaCancellationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(self.db.get_payment_by_id("payment-1")["status"], "canceled")
-        self.assertIsNone(self.db.get_active_reservation(7))
         answer.assert_awaited_once_with(callback, "✅ Платеж отменен")
         edit.assert_awaited_once_with(
             callback.message,

@@ -9,7 +9,6 @@ from runtime_metrics import RuntimeMetrics
 
 logger = logging.getLogger(__name__)
 
-ConfigSender = Callable[[int, bytes], Awaitable[bool]]
 AdminNotifier = Callable[[str], Awaitable[None]]
 
 
@@ -20,7 +19,6 @@ class ProvisioningWorker:
         self,
         db: Database,
         cascade_router: CascadeRouter,
-        send_config: ConfigSender,
         notify_admins: AdminNotifier,
         interval_seconds: int,
         lease_seconds: int,
@@ -28,7 +26,6 @@ class ProvisioningWorker:
     ) -> None:
         self.db = db
         self.cascade_router = cascade_router
-        self.send_config = send_config
         self.notify_admins = notify_admins
         self.interval_seconds = interval_seconds
         self.lease_seconds = lease_seconds

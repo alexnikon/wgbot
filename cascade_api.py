@@ -3,7 +3,6 @@ import hashlib
 import json
 import logging
 import time
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,11 +11,7 @@ from weakref import WeakValueDictionary
 
 import httpx
 
-from config import (
-    CASCADE_REQUEST_TIMEOUT,
-    CASCADE_RESERVATION_MINUTES,
-    CASCADE_SERVERS_FILE,
-)
+from config import CASCADE_REQUEST_TIMEOUT, CASCADE_SERVERS_FILE
 from database import MANAGED_CONFIG_ROLE, Database, normalize_config_name
 from runtime_metrics import RuntimeMetrics
 
@@ -433,7 +428,6 @@ class CascadeRouter:
             server.server_key: CascadeAPI(server, metrics=metrics)
             for server in self.servers
         }
-        self._placement_lock = asyncio.Lock()
         self._user_locks: WeakValueDictionary[int, asyncio.Lock] = WeakValueDictionary()
 
     def get_server(self, server_key: str) -> CascadeServer:
@@ -719,189 +713,6 @@ class CascadeRouter:
             original = await self._change_client_group_unlocked(user_id, group_name)
             return len(original)
 
-    async def ensure_reservation(self, user_id: int) -> dict[str, Any] | None:
-        """Reserve capacity for a new user; existing users stay on their server."""
-        if self.db.get_primary_client_peer(user_id):
-            return None
-        current = self.db.get_active_reservation(user_id)
-        if current:
-            return current
-
-        async with self._placement_lock:
-            self.db.cleanup_expired_reservations()
-            current = self.db.get_active_reservation(user_id)
-            if current:
-                return current
-            for server in self.servers:
-                if not server.enabled:
-                    continue
-                try:
-                    peers = await self.get_api(server.server_key).list_peers()
-                except CascadeError as exc:
-                    logger.warning("Skipping unavailable Cascade server %s: %s", server.server_key, exc)
-                    continue
-                reserved = self.db.count_active_reservations(server.server_key)
-                if len(peers) + reserved >= server.max_peers:
-                    continue
-                self.db.create_reservation(
-                    user_id,
-                    server.server_key,
-                    server.interface_id,
-                    CASCADE_RESERVATION_MINUTES,
-                )
-                return self.db.get_active_reservation(user_id)
-        raise CascadeCapacityError("All Cascade servers are full or unavailable")
-
-    async def create_user_peer(
-        self, user_id: int, username: str | None, peer_name: str, expire_date: str
-    ) -> tuple[dict[str, Any], bytes]:
-        """Serialize peer reconciliation and creation for one Telegram user."""
-        user_lock = self._user_locks.get(user_id)
-        if user_lock is None:
-            user_lock = asyncio.Lock()
-            self._user_locks[user_id] = user_lock
-        async with user_lock:
-            if not self.db.get_admin_client_details(user_id):
-                raise CascadeNotFound(f"No client profile for user {user_id}")
-            access = self.db.get_client_access_state(user_id)
-            if not access.active:
-                raise CascadeError("Client access is not active")
-            expire_date = access.cascade_expiry or expire_date
-            existing = self.db.get_primary_client_peer(user_id)
-            if existing:
-                try:
-                    api = self.get_api(existing["server_key"])
-                    get_peer = getattr(api, "get_peer", None)
-                    if get_peer is not None:
-                        peer = await get_peer(
-                            existing["cascade_peer_id"], existing["interface_id"]
-                        )
-                        config = await api.download_config(
-                            existing["cascade_peer_id"], existing["interface_id"]
-                        )
-                        return peer, config
-                except CascadeNotFound:
-                    logger.warning(
-                        "Stored Cascade peer %s for user %s no longer exists",
-                        existing["cascade_peer_id"],
-                        user_id,
-                    )
-            return await self._create_user_peer_unlocked(
-                user_id, username, peer_name, expire_date
-            )
-
-    async def _create_user_peer_unlocked(
-        self, user_id: int, username: str | None, peer_name: str, expire_date: str
-    ) -> tuple[dict[str, Any], bytes]:
-        """Create and persist a primary peer, failing over before creation if needed."""
-        assigned_peer = self.db.get_primary_client_peer(user_id)
-        reservation = None if assigned_peer else await self.ensure_reservation(user_id)
-        candidates: list[CascadeServer] = []
-        if assigned_peer:
-            candidates.append(self.get_server(assigned_peer["server_key"]))
-        elif reservation:
-            candidates.append(self.get_server(reservation["server_key"]))
-        if not assigned_peer:
-            candidates.extend(
-                server for server in self.servers if server.enabled and server not in candidates
-            )
-        last_error: Exception | None = None
-        for server in candidates:
-            peer: dict[str, Any] | None = None
-            created_here = False
-            try:
-                api = self.get_api(server.server_key)
-                interface_id = (
-                    assigned_peer["interface_id"]
-                    if assigned_peer and assigned_peer["server_key"] == server.server_key
-                    else server.interface_id
-                )
-                peers = await api.list_peers()
-                matches = [
-                    item
-                    for item in peers
-                    if str(item.get("name") or "").strip() == peer_name
-                ]
-                if len(matches) > 1:
-                    raise CascadeError(
-                        f"Multiple Cascade peers named {peer_name!r} exist on {server.server_key}"
-                    )
-                if matches:
-                    peer = matches[0]
-                    public_key = str(peer.get("publicKey") or "").strip()
-                    if not peer.get("id") or not public_key:
-                        raise CascadeError("Reconciled Cascade peer has incomplete identity")
-                    config = await api.download_config(str(peer["id"]), interface_id)
-                    client_group = None
-                    with suppress(CascadeError):
-                        client_group = await api.resolve_client_group_name(
-                            self._peer_group_id(peer)
-                        )
-                    self.db.upsert_client(user_id, username)
-                    if not self.db.save_client_peer(
-                        user_id=user_id,
-                        server_key=server.server_key,
-                        interface_id=interface_id,
-                        cascade_peer_id=str(peer["id"]),
-                        public_key=public_key,
-                        peer_name=peer_name,
-                        role=MANAGED_CONFIG_ROLE,
-                        enabled=bool(peer.get("enabled", True)),
-                        client_group=client_group,
-                    ):
-                        raise CascadeError("Failed to persist the reconciled Cascade peer")
-                    self.db.release_reservation(user_id)
-                    return peer, config
-
-                if (
-                    not assigned_peer
-                    and (not reservation or reservation["server_key"] != server.server_key)
-                    and len(peers) + self.db.count_active_reservations(server.server_key)
-                    >= server.max_peers
-                ):
-                    continue
-                peer = await api.create_peer(peer_name, expire_date, interface_id)
-                created_here = True
-                public_key = str(peer.get("publicKey") or "").strip()
-                if not public_key:
-                    raise CascadeError("Cascade create response has no public key")
-                config = await api.download_config(str(peer["id"]), interface_id)
-                self.db.upsert_client(user_id, username)
-                saved = self.db.save_client_peer(
-                    user_id=user_id,
-                    server_key=server.server_key,
-                    interface_id=interface_id,
-                    cascade_peer_id=str(peer["id"]),
-                    public_key=public_key,
-                    peer_name=str(peer.get("name") or peer_name),
-                    role=MANAGED_CONFIG_ROLE,
-                    enabled=bool(peer.get("enabled", True)),
-                    client_group=server.client_group,
-                )
-                if not saved:
-                    raise CascadeError("Failed to persist the created Cascade peer")
-                self.db.release_reservation(user_id)
-                return peer, config
-            except Exception as exc:
-                last_error = exc
-                logger.error("Provisioning failed on %s for user %s: %s", server.server_key, user_id, exc)
-                if created_here and peer and peer.get("id"):
-                    try:
-                        await self.get_api(server.server_key).delete_peer(
-                            str(peer["id"]), interface_id
-                        )
-                    except Exception:
-                        logger.exception("Failed to compensate Cascade peer creation")
-        raise CascadeError(f"Failed to provision user on all Cascade servers: {last_error}")
-
-    async def get_primary_config(self, user_id: int) -> bytes:
-        peer = self.db.get_primary_client_peer(user_id)
-        if not peer:
-            raise CascadeNotFound(f"No primary Cascade peer for user {user_id}")
-        return await self.get_api(peer["server_key"]).download_config(
-            peer["cascade_peer_id"], peer["interface_id"]
-        )
-
     async def get_managed_config(self, user_id: int, peer_id: int) -> bytes:
         peer = self.db.get_client_peer(peer_id, user_id)
         if (
@@ -961,14 +772,6 @@ class CascadeRouter:
             if candidate.casefold() not in existing_names:
                 return candidate
         raise CascadeError("Unable to build a unique Cascade peer name")
-
-    async def build_additional_peer_name(
-        self, user_id: int, config_name: str, server_key: str, interface_id: str
-    ) -> str:
-        """Compatibility wrapper for callers migrating to managed configs."""
-        return await self.build_managed_peer_name(
-            user_id, config_name, server_key, interface_id
-        )
 
     async def create_managed_config(
         self,
@@ -1165,13 +968,6 @@ class CascadeRouter:
                         )
                 raise
 
-    async def create_additional_config(
-        self, *args: Any, **kwargs: Any
-    ) -> dict[str, Any]:
-        """Compatibility wrapper returning the stored managed config."""
-        stored, _ = await self.create_managed_config(*args, **kwargs)
-        return stored
-
     async def set_managed_config_active(
         self, user_id: int, peer_id: int, active: bool
     ) -> dict[str, Any]:
@@ -1228,12 +1024,6 @@ class CascadeRouter:
             if not self.db.delete_managed_config(peer_id, user_id):
                 raise CascadeError("Failed to remove the deleted configuration locally")
             return peer, cascade_peer_missing
-
-    async def delete_additional_config(
-        self, user_id: int, peer_id: int
-    ) -> tuple[dict[str, Any], bool]:
-        """Compatibility wrapper for callers migrating to managed configs."""
-        return await self.delete_managed_config(user_id, peer_id)
 
     async def delete_client(
         self, user_id: int, admin_id: int

@@ -21,21 +21,27 @@ class DatabaseTests(unittest.TestCase):
             except FileNotFoundError:
                 pass
 
-    def test_reservations_are_counted_and_released(self):
-        self.db.create_reservation(10, "server-a", "interface-a", 30)
-        self.assertEqual(self.db.count_active_reservations("server-a"), 1)
-        self.assertEqual(self.db.get_active_reservation(10)["server_key"], "server-a")
-        self.db.release_reservation(10)
-        self.assertEqual(self.db.count_active_reservations("server-a"), 0)
-
-    def test_expired_reservation_is_removed(self):
-        self.db.create_reservation(10, "server-a", "interface-a", 30)
+    def test_legacy_server_reservations_table_is_removed(self):
         with closing(sqlite3.connect(self.path)) as conn, conn:
             conn.execute(
-                "UPDATE server_reservations SET expires_at='2000-01-01 00:00:00'"
+                """
+                CREATE TABLE server_reservations (
+                    telegram_user_id INTEGER PRIMARY KEY,
+                    server_key TEXT NOT NULL,
+                    interface_id TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                )
+                """
             )
-        self.assertEqual(self.db.cleanup_expired_reservations(), 1)
-        self.assertIsNone(self.db.get_active_reservation(10))
+
+        Database(self.path)
+
+        with closing(sqlite3.connect(self.path)) as conn:
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                ("server_reservations",),
+            ).fetchone()
+        self.assertIsNone(table)
 
     def test_client_operational_delete_preserves_finance_and_audit(self):
         self.db.ensure_subscription(
@@ -47,7 +53,6 @@ class DatabaseTests(unittest.TestCase):
         self.db.save_client_peer(
             10, "server-a", "if-a", "legacy", "key-b", "legacy", "manual"
         )
-        self.db.create_reservation(10, "server-a", "if-a", 30)
         self.db.add_provisioning_task(
             10, "sync_access", {"expire_date": "2030-01-01 00:00:00"}, "test"
         )
@@ -74,7 +79,6 @@ class DatabaseTests(unittest.TestCase):
 
         self.assertEqual(counts["peers"], 2)
         self.assertIsNone(self.db.get_admin_client_details(10))
-        self.assertIsNone(self.db.get_active_reservation(10))
         self.assertIsNone(self.db.get_telegram_ui_panel(10))
         self.assertIsNone(self.db.get_admin_workflow(10, "own"))
         self.assertIsNone(self.db.get_admin_workflow(99, "target"))
@@ -160,7 +164,7 @@ class DatabaseTests(unittest.TestCase):
             enabled=True,
             config_name="Tablet",
         )
-        self.assertEqual(self.db.count_additional_configs(10), 2)
+        self.assertEqual(self.db.count_managed_configs(10), 2)
         self.assertEqual(
             [item["config_name"] for item in self.db.get_client_visible_configs(10)],
             ["Tablet"],
@@ -496,8 +500,8 @@ class DatabaseTests(unittest.TestCase):
         )
         primary, additional = self.db.get_managed_client_configs(10)
 
-        self.assertFalse(self.db.delete_additional_config(additional["id"], 11))
-        self.assertTrue(self.db.delete_additional_config(additional["id"], 10))
+        self.assertFalse(self.db.delete_managed_config(additional["id"], 11))
+        self.assertTrue(self.db.delete_managed_config(additional["id"], 10))
         self.assertTrue(self.db.delete_managed_config(primary["id"], 10))
         self.assertIsNone(self.db.get_client_peer(additional["id"], 10))
         self.assertIsNone(self.db.get_client_peer(primary["id"], 10))
@@ -544,7 +548,7 @@ class DatabaseTests(unittest.TestCase):
                 """
             )
         migrated = Database(legacy_path)
-        primary = migrated.get_primary_client_peer(10)
+        primary = migrated.get_managed_client_configs(10)[0]
         self.assertEqual(primary["config_name"], "Конфигурация 2")
         self.assertEqual(primary["role"], MANAGED_CONFIG_ROLE)
         self.assertEqual(primary["admin_enabled"], 1)
@@ -635,7 +639,6 @@ class DatabaseTests(unittest.TestCase):
 
     def test_runtime_stats_report_queue_and_subscription_gauges(self):
         self.db.activate_new_access(10, "alice", 30, "30_days", "stars")
-        self.db.create_reservation(11, "server-a", "interface-a", 30)
         self.db.add_provisioning_task(
             10, "sync_access", {"expire_date": "2030"}, "test task"
         )
@@ -647,7 +650,6 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(stats["provisioning_pending"], 1)
         self.assertEqual(stats["provisioning_running"], 0)
         self.assertEqual(stats["provisioning_failed"], 0)
-        self.assertEqual(stats["active_reservations"], 1)
 
 
 if __name__ == "__main__":

@@ -91,7 +91,7 @@ def client_config_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="➕ Создать конфиг",
+                    text="📥 Создать файл конфигурации",
                     callback_data=ClientConfigCallback(action="create").pack(),
                 )
             ]
@@ -112,7 +112,8 @@ def config_file_back_keyboard(peer_id: int = 0, page: int = 0) -> InlineKeyboard
                         page=max(0, page),
                     ).pack(),
                 )
-            ]
+            ],
+            [InlineKeyboardButton(text="🏠 На главную", callback_data="main")],
         ]
     )
 

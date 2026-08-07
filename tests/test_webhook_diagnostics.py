@@ -105,7 +105,6 @@ class WebhookDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             "expire_date": "2099-01-01 00:00:00",
             "is_extension": True,
         }
-        database.get_primary_client_peer.return_value = {"id": 1}
         cascade_router = SimpleNamespace(
             sync_user_access=AsyncMock(return_value={"failed": 0})
         )
@@ -159,12 +158,10 @@ class WebhookDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             "expire_date": "2099-01-01 00:00:00"
         }
         database.is_client_banned.return_value = True
-        database.get_primary_client_peer.return_value = {"id": 1}
         cascade_router = SimpleNamespace(
             sync_client_state=AsyncMock(
                 return_value={"updated": 1, "missing": 0, "failed": 0}
-            ),
-            create_user_peer=AsyncMock(),
+            )
         )
         send_message = AsyncMock(return_value=True)
         notify = AsyncMock()
@@ -196,7 +193,6 @@ class WebhookDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         database.apply_verified_payment.assert_called_once()
         send_message.assert_not_awaited()
         cascade_router.sync_client_state.assert_awaited_once_with(10)
-        cascade_router.create_user_peer.assert_not_awaited()
         notify.assert_awaited_once()
 
     async def test_yookassa_first_payment_keeps_config_separate(self):
@@ -252,7 +248,7 @@ class WebhookDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(send_message.await_args_list), 1)
         self.assertEqual(
             send_message.await_args_list[0].args[2]["inline_keyboard"][0][0]["text"],
-            "Создать файл конфигурации",
+            "📥 Создать файл конфигурации",
         )
         database.add_provisioning_task.assert_not_called()
 

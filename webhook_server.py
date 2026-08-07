@@ -93,7 +93,7 @@ def create_access_reply_markup(user_id: int) -> dict:
             "inline_keyboard": [
                 [
                     {
-                        "text": "Создать файл конфигурации",
+                        "text": "📥 Создать файл конфигурации",
                         "callback_data": ClientConfigCallback(action="create").pack(),
                     }
                 ]
@@ -101,7 +101,7 @@ def create_access_reply_markup(user_id: int) -> dict:
         }
     return {
         "inline_keyboard": [
-            [{"text": "Файлы конфигурации", "callback_data": "get_config"}]
+            [{"text": "📥 Файлы конфигурации", "callback_data": "get_config"}]
         ]
     }
 
@@ -369,7 +369,6 @@ async def process_canceled_payment(payment_data: dict) -> None:
     if not canceled:
         logger.info("Ignoring late or duplicate cancellation for payment %s", payment_id)
         return
-    await asyncio.to_thread(db.release_reservation, user_id)
     await send_telegram_message(
         user_id,
         "❌ Платеж был отменен или не прошел.\n\nПопробуйте оплатить снова или обратитесь в поддержку.",

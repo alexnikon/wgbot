@@ -17,7 +17,6 @@ DEFAULT_CONFIG_NAME = "Конфигурация 1"
 MANAGED_CONFIG_ROLE = "managed"
 MAX_CLIENT_CONFIGS = 3
 # Kept as an import compatibility alias for older maintenance scripts.
-DEFAULT_PRIMARY_CONFIG_NAME = LEGACY_PRIMARY_CONFIG_NAME
 MAX_CONFIG_NAME_LENGTH = 48
 COMPLIMENTARY_CASCADE_EXPIRY = "2099-12-31 23:59:59"
 
@@ -124,14 +123,6 @@ class Database:
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(server_key, interface_id, cascade_peer_id),
                     UNIQUE(telegram_user_id, public_key)
-                );
-
-                CREATE TABLE IF NOT EXISTS server_reservations (
-                    telegram_user_id INTEGER PRIMARY KEY,
-                    server_key TEXT NOT NULL,
-                    interface_id TEXT NOT NULL,
-                    expires_at TEXT NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
                 CREATE TABLE IF NOT EXISTS provisioning_tasks (
@@ -246,10 +237,9 @@ class Database:
                     ON client_peers(telegram_user_id, role);
                 CREATE INDEX IF NOT EXISTS idx_client_peers_public_key
                     ON client_peers(public_key);
-                CREATE INDEX IF NOT EXISTS idx_reservations_server_expiry
-                    ON server_reservations(server_key, expires_at);
                 CREATE INDEX IF NOT EXISTS idx_provisioning_pending
                     ON provisioning_tasks(status, next_attempt_at);
+                DROP TABLE IF EXISTS server_reservations;
                 """
             )
             self._ensure_column(conn, "provisioning_tasks", "lease_owner", "TEXT")
@@ -1486,11 +1476,6 @@ class Database:
             row = conn.execute(sql, params).fetchone()
             return dict(row) if row else None
 
-    def get_primary_client_peer(self, user_id: int) -> dict[str, Any] | None:
-        """Return the oldest managed config for legacy internal callers."""
-        configs = self.get_managed_client_configs(user_id)
-        return configs[0] if configs else None
-
     def get_admin_managed_config(
         self, peer_id: int, user_id: int
     ) -> dict[str, Any] | None:
@@ -1610,10 +1595,6 @@ class Database:
                 ).fetchone()[0]
             )
 
-    def count_additional_configs(self, user_id: int) -> int:
-        """Compatibility alias for the pre-migration managed-config counter."""
-        return self.count_managed_configs(user_id)
-
     def get_all_managed_client_peers(self) -> list[dict[str, Any]]:
         """Return all bound peers eligible for Cascade group reconciliation."""
         with self._connect() as conn:
@@ -1687,10 +1668,6 @@ class Database:
             )
             conn.commit()
             return cursor.rowcount > 0
-
-    def delete_additional_config(self, peer_id: int, user_id: int) -> bool:
-        """Compatibility alias for pre-migration maintenance callers."""
-        return self.delete_managed_config(peer_id, user_id)
 
     def get_subscription_expiry(self, user_id: int) -> str | None:
         with self._connect() as conn:
@@ -1897,12 +1874,6 @@ class Database:
                         (user_id,),
                     ).fetchone()[0]
                 ),
-                "reservations": int(
-                    conn.execute(
-                        "SELECT COUNT(*) FROM server_reservations WHERE telegram_user_id=?",
-                        (user_id,),
-                    ).fetchone()[0]
-                ),
                 "provisioning_tasks": int(
                     conn.execute(
                         "SELECT COUNT(*) FROM provisioning_tasks WHERE telegram_user_id=?",
@@ -1925,9 +1896,6 @@ class Database:
                 (user_id, user_id),
             )
             counts["admin_workflows"] = workflow_cursor.rowcount
-            conn.execute(
-                "DELETE FROM server_reservations WHERE telegram_user_id=?", (user_id,)
-            )
             conn.execute(
                 "DELETE FROM provisioning_tasks WHERE telegram_user_id=?", (user_id,)
             )
@@ -2037,8 +2005,6 @@ class Database:
                      WHERE status='running'),
                     (SELECT COUNT(*) FROM provisioning_tasks
                      WHERE status='failed'),
-                    (SELECT COUNT(*) FROM server_reservations
-                     WHERE datetime(expires_at) > datetime('now')),
                     (SELECT COUNT(*) FROM clients WHERE telegram_reachable=1),
                     (SELECT COUNT(*) FROM clients WHERE telegram_reachable=0),
                     (SELECT COUNT(*) FROM clients WHERE telegram_reachable IS NULL),
@@ -2056,15 +2022,14 @@ class Database:
             "provisioning_pending": int(row[2]),
             "provisioning_running": int(row[3]),
             "provisioning_failed": int(row[4]),
-            "active_reservations": int(row[5]),
-            "telegram_reachable": int(row[6]),
-            "telegram_blocked": int(row[7]),
-            "telegram_reachability_unknown": int(row[8]),
-            "stars_discrepancies": int(row[9]),
-            "stars_last_success_age_seconds": int(row[10])
-            if row[10] is not None
+            "telegram_reachable": int(row[5]),
+            "telegram_blocked": int(row[6]),
+            "telegram_reachability_unknown": int(row[7]),
+            "stars_discrepancies": int(row[8]),
+            "stars_last_success_age_seconds": int(row[9])
+            if row[9] is not None
             else None,
-            "legacy_callbacks_today": int(row[11] or 0),
+            "legacy_callbacks_today": int(row[10] or 0),
         }
 
     def record_telegram_daily_metric(self, name: str) -> None:
@@ -2462,54 +2427,6 @@ class Database:
         if value <= 0:
             return 1.0
         return 1.0 - value / 100.0 if value <= 100 else value / 100.0
-
-    def create_reservation(
-        self, user_id: int, server_key: str, interface_id: str, minutes: int
-    ) -> None:
-        expires_at = (datetime.now() + timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S")
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO server_reservations(telegram_user_id, server_key, interface_id, expires_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(telegram_user_id) DO UPDATE SET
-                    server_key=excluded.server_key,
-                    interface_id=excluded.interface_id,
-                    expires_at=excluded.expires_at,
-                    created_at=CURRENT_TIMESTAMP
-                """,
-                (user_id, server_key, interface_id, expires_at),
-            )
-            conn.commit()
-
-    def get_active_reservation(self, user_id: int) -> dict[str, Any] | None:
-        with self._connect() as conn:
-            conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT * FROM server_reservations WHERE telegram_user_id=? AND expires_at > datetime('now')",
-                (user_id,),
-            ).fetchone()
-            return dict(row) if row else None
-
-    def count_active_reservations(self, server_key: str) -> int:
-        with self._connect() as conn:
-            return int(
-                conn.execute(
-                    "SELECT COUNT(*) FROM server_reservations WHERE server_key=? AND expires_at > datetime('now')",
-                    (server_key,),
-                ).fetchone()[0]
-            )
-
-    def release_reservation(self, user_id: int) -> None:
-        with self._connect() as conn:
-            conn.execute("DELETE FROM server_reservations WHERE telegram_user_id=?", (user_id,))
-            conn.commit()
-
-    def cleanup_expired_reservations(self) -> int:
-        with self._connect() as conn:
-            cursor = conn.execute("DELETE FROM server_reservations WHERE expires_at <= datetime('now')")
-            conn.commit()
-            return cursor.rowcount
 
     def add_provisioning_task(
         self, user_id: int, operation: str, payload: dict[str, Any], error: str

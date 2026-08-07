@@ -57,9 +57,6 @@ class _ProvisioningDatabase:
         self.completed = []
         self.failed = []
 
-    def get_primary_client_peer(self, user_id):
-        return {"telegram_user_id": user_id}
-
     def complete_provisioning_task(self, task_id, worker_id):
         self.completed.append((task_id, worker_id))
         return True
@@ -80,7 +77,6 @@ class ProvisioningMetricsTests(unittest.IsolatedAsyncioTestCase):
             database,
             router,
             AsyncMock(),
-            AsyncMock(),
             interval_seconds=60,
             lease_seconds=30,
         )
@@ -100,12 +96,10 @@ class ProvisioningMetricsTests(unittest.IsolatedAsyncioTestCase):
     async def test_completed_task_updates_metrics(self):
         database = _ProvisioningDatabase()
         router = AsyncMock()
-        router.get_primary_config.return_value = b"config"
         metrics = RuntimeMetrics()
         worker = ProvisioningWorker(
             database,
             router,
-            AsyncMock(return_value=True),
             AsyncMock(),
             interval_seconds=60,
             lease_seconds=30,
@@ -132,7 +126,6 @@ class ProvisioningMetricsTests(unittest.IsolatedAsyncioTestCase):
         worker = ProvisioningWorker(
             database,
             router,
-            AsyncMock(),
             AsyncMock(),
             interval_seconds=60,
             lease_seconds=30,
