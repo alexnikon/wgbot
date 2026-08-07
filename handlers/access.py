@@ -370,7 +370,10 @@ async def start_client_config_workflow(
             )
             return
         state = "await_create_name"
-        prompt = "Введи уникальное название нового конфига (до 48 символов)."
+        prompt = (
+            "Придумай название файла конфигурации.\n"
+            "Можешь указать устройство на котором будет использоваться этот файл"
+        )
     else:
         config = db.get_client_peer(peer_id, user_id)
         if (
