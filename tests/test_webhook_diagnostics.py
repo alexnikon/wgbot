@@ -102,7 +102,8 @@ class WebhookDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             "metadata": "{}",
         }
         database.apply_verified_payment.return_value = {
-            "expire_date": "2099-01-01 00:00:00"
+            "expire_date": "2099-01-01 00:00:00",
+            "is_extension": True,
         }
         database.get_primary_client_peer.return_value = {"id": 1}
         cascade_router = SimpleNamespace(
@@ -198,7 +199,7 @@ class WebhookDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         cascade_router.create_user_peer.assert_not_awaited()
         notify.assert_awaited_once()
 
-    async def test_yookassa_first_payment_keeps_success_when_provisioning_fails(self):
+    async def test_yookassa_first_payment_keeps_config_separate(self):
         database = Mock()
         database.get_payment_by_id.return_value = {
             "payment_id": "payment-1",
@@ -207,12 +208,14 @@ class WebhookDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             "metadata": "{}",
         }
         database.apply_verified_payment.return_value = {
-            "expire_date": "2099-01-01 00:00:00"
+            "expire_date": "2099-01-01 00:00:00",
+            "is_extension": False,
         }
-        database.get_primary_client_peer.return_value = None
-        database.add_provisioning_task.return_value = "task-1"
+        database.count_managed_configs.return_value = 0
         cascade_router = SimpleNamespace(
-            create_user_peer=AsyncMock(side_effect=RuntimeError("offline"))
+            sync_user_access=AsyncMock(
+                return_value={"total": 0, "updated": 0, "missing": 0, "failed": 0}
+            )
         )
         send_message = AsyncMock(return_value=True)
         payment_data = {
@@ -246,8 +249,12 @@ class WebhookDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             await webhook_server.process_successful_payment(payment_data)
 
         self.assertTrue(send_message.await_args_list[0].args[1].plain.startswith("✅ Оплачено!"))
-        self.assertIn("Платеж получен", send_message.await_args_list[1].args[1])
-        database.add_provisioning_task.assert_called_once()
+        self.assertEqual(len(send_message.await_args_list), 1)
+        self.assertEqual(
+            send_message.await_args_list[0].args[2]["inline_keyboard"][0][0]["text"],
+            "Создать файл конфигурации",
+        )
+        database.add_provisioning_task.assert_not_called()
 
     async def test_refund_webhook_reports_inactive_subscription_once(self):
         payment = {

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 
@@ -378,7 +379,7 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
                 except FileNotFoundError:
                     pass
 
-    async def test_missing_primary_is_restored_on_assigned_server(self):
+    async def test_missing_managed_config_is_not_restored_automatically(self):
         handle, path = tempfile.mkstemp(suffix=".db")
         os.close(handle)
         db = Database(path)
@@ -395,20 +396,21 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
             CascadeServer("server-b", "https://b.test/admin", "b", "if-b", 2, 3),
         ]
         api_a = ProvisioningCascadeAPI()
+        api_a.download_config = AsyncMock(side_effect=CascadeNotFound("missing"))
         api_b = ProvisioningCascadeAPI()
         router = CascadeRouter(db, servers=[])
         router.servers = servers
         router.apis = {"server-a": api_a, "server-b": api_b}
         try:
-            await router.create_user_peer(
-                10, "alice", "alice", "2030-01-01 00:00:00"
-            )
-            self.assertEqual(api_a.created, 1)
+            with self.assertRaises(CascadeNotFound):
+                await router.get_managed_config(10, old_primary["id"])
+            self.assertEqual(api_a.created, 0)
             self.assertEqual(api_b.created, 0)
             primary = db.get_primary_client_peer(10)
             self.assertEqual(primary["server_key"], "server-a")
-            self.assertEqual(primary["cascade_peer_id"], "new-peer")
+            self.assertEqual(primary["cascade_peer_id"], "old-peer")
             self.assertEqual(primary["config_name"], "Ноутбук")
+            self.assertEqual(primary["enabled"], 0)
             self.assertEqual(db.get_peer_count(10), 1)
         finally:
             for suffix in ("", "-wal", "-shm"):
@@ -447,13 +449,10 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
         os.close(handle)
         db = Database(path)
         db.activate_new_access(10, "alice", 30, "30_days", "stars")
-        db.save_client_peer(
-            10, "server-a", "if-a", "primary", "primary-key", "alice", "primary"
-        )
-
         class AdditionalAPI:
             def __init__(self):
                 self.created_interface = None
+                self.created_group = None
                 self.disabled = []
                 self.deleted = []
 
@@ -466,8 +465,11 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
             async def list_peers(self, interface_id=None):
                 return []
 
-            async def create_peer(self, name, expired_at, interface_id=None):
+            async def create_peer(
+                self, name, expired_at, interface_id=None, client_group=None
+            ):
                 self.created_interface = interface_id
+                self.created_group = client_group
                 return {
                     "id": "additional",
                     "name": name,
@@ -491,13 +493,15 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
         router.servers = [server]
         router.apis = {"server-b": api}
         try:
-            config = await router.create_additional_config(
+            config, content = await router.create_managed_config(
                 10, "Телефон", "server-b", "if-c"
             )
             self.assertEqual(api.created_interface, "if-c")
-            self.assertEqual(config["role"], "additional")
+            self.assertEqual(api.created_group, server.client_group)
+            self.assertEqual(config["role"], "managed")
             self.assertEqual(config["config_name"], "Телефон")
             self.assertEqual(config["server_key"], "server-b")
+            self.assertEqual(content, b"config")
         finally:
             for suffix in ("", "-wal", "-shm"):
                 try:
@@ -680,9 +684,12 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(api.deleted, [("additional", "if-a")])
             self.assertIsNone(db.get_client_peer(additional_id, 10))
             self.assertEqual(len(db.get_managed_client_configs(10)), 1)
-            with self.assertRaises(CascadeNotFound):
-                await router.delete_additional_config(10, primary_id)
-            self.assertEqual(api.deleted, [("additional", "if-a")])
+            primary, was_missing = await router.delete_managed_config(10, primary_id)
+            self.assertFalse(was_missing)
+            self.assertEqual(primary["cascade_peer_id"], "primary")
+            self.assertEqual(
+                api.deleted, [("additional", "if-a"), ("primary", "if-a")]
+            )
         finally:
             for suffix in ("", "-wal", "-shm"):
                 try:
@@ -884,7 +891,7 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
                 except FileNotFoundError:
                     pass
 
-    async def test_expired_additional_is_disabled_and_duplicate_is_compensated(self):
+    async def test_expired_client_cannot_create_managed_config(self):
         handle, path = tempfile.mkstemp(suffix=".db")
         os.close(handle)
         db = Database(path)
@@ -935,19 +942,13 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
         router.servers = [server]
         router.apis = {"server-b": api}
         try:
-            config = await router.create_additional_config(
-                10, "Телефон", "server-b", "if-b"
-            )
-            self.assertEqual(config["enabled"], 0)
-            self.assertEqual(api.disabled, ["additional-1"])
-            with self.assertRaisesRegex(
-                CascadeError, "Failed to persist the additional"
-            ):
-                await router.create_additional_config(
-                    10, "телефон", "server-b", "if-b"
+            with self.assertRaisesRegex(CascadeError, "Active access"):
+                await router.create_managed_config(
+                    10, "Телефон", "server-b", "if-b"
                 )
-            self.assertEqual(api.deleted, ["additional-2"])
-            self.assertEqual(len(db.get_managed_client_configs(10)), 2)
+            self.assertEqual(api.disabled, [])
+            self.assertEqual(api.deleted, [])
+            self.assertEqual(len(db.get_managed_client_configs(10)), 1)
         finally:
             for suffix in ("", "-wal", "-shm"):
                 try:
@@ -987,13 +988,15 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
         router.apis = {"server-a": AccessSyncAPI()}
         try:
             result = await router.sync_user_access(10, "2030-01-01 00:00:00")
-            peers = {peer["role"]: peer for peer in db.get_client_peers(10)}
+            peers = {
+                peer["cascade_peer_id"]: peer for peer in db.get_client_peers(10)
+            }
 
             self.assertEqual(
                 result, {"total": 2, "updated": 1, "missing": 1, "failed": 0}
             )
-            self.assertEqual(peers["primary"]["enabled"], 1)
-            self.assertEqual(peers["additional"]["enabled"], 0)
+            self.assertEqual(peers["primary-peer"]["enabled"], 1)
+            self.assertEqual(peers["missing-additional"]["enabled"], 0)
         finally:
             for suffix in ("", "-wal", "-shm"):
                 try:
@@ -1077,17 +1080,6 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
         db.ensure_subscription(
             10, "alice", "2099-01-01 00:00:00", "paid", "30_days", "stars"
         )
-        db.save_client_peer(
-            10,
-            "server-a",
-            "production-if",
-            "primary",
-            "key-primary",
-            "alice",
-            "primary",
-            client_group="Basic",
-        )
-
         class SelfServiceAPI:
             def __init__(self):
                 self.created_interfaces = []

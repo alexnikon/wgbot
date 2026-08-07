@@ -5,7 +5,7 @@ import unittest
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 
-from database import DEFAULT_PRIMARY_CONFIG_NAME, Database
+from database import DEFAULT_CONFIG_NAME, MANAGED_CONFIG_ROLE, Database
 
 
 class DatabaseTests(unittest.TestCase):
@@ -391,13 +391,13 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(subscription["is_active"], 0)
         self.assertEqual(subscription["payment_status"], "expired")
 
-    def test_user_peers_cannot_span_multiple_servers(self):
+    def test_managed_configs_can_span_multiple_servers(self):
         self.assertTrue(
             self.db.save_client_peer(
                 10, "server-a", "if-a", "peer-a", "key-a", "alice", "primary"
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             self.db.save_client_peer(
                 10, "server-b", "if-b", "peer-b", "key-b", "phone", "primary"
             )
@@ -436,7 +436,7 @@ class DatabaseTests(unittest.TestCase):
         configs = self.db.get_managed_client_configs(10)
         self.assertEqual(
             [config["config_name"] for config in configs],
-            [DEFAULT_PRIMARY_CONFIG_NAME, "Телефон"],
+            [DEFAULT_CONFIG_NAME, "Телефон"],
         )
         additional = configs[1]
         self.assertTrue(
@@ -480,7 +480,7 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(config["admin_enabled"], 0)
         self.assertIsNone(self.db.get_admin_managed_config(peer_id, 11))
 
-    def test_permanent_config_delete_is_owner_bound_and_protects_primary(self):
+    def test_permanent_config_delete_is_owner_bound_and_allows_every_managed_config(self):
         self.db.save_client_peer(
             10, "server-a", "if-a", "primary", "key-a", "alice", "primary"
         )
@@ -497,12 +497,12 @@ class DatabaseTests(unittest.TestCase):
         primary, additional = self.db.get_managed_client_configs(10)
 
         self.assertFalse(self.db.delete_additional_config(additional["id"], 11))
-        self.assertFalse(self.db.delete_additional_config(primary["id"], 10))
         self.assertTrue(self.db.delete_additional_config(additional["id"], 10))
+        self.assertTrue(self.db.delete_managed_config(primary["id"], 10))
         self.assertIsNone(self.db.get_client_peer(additional["id"], 10))
-        self.assertIsNotNone(self.db.get_client_peer(primary["id"], 10))
+        self.assertIsNone(self.db.get_client_peer(primary["id"], 10))
 
-    def test_schema_migration_names_existing_primary_peer(self):
+    def test_schema_migration_converts_and_names_existing_primary_peer(self):
         handle, legacy_path = tempfile.mkstemp(suffix=".db")
         os.close(handle)
         self.addCleanup(
@@ -525,6 +525,7 @@ class DatabaseTests(unittest.TestCase):
                     peer_name TEXT NOT NULL DEFAULT '',
                     role TEXT NOT NULL DEFAULT 'primary',
                     enabled INTEGER NOT NULL DEFAULT 1,
+                    config_name TEXT,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(server_key, interface_id, cascade_peer_id),
@@ -532,16 +533,46 @@ class DatabaseTests(unittest.TestCase):
                 );
                 INSERT INTO client_peers(
                     telegram_user_id, server_key, interface_id, cascade_peer_id,
-                    public_key, peer_name, role
+                    public_key, peer_name, role, config_name
                 ) VALUES
-                    (10, 'server-a', 'if-a', 'primary', 'key-a', 'alice', 'primary');
+                    (10, 'server-a', 'if-a', 'primary', 'key-a', 'alice',
+                     'primary', 'Основной конфиг'),
+                    (10, 'server-b', 'if-b', 'additional', 'key-b', 'alice_phone',
+                     'additional', 'Конфигурация 1'),
+                    (10, 'legacy', 'if-c', 'manual', 'key-c', 'legacy',
+                     'manual', NULL);
                 """
             )
         migrated = Database(legacy_path)
         primary = migrated.get_primary_client_peer(10)
-        self.assertEqual(primary["config_name"], DEFAULT_PRIMARY_CONFIG_NAME)
+        self.assertEqual(primary["config_name"], "Конфигурация 2")
+        self.assertEqual(primary["role"], MANAGED_CONFIG_ROLE)
         self.assertEqual(primary["admin_enabled"], 1)
         self.assertIsNone(primary["client_group"])
+        self.assertEqual(
+            [item["config_name"] for item in migrated.get_client_visible_configs(10)],
+            ["Конфигурация 2", DEFAULT_CONFIG_NAME],
+        )
+        self.assertEqual(migrated.get_peer_count(10), 3)
+
+    def test_schema_migration_completes_pending_automatic_creation_tasks(self):
+        task_id = self.db.add_provisioning_task(
+            10,
+            "create_peer",
+            {"peer_name": "legacy"},
+            "legacy automatic provisioning",
+        )
+
+        Database(self.path)
+
+        self.assertEqual(self.db.get_pending_provisioning_tasks(), [])
+        with closing(sqlite3.connect(self.path)) as connection:
+            status, error = connection.execute(
+                "SELECT status, last_error FROM provisioning_tasks WHERE id=?",
+                (task_id,),
+            ).fetchone()
+        self.assertEqual(status, "completed")
+        self.assertIn("config-neutral onboarding", error)
 
     def test_client_group_is_stored_per_peer_and_summarized_for_admin(self):
         self.db.save_client_peer(

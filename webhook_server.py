@@ -10,6 +10,7 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from callbacks import ClientConfigCallback
 from cascade_api import CascadeRouter
 from config import (
     INTERNAL_METRICS_TOKEN,
@@ -34,7 +35,7 @@ from telegram_text import (
     ensure_telegram_text,
     rich_date,
 )
-from utils import format_date_for_user, generate_peer_name, location_config_filename
+from utils import format_date_for_user
 from yookassa_client import (
     YooKassaClient,
     YooKassaError,
@@ -84,6 +85,25 @@ def get_telegram_http_client() -> httpx.AsyncClient:
 
 def create_home_reply_markup() -> dict:
     return {"inline_keyboard": [[{"text": "На главную", "callback_data": "main"}]]}
+
+
+def create_access_reply_markup(user_id: int) -> dict:
+    if db.count_managed_configs(user_id) == 0:
+        return {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "Создать файл конфигурации",
+                        "callback_data": ClientConfigCallback(action="create").pack(),
+                    }
+                ]
+            ]
+        }
+    return {
+        "inline_keyboard": [
+            [{"text": "Файлы конфигурации", "callback_data": "get_config"}]
+        ]
+    }
 
 
 async def send_telegram_message(
@@ -286,16 +306,14 @@ async def process_successful_payment(payment_data: dict) -> None:
     ban_checker = getattr(db, "is_client_banned", None)
     ban_value = await asyncio.to_thread(ban_checker, user_id) if callable(ban_checker) else False
     if ban_value is True or (isinstance(ban_value, int) and ban_value == 1):
-        primary = await asyncio.to_thread(db.get_primary_client_peer, user_id)
-        if primary:
-            result = await cascade_router.sync_client_state(user_id)
-            if result["failed"]:
-                db.add_provisioning_task(
-                    user_id,
-                    "sync_client_state",
-                    {},
-                    f"Failed peers: {result['failed']}",
-                )
+        result = await cascade_router.sync_client_state(user_id)
+        if result["failed"]:
+            db.add_provisioning_task(
+                user_id,
+                "sync_client_state",
+                {},
+                f"Failed peers: {result['failed']}",
+            )
         await notify_admins(
             admin_payment_text(
                 "🚫 Забаненный клиент оплатил подписку",
@@ -313,65 +331,21 @@ async def process_successful_payment(payment_data: dict) -> None:
             str(tariff.get("name") or tariff_key),
             format_remaining_until(expire_date),
         ),
-        create_home_reply_markup(),
+        create_access_reply_markup(user_id),
     )
-    primary = await asyncio.to_thread(db.get_primary_client_peer, user_id)
-
-    if primary:
-        result = await cascade_router.sync_user_access(user_id, expire_date)
-        if result["failed"]:
-            db.add_provisioning_task(
-                user_id,
-                "sync_access",
-                {"expire_date": expire_date},
-                f"Failed peers: {result['failed']}",
-            )
-        title = "🔁 Клиент продлил подписку"
-    else:
-        peer_name = generate_peer_name(username, user_id)
-        try:
-            _, config = await cascade_router.create_user_peer(
-                user_id, username, peer_name, expire_date
-            )
-            primary_peer = await asyncio.to_thread(db.get_primary_client_peer, user_id)
-            server_name = (
-                cascade_router.get_server_name(str(primary_peer["server_key"]))
-                if primary_peer
-                else ""
-            )
-            if not await send_config_with_confirmation(
-                user_id,
-                config,
-                filename=location_config_filename(server_name),
-            ):
-                await send_telegram_message(
-                    user_id,
-                    "✅ Доступ активирован, но файл конфигурации не удалось отправить. Используй /connect.",
-                    create_home_reply_markup(),
-                )
-        except Exception as exc:
-            task_id = db.add_provisioning_task(
-                user_id,
-                "create_peer",
-                {
-                    "username": username or "",
-                    "peer_name": peer_name,
-                    "expire_date": expire_date,
-                    "tariff_key": tariff_key,
-                },
-                str(exc),
-            )
-            logger.error("Queued provisioning task %s after YooKassa payment: %s", task_id, exc)
-            await send_telegram_message(
-                user_id,
-                "⚠️ Платеж получен. Доступ будет создан автоматически после восстановления VPN сервера.",
-                create_home_reply_markup(),
-            )
-            await notify_admins(
-                f"⚠️ Оплата получена, provisioning отложен\n\nTelegram ID: {user_id}\nTask: {task_id}"
-            )
-            return
-        title = "🆕 Новый клиент подключился"
+    result = await cascade_router.sync_user_access(user_id, expire_date)
+    if result["failed"]:
+        db.add_provisioning_task(
+            user_id,
+            "sync_access",
+            {"expire_date": expire_date},
+            f"Failed peers: {result['failed']}",
+        )
+    title = (
+        "🔁 Клиент продлил подписку"
+        if payment_result["is_extension"]
+        else "🆕 Новый клиент оплатил подписку"
+    )
 
     await notify_admins(
         admin_payment_text(

@@ -33,14 +33,15 @@ The bot connects Telegram payments, YooKassa, and
 5. Return to the bot whenever you need to renew access or check the subscription.
 
 Each configuration is intended for one device. A subscription can include multiple
-device configurations, while administrators retain control over limits and access.
+device configurations, while administrators retain control over configuration and
+access lifecycle.
 
 ## Designed for reliable operation
 
-WGBot keeps payment and subscription state in SQLite, synchronizes access with
-Cascade, retries temporary provisioning failures, and preserves the customer journey
-across restarts. Persistent Telegram panels keep chats tidy instead of creating a new
-message for every action.
+WGBot keeps payment and subscription state in SQLite independently from device
+configurations, synchronizes existing access with Cascade, and preserves the customer
+journey across restarts. Persistent Telegram panels keep chats tidy instead of
+creating a new message for every action.
 
 ## Quick start
 
@@ -52,8 +53,8 @@ mkdir -p DB secrets
 cp cascade_servers.example.json secrets/cascade_servers.json
 ```
 
-Each server entry uses `client_group` as the default for automatically provisioned
-primary peers. `assignable_client_groups` is the protected allowlist shown to
+Each server entry uses `client_group` as the default for a client's first explicitly
+created configuration. `assignable_client_groups` is the protected allowlist shown to
 administrators when creating configurations or changing a client's unified group.
 Every allowlisted group must already exist on the corresponding Cascade server.
 

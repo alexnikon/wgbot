@@ -8,7 +8,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from callbacks import ClientConfigCallback
 from cascade_api import CascadeCapacityError, CascadeError, CascadeNotFound, CascadeRouter
-from database import Database, normalize_config_name
+from database import MANAGED_CONFIG_ROLE, MAX_CLIENT_CONFIGS, Database, normalize_config_name
 from payment import PaymentManager
 from subscription_view import subscription_status_message
 from telegram_runtime import edit_telegram_text
@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 router = Router(name="access")
 CLIENT_CONFIGS_PAGE_SIZE = 8
 CLIENT_CONFIG_WORKFLOW_TYPE = "client_config_flow"
-CLIENT_ADDITIONAL_CONFIG_LIMIT = 2
 
 
 def get_client_config_workflow(db: Database, user_id: int) -> dict[str, Any] | None:
@@ -88,7 +87,7 @@ def client_config_keyboard(
         )
     if navigation:
         rows.append(navigation)
-    if db.count_additional_configs(user_id) < CLIENT_ADDITIONAL_CONFIG_LIMIT:
+    if db.count_managed_configs(user_id) < MAX_CLIENT_CONFIGS:
         rows.append(
             [
                 InlineKeyboardButton(
@@ -142,17 +141,16 @@ def client_config_details_keyboard(config: dict[str, Any], page: int) -> InlineK
             )
         ]
     )
-    if config["role"] == "additional":
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="🗑 Удалить навсегда",
-                    callback_data=ClientConfigCallback(
-                        action="delete", peer_id=peer_id, page=page
-                    ).pack(),
-                )
-            ]
-        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🗑 Удалить навсегда",
+                callback_data=ClientConfigCallback(
+                    action="delete", peer_id=peer_id, page=page
+                ).pack(),
+            )
+        ]
+    )
     rows.append(
         [
             InlineKeyboardButton(
@@ -165,11 +163,9 @@ def client_config_details_keyboard(config: dict[str, Any], page: int) -> InlineK
 
 
 def client_config_details_text(config: dict[str, Any], server_name: str) -> str:
-    role = "основной" if config["role"] == "primary" else "дополнительный"
     status = "активен" if config.get("enabled") else "недоступен"
     return (
         f"🗂 {config['config_name']}\n\n"
-        f"Тип: {role}\n"
         f"Локация: {server_name}\n"
         f"Статус: {status}"
     )
@@ -323,7 +319,7 @@ async def show_client_config_details(
         or not access
         or not is_access_active(access)
         or not config
-        or config["role"] not in {"primary", "additional"}
+        or config["role"] != MANAGED_CONFIG_ROLE
         or not config["admin_enabled"]
     ):
         await safe_edit_callback_message(
@@ -365,10 +361,10 @@ async def start_client_config_workflow(
         return
     peer_id = int(callback_data.peer_id)
     if callback_data.action == "create":
-        if db.count_additional_configs(user_id) >= CLIENT_ADDITIONAL_CONFIG_LIMIT:
+        if db.count_managed_configs(user_id) >= MAX_CLIENT_CONFIGS:
             await safe_edit_callback_message(
                 callback_query.message,
-                "❌ Достигнут лимит: два дополнительных конфига.",
+                "❌ Достигнут лимит: три файла конфигурации.",
                 reply_markup=client_config_keyboard(db, user_id)[0],
             )
             return
@@ -378,7 +374,7 @@ async def start_client_config_workflow(
         config = db.get_client_peer(peer_id, user_id)
         if (
             not config
-            or config["role"] not in {"primary", "additional"}
+            or config["role"] != MANAGED_CONFIG_ROLE
             or not config["admin_enabled"]
         ):
             await safe_edit_callback_message(callback_query.message, "❌ Конфиг недоступен.")
@@ -469,6 +465,7 @@ async def create_client_config(
     cascade_router: CascadeRouter,
     safe_answer_callback,
     safe_edit_callback_message,
+    send_config_with_confirmation,
 ) -> None:
     await safe_answer_callback(callback_query)
     user_id = callback_query.from_user.id
@@ -477,13 +474,13 @@ async def create_client_config(
         await safe_edit_callback_message(callback_query.message, "❌ Создание устарело.")
         return
     try:
-        config = await cascade_router.create_additional_config(
+        config, config_content = await cascade_router.create_managed_config(
             user_id,
             str(flow["config_name"]),
             str(flow["server_key"]),
             str(flow["interface_id"]),
             reassign_existing_group=False,
-            self_service_limit=CLIENT_ADDITIONAL_CONFIG_LIMIT,
+            self_service_limit=MAX_CLIENT_CONFIGS,
             production_only=True,
         )
     except (CascadeCapacityError, CascadeError):
@@ -502,11 +499,22 @@ async def create_client_config(
         server_key=str(config["server_key"]),
         config_name=str(config["config_name"]),
     )
-    await safe_edit_callback_message(
-        callback_query.message,
-        "✅ Конфиг создан.",
-        reply_markup=client_config_keyboard(db, user_id)[0],
+    server_name = cascade_router.get_server_name(str(config["server_key"]))
+    sent = await send_config_with_confirmation(
+        callback_query.message.chat.id,
+        config_content,
+        source_message=callback_query.message,
+        caption=None,
+        filename=location_config_filename(server_name),
+        server_name=server_name,
+        reply_markup=config_file_back_keyboard(int(config["id"])),
     )
+    if not sent:
+        await safe_edit_callback_message(
+            callback_query.message,
+            "✅ Конфиг создан, но файл не удалось отправить. Скачай его из списка.",
+            reply_markup=client_config_keyboard(db, user_id)[0],
+        )
 
 
 @router.callback_query(ClientConfigCallback.filter(F.action == "delete"))
@@ -524,7 +532,7 @@ async def confirm_client_config_deletion(
         db.is_client_banned(user_id)
         or not db.has_active_access(user_id)
         or not config
-        or config["role"] != "additional"
+        or config["role"] != MANAGED_CONFIG_ROLE
         or not config["admin_enabled"]
     ):
         await safe_edit_callback_message(callback_query.message, "❌ Конфиг недоступен.")
@@ -575,13 +583,13 @@ async def delete_client_config(
         db.is_client_banned(user_id)
         or not db.has_active_access(user_id)
         or not config
-        or config["role"] != "additional"
+        or config["role"] != MANAGED_CONFIG_ROLE
         or not config["admin_enabled"]
     ):
         await safe_edit_callback_message(callback_query.message, "❌ Конфиг недоступен.")
         return
     try:
-        deleted, missing = await cascade_router.delete_additional_config(
+        deleted, missing = await cascade_router.delete_managed_config(
             user_id, callback_data.peer_id
         )
     except CascadeNotFound:
@@ -663,7 +671,7 @@ async def capture_client_config_name(
         config = db.get_client_peer(peer_id, user_id)
         if (
             not config
-            or config["role"] not in {"primary", "additional"}
+            or config["role"] != MANAGED_CONFIG_ROLE
             or not config["admin_enabled"]
             or not db.rename_managed_config(peer_id, user_id, config_name)
         ):
@@ -695,7 +703,7 @@ async def capture_client_config_name(
             ),
         )
     else:
-        if db.count_additional_configs(user_id) >= CLIENT_ADDITIONAL_CONFIG_LIMIT:
+        if db.count_managed_configs(user_id) >= MAX_CLIENT_CONFIGS:
             clear_client_config_workflow(db, user_id)
             return
         locations = cascade_router.get_client_production_locations()
@@ -754,7 +762,6 @@ async def download_client_config(
     safe_edit_callback_message,
     create_back_to_menu_keyboard,
     create_main_menu_keyboard,
-    create_or_restore_peer_for_user,
     send_config_with_confirmation,
     is_access_active,
     user_action_locks,
@@ -769,9 +776,9 @@ async def download_client_config(
             not existing_peer
             or not is_access_active(existing_peer)
             or not config
-            or config["role"] not in {"primary", "additional"}
+            or config["role"] != MANAGED_CONFIG_ROLE
             or not config["admin_enabled"]
-            or (config["role"] == "additional" and not config["enabled"])
+            or not config["enabled"]
         ):
             await safe_edit_callback_message(
                 callback_query.message,
@@ -785,27 +792,9 @@ async def download_client_config(
             reply_markup=create_back_to_menu_keyboard(),
         )
         try:
-            try:
-                peer_config = await cascade_router.get_managed_config(
-                    user_id, callback_data.peer_id
-                )
-            except CascadeNotFound:
-                if config["role"] != "primary":
-                    raise
-                logger.warning("Primary Cascade peer is explicitly missing for user %s", user_id)
-                ok, err, new_config = await create_or_restore_peer_for_user(
-                    user_id,
-                    callback_query.from_user.username,
-                    existing_peer.get("tariff_key"),
-                )
-                if not ok:
-                    await safe_edit_callback_message(
-                        callback_query.message,
-                        f"❌ {err}\n\nВыбери действие с помощью кнопок ниже:",
-                        reply_markup=create_main_menu_keyboard(user_id),
-                    )
-                    return
-                peer_config = new_config
+            peer_config = await cascade_router.get_managed_config(
+                user_id, callback_data.peer_id
+            )
             server_name = cascade_router.get_server_name(str(config["server_key"]))
             sent = await send_config_with_confirmation(
                 callback_query.message.chat.id,

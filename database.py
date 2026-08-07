@@ -12,7 +12,12 @@ from typing import Any
 from config import DATABASE_FILE
 
 logger = logging.getLogger(__name__)
-DEFAULT_PRIMARY_CONFIG_NAME = "Основной конфиг"
+LEGACY_PRIMARY_CONFIG_NAME = "Основной конфиг"
+DEFAULT_CONFIG_NAME = "Конфигурация 1"
+MANAGED_CONFIG_ROLE = "managed"
+MAX_CLIENT_CONFIGS = 3
+# Kept as an import compatibility alias for older maintenance scripts.
+DEFAULT_PRIMARY_CONFIG_NAME = LEGACY_PRIMARY_CONFIG_NAME
 MAX_CONFIG_NAME_LENGTH = 48
 COMPLIMENTARY_CASCADE_EXPIRY = "2099-12-31 23:59:59"
 
@@ -110,7 +115,7 @@ class Database:
                     cascade_peer_id TEXT,
                     public_key TEXT NOT NULL DEFAULT '',
                     peer_name TEXT NOT NULL DEFAULT '',
-                    role TEXT NOT NULL DEFAULT 'primary',
+                    role TEXT NOT NULL DEFAULT 'managed',
                     enabled INTEGER NOT NULL DEFAULT 1,
                     config_name TEXT,
                     admin_enabled INTEGER NOT NULL DEFAULT 1,
@@ -281,18 +286,86 @@ class Database:
             self._ensure_column(
                 conn, "client_peers", "admin_enabled", "INTEGER NOT NULL DEFAULT 1"
             )
+            conn.execute("DROP INDEX IF EXISTS idx_client_peers_config_name")
+            legacy_rows = conn.execute(
+                """
+                SELECT id, telegram_user_id FROM client_peers
+                WHERE role='primary' AND (
+                    config_name=? OR config_name IS NULL OR trim(config_name)=''
+                )
+                ORDER BY telegram_user_id, id
+                """,
+                (LEGACY_PRIMARY_CONFIG_NAME,),
+            ).fetchall()
+            for peer_id, user_id in legacy_rows:
+                existing_names = {
+                    str(row[0]).casefold()
+                    for row in conn.execute(
+                        """
+                        SELECT config_name FROM client_peers
+                        WHERE telegram_user_id=? AND id != ? AND config_name IS NOT NULL
+                        """,
+                        (user_id, peer_id),
+                    ).fetchall()
+                }
+                number = 1
+                config_name = DEFAULT_CONFIG_NAME
+                while config_name.casefold() in existing_names:
+                    number += 1
+                    config_name = f"Конфигурация {number}"
+                conn.execute(
+                    "UPDATE client_peers SET config_name=? WHERE id=?",
+                    (config_name, peer_id),
+                )
+            unnamed_rows = conn.execute(
+                """
+                SELECT id, telegram_user_id FROM client_peers
+                WHERE role IN ('primary', 'additional')
+                  AND (config_name IS NULL OR trim(config_name)='')
+                ORDER BY telegram_user_id, id
+                """
+            ).fetchall()
+            for peer_id, user_id in unnamed_rows:
+                existing_names = {
+                    str(row[0]).casefold()
+                    for row in conn.execute(
+                        """
+                        SELECT config_name FROM client_peers
+                        WHERE telegram_user_id=? AND config_name IS NOT NULL
+                        """,
+                        (user_id,),
+                    ).fetchall()
+                }
+                number = 1
+                config_name = DEFAULT_CONFIG_NAME
+                while config_name.casefold() in existing_names:
+                    number += 1
+                    config_name = f"Конфигурация {number}"
+                conn.execute(
+                    "UPDATE client_peers SET config_name=? WHERE id=?",
+                    (config_name, peer_id),
+                )
             conn.execute(
                 """
-                UPDATE client_peers SET config_name=?
-                WHERE role='primary' AND (config_name IS NULL OR trim(config_name)='')
+                UPDATE client_peers SET role=?
+                WHERE role IN ('primary', 'additional')
                 """,
-                (DEFAULT_PRIMARY_CONFIG_NAME,),
+                (MANAGED_CONFIG_ROLE,),
             )
             conn.execute(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_client_peers_config_name
                 ON client_peers(telegram_user_id, config_name COLLATE NOCASE)
-                WHERE config_name IS NOT NULL AND role IN ('primary', 'additional')
+                WHERE config_name IS NOT NULL AND role='managed'
+                """
+            )
+            conn.execute(
+                """
+                UPDATE provisioning_tasks
+                SET status='completed', lease_owner=NULL, lease_until=NULL,
+                    last_error='Retired during config-neutral onboarding migration',
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE operation='create_peer' AND status IN ('pending', 'running')
                 """
             )
             self._ensure_column(conn, "star_transactions", "review_token", "TEXT")
@@ -1238,7 +1311,7 @@ class Database:
         cascade_peer_id: str,
         public_key: str,
         peer_name: str,
-        role: str = "primary",
+        role: str = MANAGED_CONFIG_ROLE,
         enabled: bool = True,
         config_name: str | None = None,
         admin_enabled: bool = True,
@@ -1248,43 +1321,31 @@ class Database:
         try:
             with self._connect() as conn:
                 conn.execute("BEGIN IMMEDIATE")
-                if role != "additional":
-                    other_assignment = conn.execute(
-                        """
-                        SELECT server_key, interface_id FROM client_peers
-                        WHERE telegram_user_id=? AND server_key IS NOT NULL
-                          AND role != 'additional'
-                          AND (server_key != ? OR interface_id != ?) LIMIT 1
-                        """,
-                        (user_id, server_key, interface_id),
-                    ).fetchone()
-                    if other_assignment:
-                        logger.error(
-                            "User %s is already assigned to Cascade server %s interface %s",
-                            user_id,
-                            other_assignment[0],
-                            other_assignment[1],
-                        )
-                        return False
-                if role == "primary":
-                    current = conn.execute(
-                        """
-                        SELECT config_name FROM client_peers
-                        WHERE telegram_user_id=? AND role='primary' LIMIT 1
-                        """,
-                        (user_id,),
-                    ).fetchone()
-                    config_name = (
-                        config_name
-                        or (current[0] if current and current[0] else None)
-                        or DEFAULT_PRIMARY_CONFIG_NAME
-                    )
+                if role in {"primary", "additional"}:
+                    role = MANAGED_CONFIG_ROLE
+                if role == MANAGED_CONFIG_ROLE and config_name is None:
+                    existing_names = {
+                        str(row[0]).casefold()
+                        for row in conn.execute(
+                            """
+                            SELECT config_name FROM client_peers
+                            WHERE telegram_user_id=? AND role='managed'
+                              AND config_name IS NOT NULL
+                            """,
+                            (user_id,),
+                        ).fetchall()
+                    }
+                    number = 1
+                    config_name = DEFAULT_CONFIG_NAME
+                    while config_name.casefold() in existing_names:
+                        number += 1
+                        config_name = f"Конфигурация {number}"
                 if config_name is not None:
                     config_name = normalize_config_name(config_name)
                     existing_names = conn.execute(
                         """
                         SELECT config_name, role FROM client_peers
-                        WHERE telegram_user_id=? AND role IN ('primary', 'additional')
+                        WHERE telegram_user_id=? AND role='managed'
                           AND config_name IS NOT NULL
                           AND public_key != ?
                         """,
@@ -1292,15 +1353,10 @@ class Database:
                     ).fetchall()
                     if any(
                         str(row[0]).casefold() == config_name.casefold()
-                        and not (role == "primary" and row[1] == "primary")
+                        and role == MANAGED_CONFIG_ROLE
                         for row in existing_names
                     ):
                         return False
-                if role == "primary":
-                    conn.execute(
-                        "DELETE FROM client_peers WHERE telegram_user_id=? AND role='primary'",
-                        (user_id,),
-                    )
                 conn.execute(
                     """
                     INSERT INTO client_peers(
@@ -1344,7 +1400,7 @@ class Database:
         sql = "SELECT * FROM client_peers WHERE telegram_user_id=?"
         if bound_only:
             sql += " AND server_key IS NOT NULL AND interface_id IS NOT NULL AND cascade_peer_id IS NOT NULL"
-        sql += " ORDER BY CASE role WHEN 'primary' THEN 0 ELSE 1 END, id"
+        sql += " ORDER BY id"
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             return [dict(row) for row in conn.execute(sql, (user_id,)).fetchall()]
@@ -1399,7 +1455,7 @@ class Database:
             cursor = conn.execute(
                 """
                 UPDATE client_peers SET client_group=?, updated_at=CURRENT_TIMESTAMP
-                WHERE id=? AND role IN ('primary', 'additional')
+                WHERE id=? AND role='managed'
                 """,
                 (group_name, peer_id),
             )
@@ -1412,27 +1468,12 @@ class Database:
             cursor = conn.execute(
                 """
                 UPDATE client_peers SET client_group=?, updated_at=CURRENT_TIMESTAMP
-                WHERE telegram_user_id=? AND role IN ('primary', 'additional')
+                WHERE telegram_user_id=? AND role='managed'
                 """,
                 (group_name, user_id),
             )
             conn.commit()
             return cursor.rowcount
-
-    def get_primary_client_peer(self, user_id: int) -> dict[str, Any] | None:
-        with self._connect() as conn:
-            conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                """
-                SELECT * FROM client_peers
-                WHERE telegram_user_id=? AND role='primary'
-                  AND server_key IS NOT NULL AND interface_id IS NOT NULL
-                  AND cascade_peer_id IS NOT NULL
-                LIMIT 1
-                """,
-                (user_id,),
-            ).fetchone()
-            return dict(row) if row else None
 
     def get_client_peer(self, peer_id: int, user_id: int | None = None) -> dict[str, Any] | None:
         sql = "SELECT * FROM client_peers WHERE id=?"
@@ -1444,6 +1485,11 @@ class Database:
             conn.row_factory = sqlite3.Row
             row = conn.execute(sql, params).fetchone()
             return dict(row) if row else None
+
+    def get_primary_client_peer(self, user_id: int) -> dict[str, Any] | None:
+        """Return the oldest managed config for legacy internal callers."""
+        configs = self.get_managed_client_configs(user_id)
+        return configs[0] if configs else None
 
     def get_admin_managed_config(
         self, peer_id: int, user_id: int
@@ -1466,7 +1512,7 @@ class Database:
                 LEFT JOIN subscriptions s USING(telegram_user_id)
                 JOIN clients c USING(telegram_user_id)
                 WHERE cp.id=? AND cp.telegram_user_id=?
-                  AND cp.role IN ('primary', 'additional')
+                  AND cp.role='managed'
                   AND cp.server_key IS NOT NULL
                   AND cp.interface_id IS NOT NULL
                   AND cp.cascade_peer_id IS NOT NULL
@@ -1495,14 +1541,11 @@ class Database:
                 LEFT JOIN subscriptions s USING(telegram_user_id)
                 JOIN clients c USING(telegram_user_id)
                 WHERE cp.telegram_user_id=?
-                  AND cp.role IN ('primary', 'additional')
+                  AND cp.role='managed'
                   AND cp.server_key IS NOT NULL
                   AND cp.interface_id IS NOT NULL
                   AND cp.cascade_peer_id IS NOT NULL
-                ORDER BY CASE cp.role
-                    WHEN 'primary' THEN 0
-                    WHEN 'additional' THEN 1
-                END, cp.id
+                ORDER BY cp.id
                 """,
                 (user_id,),
             ).fetchall()
@@ -1528,16 +1571,13 @@ class Database:
     ) -> list[dict[str, Any]]:
         sql = """
             SELECT * FROM client_peers
-            WHERE telegram_user_id=? AND role IN ('primary', 'additional')
+            WHERE telegram_user_id=? AND role='managed'
               AND server_key IS NOT NULL AND interface_id IS NOT NULL
               AND cascade_peer_id IS NOT NULL
         """
         if available_only:
-            sql += (
-                " AND admin_enabled=1"
-                " AND (role='primary' OR (role='additional' AND enabled=1))"
-            )
-        sql += " ORDER BY CASE role WHEN 'primary' THEN 0 ELSE 1 END, id"
+            sql += " AND admin_enabled=1 AND enabled=1"
+        sql += " ORDER BY id"
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             return [dict(row) for row in conn.execute(sql, (user_id,)).fetchall()]
@@ -1549,26 +1589,30 @@ class Database:
             rows = conn.execute(
                 """
                 SELECT * FROM client_peers
-                WHERE telegram_user_id=? AND role IN ('primary', 'additional')
+                WHERE telegram_user_id=? AND role='managed'
                   AND admin_enabled=1
-                ORDER BY CASE role WHEN 'primary' THEN 0 ELSE 1 END, id
+                ORDER BY id
                 """,
                 (user_id,),
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def count_additional_configs(self, user_id: int) -> int:
-        """Count all additional records, including inactive admin-created ones."""
+    def count_managed_configs(self, user_id: int) -> int:
+        """Count all managed records, including inactive admin-created ones."""
         with self._connect() as conn:
             return int(
                 conn.execute(
                     """
                     SELECT COUNT(*) FROM client_peers
-                    WHERE telegram_user_id=? AND role='additional'
+                    WHERE telegram_user_id=? AND role='managed'
                     """,
                     (user_id,),
                 ).fetchone()[0]
             )
+
+    def count_additional_configs(self, user_id: int) -> int:
+        """Compatibility alias for the pre-migration managed-config counter."""
+        return self.count_managed_configs(user_id)
 
     def get_all_managed_client_peers(self) -> list[dict[str, Any]]:
         """Return all bound peers eligible for Cascade group reconciliation."""
@@ -1577,7 +1621,7 @@ class Database:
             rows = conn.execute(
                 """
                 SELECT * FROM client_peers
-                WHERE role IN ('primary', 'additional')
+                WHERE role='managed'
                   AND server_key IS NOT NULL AND interface_id IS NOT NULL
                   AND cascade_peer_id IS NOT NULL
                 ORDER BY telegram_user_id, id
@@ -1594,7 +1638,7 @@ class Database:
                     """
                     SELECT config_name FROM client_peers
                     WHERE telegram_user_id=? AND id != ?
-                      AND role IN ('primary', 'additional')
+                      AND role='managed'
                       AND config_name IS NOT NULL
                     """,
                     (user_id, peer_id),
@@ -1608,7 +1652,7 @@ class Database:
                     """
                     UPDATE client_peers SET config_name=?, updated_at=CURRENT_TIMESTAMP
                     WHERE id=? AND telegram_user_id=?
-                      AND role IN ('primary', 'additional')
+                      AND role='managed'
                     """,
                     (normalized, peer_id, user_id),
                 )
@@ -1624,25 +1668,29 @@ class Database:
             cursor = conn.execute(
                 """
                 UPDATE client_peers SET admin_enabled=?, updated_at=CURRENT_TIMESTAMP
-                WHERE id=? AND telegram_user_id=? AND role='additional'
+                WHERE id=? AND telegram_user_id=? AND role='managed'
                 """,
                 (int(admin_enabled), peer_id, user_id),
             )
             conn.commit()
             return cursor.rowcount > 0
 
-    def delete_additional_config(self, peer_id: int, user_id: int) -> bool:
-        """Delete one additional configuration owned by the selected client."""
+    def delete_managed_config(self, peer_id: int, user_id: int) -> bool:
+        """Delete one managed configuration owned by the selected client."""
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 DELETE FROM client_peers
-                WHERE id=? AND telegram_user_id=? AND role='additional'
+                WHERE id=? AND telegram_user_id=? AND role='managed'
                 """,
                 (peer_id, user_id),
             )
             conn.commit()
             return cursor.rowcount > 0
+
+    def delete_additional_config(self, peer_id: int, user_id: int) -> bool:
+        """Compatibility alias for pre-migration maintenance callers."""
+        return self.delete_managed_config(peer_id, user_id)
 
     def get_subscription_expiry(self, user_id: int) -> str | None:
         with self._connect() as conn:
@@ -1928,7 +1976,9 @@ class Database:
                 FROM clients c
                 LEFT JOIN subscriptions s USING(telegram_user_id)
                 LEFT JOIN client_peers cp
-                  ON cp.telegram_user_id=c.telegram_user_id AND cp.role='primary'
+                  ON cp.id=(SELECT MIN(first_peer.id) FROM client_peers first_peer
+                            WHERE first_peer.telegram_user_id=c.telegram_user_id
+                              AND first_peer.role='managed')
                 WHERE c.telegram_user_id=?
                 LIMIT 1
                 """,
@@ -2118,7 +2168,7 @@ class Database:
                                SELECT DISTINCT peers.client_group
                                FROM client_peers peers
                                WHERE peers.telegram_user_id=c.telegram_user_id
-                                 AND peers.role IN ('primary', 'additional')
+                                 AND peers.role='managed'
                                  AND peers.server_key IS NOT NULL
                                  AND peers.interface_id IS NOT NULL
                                  AND peers.cascade_peer_id IS NOT NULL
@@ -2128,7 +2178,7 @@ class Database:
                        ) AS client_groups,
                        (SELECT COUNT(*) FROM client_peers peers
                         WHERE peers.telegram_user_id=c.telegram_user_id
-                          AND peers.role IN ('primary', 'additional')
+                          AND peers.role='managed'
                           AND peers.server_key IS NOT NULL
                           AND peers.interface_id IS NOT NULL
                           AND peers.cascade_peer_id IS NOT NULL
@@ -2138,7 +2188,9 @@ class Database:
                 FROM clients c
                 LEFT JOIN subscriptions s USING(telegram_user_id)
                 LEFT JOIN client_peers cp
-                  ON cp.telegram_user_id=c.telegram_user_id AND cp.role='primary'
+                  ON cp.id=(SELECT MIN(first_peer.id) FROM client_peers first_peer
+                            WHERE first_peer.telegram_user_id=c.telegram_user_id
+                              AND first_peer.role='managed')
                 {where}
                 ORDER BY CASE WHEN c.telegram_username='' THEN 1 ELSE 0 END,
                          lower(c.telegram_username), c.telegram_user_id
@@ -2176,7 +2228,7 @@ class Database:
                                SELECT DISTINCT peers.client_group
                                FROM client_peers peers
                                WHERE peers.telegram_user_id=c.telegram_user_id
-                                 AND peers.role IN ('primary', 'additional')
+                                 AND peers.role='managed'
                                  AND peers.server_key IS NOT NULL
                                  AND peers.interface_id IS NOT NULL
                                  AND peers.cascade_peer_id IS NOT NULL
@@ -2186,7 +2238,7 @@ class Database:
                        ) AS client_groups,
                        (SELECT COUNT(*) FROM client_peers peers
                         WHERE peers.telegram_user_id=c.telegram_user_id
-                          AND peers.role IN ('primary', 'additional')
+                          AND peers.role='managed'
                           AND peers.server_key IS NOT NULL
                           AND peers.interface_id IS NOT NULL
                           AND peers.cascade_peer_id IS NOT NULL
@@ -2196,7 +2248,9 @@ class Database:
                 FROM clients c
                 LEFT JOIN subscriptions s USING(telegram_user_id)
                 LEFT JOIN client_peers cp
-                  ON cp.telegram_user_id=c.telegram_user_id AND cp.role='primary'
+                  ON cp.id=(SELECT MIN(first_peer.id) FROM client_peers first_peer
+                            WHERE first_peer.telegram_user_id=c.telegram_user_id
+                              AND first_peer.role='managed')
                 WHERE c.telegram_user_id=?
                 LIMIT 1
                 """,

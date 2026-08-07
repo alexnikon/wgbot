@@ -62,7 +62,6 @@ async def cmd_start(
             )
             return
         if claim.status == "auto_approved":
-            client = claim.client or {}
             warning = ""
             sync_result = {
                 "total": 0,
@@ -83,20 +82,8 @@ async def cmd_start(
                         "failed": 1,
                         "created": 0,
                     }
-                    primary = db.get_primary_client_peer(user_id)
-                    operation = "sync_client_state" if primary else "create_peer"
-                    payload_data = (
-                        {}
-                        if primary
-                        else {
-                            "username": client.get("telegram_username") or "",
-                            "peer_name": client.get("telegram_username") or str(user_id),
-                            "expire_date": access.cascade_expiry,
-                            "tariff_key": access.source,
-                        }
-                    )
                     db.add_provisioning_task(
-                        user_id, operation, payload_data, str(exc)
+                        user_id, "sync_client_state", {}, str(exc)
                     )
                     warning = "\n⚠️ Синхронизация VPN поставлена в очередь."
             db.log_invitation_activation_sync(

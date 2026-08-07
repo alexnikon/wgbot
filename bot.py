@@ -21,7 +21,8 @@ from aiogram.types import (
     InlineKeyboardMarkup,
 )
 
-from cascade_api import CascadeCapacityError, CascadeRouter
+from callbacks import ClientConfigCallback
+from cascade_api import CascadeRouter
 from config import (
     CASCADE_RETRY_INTERVAL_SECONDS,
     LOG_TELEGRAM_CONTENT,
@@ -57,8 +58,6 @@ from telegram_runtime import (
 from telegram_text import TelegramText, TelegramTextLike, ensure_telegram_text, rich_date
 from utils import (
     format_date_for_user,
-    generate_peer_name,
-    location_config_filename,
     parse_date_flexible,
 )
 from yookassa_client import YooKassaClient
@@ -132,7 +131,6 @@ def configure_runtime(services: AppServices) -> None:
         create_back_to_menu_keyboard=create_back_to_menu_keyboard,
         create_home_keyboard=create_home_keyboard,
         create_main_menu_keyboard=create_main_menu_keyboard,
-        create_or_restore_peer_for_user=create_or_restore_peer_for_user,
         send_config_with_confirmation=send_config_with_confirmation,
         is_access_active=is_access_active,
         is_admin=is_admin,
@@ -203,23 +201,10 @@ class ClientIdentityMiddleware:
             sync_result = activation["sync"]
             user_id = int(user.id)
             if sync_result["failed"]:
-                access = db.get_client_access_state(user_id)
-                primary = db.get_primary_client_peer(user_id)
-                operation = "sync_client_state" if primary else "create_peer"
-                payload = (
-                    {}
-                    if primary
-                    else {
-                        "username": getattr(user, "username", None) or "",
-                        "peer_name": getattr(user, "username", None) or str(user_id),
-                        "expire_date": access.cascade_expiry,
-                        "tariff_key": access.source,
-                    }
-                )
                 db.add_provisioning_task(
                     user_id,
-                    operation,
-                    payload,
+                    "sync_client_state",
+                    {},
                     activation.get("error") or "Identity activation sync failed",
                 )
             duplicates = verification.get("duplicate_username_ids") or []
@@ -447,72 +432,6 @@ async def send_config_with_confirmation(
     )
 
 
-# Helper: create or restore a peer and return config
-async def create_or_restore_peer_for_user(
-    user_id: int, username: str | None, tariff_key: str | None = None
-) -> tuple[bool, str, bytes | None]:
-    """Create a peer or restore it if missing on the server. Returns (success, error_message, config_content)."""
-    try:
-        existing_peer = db.get_peer_by_telegram_id(user_id)
-
-        # Determine expiration
-        if existing_peer and existing_peer.get("expire_date"):
-            # Restore using the existing date
-            target_expire_date = existing_peer["expire_date"]
-        else:
-            # New user or no date: take it from the tariff
-            access_days = 30
-            if tariff_key:
-                tariff_data = payment_manager.tariffs.get(tariff_key, {})
-                access_days = tariff_data.get("days", 30)
-            from datetime import datetime, timedelta
-
-            target_expire_date = (datetime.now() + timedelta(days=access_days)).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
-
-        # Peer name uses the Telegram username when available; otherwise it falls
-        # back to the Telegram ID.
-        peer_name = generate_peer_name(username, user_id)
-
-        try:
-            _, config_content = await cascade_router.create_user_peer(
-                user_id=user_id,
-                username=username,
-                peer_name=peer_name,
-                expire_date=target_expire_date,
-            )
-            return True, "", config_content
-        except CascadeCapacityError:
-            return False, "Все VPN серверы временно заполнены", None
-        except Exception as e:
-            task_id = db.add_provisioning_task(
-                user_id,
-                "create_peer",
-                {
-                    "username": username or "",
-                    "peer_name": peer_name,
-                    "expire_date": target_expire_date,
-                    "tariff_key": tariff_key,
-                },
-                str(e),
-            )
-            logger.error(
-                "Cascade provisioning failed for user %s; queued task %s: %s",
-                user_id,
-                task_id,
-                e,
-            )
-            return (
-                False,
-                "Доступ оплачен и будет создан автоматически после восстановления сервера",
-                None,
-            )
-    except Exception as e:
-        logger.error(f"Error in create_or_restore_peer_for_user: {e}")
-        return False, "Ошибка при создании/восстановлении доступа", None
-
-
 # Helper to safely answer callback queries
 async def safe_answer_callback(callback_query: types.CallbackQuery, text: str = None):
     """Safely answer callback queries, ignoring expired query errors."""
@@ -647,8 +566,23 @@ def create_main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🔄 Продлить подписку", callback_data="extend")]
         )
     if has_active_access:
+        config_counter = getattr(db, "count_managed_configs", None)
+        config_count = config_counter(user_id) if callable(config_counter) else 0
         inline_keyboard.append(
-            [InlineKeyboardButton(text="📥 Получить конфигурацию", callback_data="get_config")]
+            [
+                InlineKeyboardButton(
+                    text=(
+                        "Создать файл конфигурации"
+                        if config_count == 0
+                        else "Файлы конфигурации"
+                    ),
+                    callback_data=(
+                        ClientConfigCallback(action="create").pack()
+                        if config_count == 0
+                        else "get_config"
+                    ),
+                )
+            ]
         )
     inline_keyboard.extend(
         [
@@ -769,16 +703,7 @@ async def retry_provisioning_tasks() -> None:
     """Run the durable Cascade provisioning worker."""
 
     async def send_worker_config(user_id: int, config: bytes) -> bool:
-        primary = db.get_primary_client_peer(user_id)
-        if not primary:
-            return await send_config_with_confirmation(user_id, config, caption=None)
-        server_name = cascade_router.get_server_name(str(primary["server_key"]))
-        return await send_config_with_confirmation(
-            user_id,
-            config,
-            caption=None,
-            filename=location_config_filename(server_name),
-        )
+        return await send_config_with_confirmation(user_id, config, caption=None)
 
     worker = ProvisioningWorker(
         db,

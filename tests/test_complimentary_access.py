@@ -302,9 +302,28 @@ class ComplimentaryDatabaseTests(unittest.TestCase):
             button.text for row in keyboard.inline_keyboard for button in row
         }
         self.assertIn("🎁 Бесплатный доступ", labels)
-        self.assertIn("📥 Получить конфигурацию", labels)
+        self.assertIn("Создать файл конфигурации", labels)
         self.assertNotIn("💳 Купить доступ", labels)
         self.assertNotIn("🔄 Продлить подписку", labels)
+
+        self.db.save_client_peer(
+            10,
+            "server-a",
+            "if-a",
+            "peer-a",
+            "key-a",
+            "alice_phone",
+            "managed",
+            config_name="Телефон",
+            client_group="Basic",
+        )
+        with patch.object(bot_module, "db", self.db, create=True):
+            keyboard = bot_module.create_main_menu_keyboard(10)
+        labels = {
+            button.text for row in keyboard.inline_keyboard for button in row
+        }
+        self.assertIn("Файлы конфигурации", labels)
+        self.assertNotIn("Создать файл конфигурации", labels)
 
 
 class RecordingCascadeAPI:
@@ -363,12 +382,20 @@ class ComplimentaryCascadeTests(unittest.IsolatedAsyncioTestCase):
             except FileNotFoundError:
                 pass
 
-    async def test_free_provisioning_and_revoke_use_effective_expiries(self):
+    async def test_free_access_does_not_create_config_and_revoke_syncs_existing(self):
         enabled = await self.router.set_client_complimentary(10, 99, True)
-        self.assertEqual(enabled["created"], 1)
-        self.assertEqual(
-            self.api.created_expiries,
-            [(COMPLIMENTARY_CASCADE_EXPIRY, "if-production")],
+        self.assertEqual(enabled["created"], 0)
+        self.assertEqual(self.api.created_expiries, [])
+        self.db.save_client_peer(
+            10,
+            "server-a",
+            "if-production",
+            "peer-10",
+            "key-10",
+            "alice_phone",
+            "managed",
+            config_name="Телефон",
+            client_group="Basic",
         )
 
         disabled = await self.router.set_client_complimentary(10, 99, False)
@@ -462,7 +489,7 @@ class ComplimentaryCascadeTests(unittest.IsolatedAsyncioTestCase):
             ).fetchone()[0]
         self.assertEqual(status, "completed")
 
-    async def test_preadded_free_client_is_provisioned_only_after_first_contact(self):
+    async def test_preadded_free_client_is_activated_without_config(self):
         self.db.admin_add_client(20, 99)
         self.db.set_client_complimentary(20, 99, True)
         self.assertFalse(self.db.get_client_access_state(20).active)
@@ -475,11 +502,8 @@ class ComplimentaryCascadeTests(unittest.IsolatedAsyncioTestCase):
 
         activations = [result for result in (first, second) if result is not None]
         self.assertEqual(len(activations), 1)
-        self.assertEqual(activations[0]["sync"]["created"], 1)
-        self.assertEqual(
-            self.api.created_expiries,
-            [(COMPLIMENTARY_CASCADE_EXPIRY, "if-production")],
-        )
+        self.assertEqual(activations[0]["sync"]["created"], 0)
+        self.assertEqual(self.api.created_expiries, [])
         access = self.db.get_client_access_state(20)
         self.assertTrue(access.identity_verified)
         self.assertEqual(access.source, "complimentary")
@@ -495,10 +519,7 @@ class ComplimentaryCascadeTests(unittest.IsolatedAsyncioTestCase):
         activation = await self.router.activate_preadded_client(20, "paid_user")
 
         self.assertEqual(activation["sync"]["failed"], 0)
-        self.assertEqual(
-            self.api.created_expiries,
-            [(paid_expiry, "if-production")],
-        )
+        self.assertEqual(self.api.created_expiries, [])
 
     async def test_outbound_sender_skips_preadded_client_until_first_contact(self):
         self.db.admin_add_client(20, 99)
@@ -547,10 +568,10 @@ class ComplimentaryCascadeTests(unittest.IsolatedAsyncioTestCase):
             task = connection.execute(
                 "SELECT operation, status FROM provisioning_tasks WHERE telegram_user_id=20"
             ).fetchone()
-        self.assertEqual(task, ("create_peer", "pending"))
+        self.assertEqual(task, ("sync_client_state", "pending"))
         notify_admins.assert_awaited_once()
 
-    async def test_start_link_auto_approves_exact_username_and_provisions(self):
+    async def test_start_link_auto_approves_exact_username_without_config(self):
         invitation = self.db.create_client_invitation("invite_user", 99)
         self.db.set_invitation_complimentary(invitation["id"], 99, True)
         panel = SimpleNamespace(
@@ -577,7 +598,7 @@ class ComplimentaryCascadeTests(unittest.IsolatedAsyncioTestCase):
         client = self.db.get_admin_client_details(30)
         self.assertEqual(client["identity_source"], "username_invite")
         self.assertEqual(client["is_complimentary"], 1)
-        self.assertIsNotNone(self.db.get_primary_client_peer(30))
+        self.assertIsNone(self.db.get_primary_client_peer(30))
         notify_admins.assert_awaited_once()
         self.assertIn(
             "автоматически привязан",

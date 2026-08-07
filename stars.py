@@ -10,7 +10,6 @@ from aiogram import Bot
 from cascade_api import CascadeRouter
 from database import Database
 from payment import PaymentManager
-from utils import generate_peer_name
 
 logger = logging.getLogger(__name__)
 
@@ -252,39 +251,20 @@ class StarsReconciler:
         banned = await asyncio.to_thread(
             self.db.is_client_banned, payment_user_id
         )
-        primary = await asyncio.to_thread(
-            self.db.get_primary_client_peer, payment_user_id
-        )
-        if primary:
-            sync_result = (
-                await self.cascade_router.sync_client_state(payment_user_id)
-                if banned
-                else await self.cascade_router.sync_user_access(
-                    payment_user_id, applied["expire_date"]
-                )
+        sync_result = (
+            await self.cascade_router.sync_client_state(payment_user_id)
+            if banned
+            else await self.cascade_router.sync_user_access(
+                payment_user_id, applied["expire_date"]
             )
-            if sync_result["failed"]:
-                await asyncio.to_thread(
-                    self.db.add_provisioning_task,
-                    payment_user_id,
-                    "sync_client_state" if banned else "sync_access",
-                    {} if banned else {"expire_date": applied["expire_date"]},
-                    f"Failed peers: {sync_result['failed']}",
-                )
-        elif not banned:
+        )
+        if sync_result["failed"]:
             await asyncio.to_thread(
                 self.db.add_provisioning_task,
                 payment_user_id,
-                "create_peer",
-                {
-                    "username": metadata.get("username") or "",
-                    "peer_name": generate_peer_name(
-                        metadata.get("username") or None, payment_user_id
-                    ),
-                    "expire_date": applied["expire_date"],
-                    "tariff_key": payment["tariff_key"],
-                },
-                "Recovered by Telegram Stars reconciliation",
+                "sync_client_state" if banned else "sync_access",
+                {} if banned else {"expire_date": applied["expire_date"]},
+                f"Failed peers: {sync_result['failed']}",
             )
         await asyncio.to_thread(
             self.db.update_star_transaction_match,

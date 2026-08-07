@@ -31,8 +31,10 @@ from database import Database
 from handlers.access import (
     client_config_keyboard,
     config_file_back_keyboard,
+    create_client_config,
     handle_status_callback,
     return_to_client_configs,
+    set_client_config_workflow,
 )
 from handlers.admin import (
     ActiveAdminWorkflow,
@@ -695,7 +697,7 @@ class TelegramDatabaseTests(unittest.TestCase):
             list_assignable_client_groups=AsyncMock(
                 return_value=["Basic", "Premium"]
             ),
-            build_additional_peer_name=AsyncMock(return_value="alice_Телефон"),
+            build_managed_peer_name=AsyncMock(return_value="alice_Телефон"),
         )
 
         with patch("handlers.admin.is_admin", return_value=True):
@@ -825,13 +827,55 @@ class TelegramDatabaseTests(unittest.TestCase):
         client_keyboard, count = client_config_keyboard(self.db, 10)
         client_labels = [button.text for row in client_keyboard.inline_keyboard for button in row]
         self.assertEqual(count, 2)
-        self.assertIn("Основной конфиг", client_labels)
+        self.assertIn("Конфигурация 1", client_labels)
         self.assertIn("Телефон", client_labels)
         self.assertNotIn("Планшет", client_labels)
 
         admin_keyboard, _ = config_list_keyboard(self.db, 10)
         admin_labels = [button.text for row in admin_keyboard.inline_keyboard for button in row]
         self.assertTrue(any("Планшет" in label for label in admin_labels))
+
+    def test_explicit_config_creation_sends_file_immediately(self):
+        self.db.ensure_subscription(
+            10, "alice", "2099-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        set_client_config_workflow(
+            self.db,
+            10,
+            "confirm_create",
+            config_name="Телефон",
+            server_key="fin-1",
+            interface_id="if-a",
+        )
+        callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=10),
+            message=SimpleNamespace(chat=SimpleNamespace(id=10)),
+        )
+        config = {
+            "id": 1,
+            "server_key": "fin-1",
+            "config_name": "Телефон",
+        }
+        router = SimpleNamespace(
+            create_managed_config=AsyncMock(return_value=(config, b"config")),
+            get_server_name=lambda _server_key: "Finland",
+        )
+        sender = AsyncMock(return_value=True)
+
+        asyncio.run(
+            create_client_config(
+                callback,
+                self.db,
+                router,
+                AsyncMock(),
+                AsyncMock(),
+                sender,
+            )
+        )
+
+        sender.assert_awaited_once()
+        self.assertEqual(sender.await_args.args[1], b"config")
+        self.assertEqual(sender.await_args.kwargs["filename"], "Finland.conf")
 
     def test_client_card_exposes_discount_and_config_management(self):
         labels = [button.text for row in client_card_keyboard(10).inline_keyboard for button in row]
@@ -950,7 +994,7 @@ class TelegramDatabaseTests(unittest.TestCase):
         config = {
             "telegram_user_id": 10,
             "id": 20,
-            "role": "additional",
+            "role": "managed",
             "admin_enabled": 0,
             "enabled": 0,
             "config_name": "Old phone",
@@ -986,11 +1030,11 @@ class TelegramDatabaseTests(unittest.TestCase):
             message=SimpleNamespace(edit_text=AsyncMock()),
         )
         router = SimpleNamespace(
-            delete_additional_config=AsyncMock(
+            delete_managed_config=AsyncMock(
                 return_value=(self.db.get_client_peer(peer_id, 10), False)
             )
         )
-        original_delete = router.delete_additional_config
+        original_delete = router.delete_managed_config
 
         async def delete_and_persist(user_id, selected_peer_id):
             peer = self.db.get_client_peer(selected_peer_id, user_id)
@@ -1019,8 +1063,8 @@ class TelegramDatabaseTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(operation, "admin_delete_config")
 
-        router.delete_additional_config.reset_mock()
-        router.delete_additional_config.side_effect = CascadeNotFound("not owned")
+        router.delete_managed_config.reset_mock()
+        router.delete_managed_config.side_effect = CascadeNotFound("not owned")
         with patch("handlers.admin.is_admin", return_value=True):
             asyncio.run(
                 delete_additional_config(
@@ -1033,7 +1077,7 @@ class TelegramDatabaseTests(unittest.TestCase):
                     ),
                 )
             )
-        router.delete_additional_config.assert_awaited_once_with(11, peer_id)
+        router.delete_managed_config.assert_awaited_once_with(11, peer_id)
 
     def test_admin_client_delete_confirmation_and_self_protection(self):
         self.db.upsert_client(10, "alice")
@@ -1416,11 +1460,9 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
                 "invoice_message_id": None,
             },
             apply_verified_payment=lambda *_args, **_kwargs: {
-                "expire_date": "2099-01-01 00:00:00"
+                "expire_date": "2099-01-01 00:00:00",
+                "is_extension": False,
             },
-            get_primary_client_peer=unittest.mock.Mock(
-                side_effect=[None, {"server_key": "fin-1"}]
-            ),
             add_provisioning_task=unittest.mock.Mock(),
             log_operation=unittest.mock.Mock(),
         )
@@ -1435,8 +1477,9 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         cascade_router = SimpleNamespace(
-            get_server_name=lambda _server_key: "Finland",
-            sync_user_access=AsyncMock(),
+            sync_user_access=AsyncMock(
+                return_value={"total": 0, "updated": 0, "missing": 0, "failed": 0}
+            ),
         )
         panel = SimpleNamespace(delete_user_message=AsyncMock(), render=AsyncMock())
         send_config = AsyncMock(return_value=True)
@@ -1446,8 +1489,6 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
             database,
             cascade_router,
             payment_manager,
-            AsyncMock(return_value=(True, None, b"config")),
-            send_config,
             AsyncMock(),
             lambda *_args, **_kwargs: "admin notification",
             user_action_locks=UserActionLocks(),
@@ -1458,7 +1499,7 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
         success = panel.render.await_args.args[2]
         self.assertTrue(success.plain.startswith("✅ Оплачено!"))
         self.assertIn("продлен на 2 недели", success.plain)
-        send_config.assert_awaited_once()
+        send_config.assert_not_awaited()
         message.answer.assert_not_awaited()
 
     def test_malformed_legacy_payment_callbacks_are_rejected(self):
@@ -1706,7 +1747,16 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
                 FakeBot(),
                 database,
                 SimpleNamespace(),
-                SimpleNamespace(),
+                SimpleNamespace(
+                    sync_user_access=AsyncMock(
+                        return_value={
+                            "total": 0,
+                            "updated": 0,
+                            "missing": 0,
+                            "failed": 0,
+                        }
+                    )
+                ),
                 AsyncMock(),
                 3600,
             )
@@ -1759,7 +1809,16 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
                 FakeBot(),
                 db,
                 manager,
-                SimpleNamespace(),
+                SimpleNamespace(
+                    sync_user_access=AsyncMock(
+                        return_value={
+                            "total": 0,
+                            "updated": 0,
+                            "missing": 0,
+                            "failed": 0,
+                        }
+                    )
+                ),
                 notify,
                 3600,
             )
@@ -1768,8 +1827,7 @@ class ReconciliationTests(unittest.IsolatedAsyncioTestCase):
             payment = db.get_payment_by_id(payment_id)
             self.assertEqual(payment["status"], "succeeded")
             self.assertEqual(payment["telegram_payment_charge_id"], "tg-charge-50")
-            tasks = db.get_pending_provisioning_tasks()
-            self.assertEqual(tasks[0]["operation"], "create_peer")
+            self.assertEqual(db.get_pending_provisioning_tasks(), [])
         finally:
             for suffix in ("", "-wal", "-shm"):
                 try:

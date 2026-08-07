@@ -19,7 +19,6 @@ from message_templates import format_remaining_until, payment_success_message
 from payment import PaymentManager
 from stars import StarsReconciler
 from telegram_runtime import UserActionLocks, edit_bound_message, serialized_user_action
-from utils import generate_peer_name, location_config_filename
 
 logger = logging.getLogger(__name__)
 router = Router(name="payments")
@@ -382,7 +381,7 @@ async def handle_cancel_stars_invoice_callback(
     )
 
 
-# Retry config creation after successful payment if the initial attempt failed
+# Handle legacy retry buttons from releases that provisioned automatically.
 @router.callback_query(PaymentActionCallback.filter(F.action == PaymentAction.RETRY_PEER))
 @router.callback_query(F.data.startswith("retry_peer_"))
 async def handle_retry_peer_callback(
@@ -390,7 +389,6 @@ async def handle_retry_peer_callback(
     db: Database,
     safe_answer_callback,
     create_main_menu_keyboard,
-    user_action_locks: UserActionLocks,
     callback_data: PaymentActionCallback | None = None,
 ):
     try:
@@ -407,33 +405,16 @@ async def handle_retry_peer_callback(
         await safe_answer_callback(callback_query)
 
         user_id = callback_query.from_user.id
-        username = callback_query.from_user.username
-
-        subscription = db.get_peer_by_telegram_id(user_id)
-        if not subscription or not subscription.get("expire_date"):
+        if not db.has_active_access(user_id):
             await edit_bound_message(
                 callback_query.message,
                 "❌ Активная подписка не найдена.",
                 reply_markup=create_main_menu_keyboard(user_id),
             )
             return
-        async with user_action_locks.hold(user_id):
-            task_id = await asyncio.to_thread(
-                db.add_provisioning_task,
-                user_id,
-                "create_peer",
-                {
-                    "username": username or "",
-                    "peer_name": generate_peer_name(username, user_id),
-                    "expire_date": subscription["expire_date"],
-                    "tariff_key": tariff_key,
-                },
-                "Manual retry requested by user",
-            )
-        logger.info("User %s requested provisioning retry task %s", user_id, task_id)
         await edit_bound_message(
             callback_query.message,
-            "🔄 Создание доступа поставлено в очередь. Бот отправит файл конфигурации автоматически.",
+            "✅ Доступ активен. Создай файл конфигурации через главное меню.",
             reply_markup=create_main_menu_keyboard(user_id),
         )
     except Exception as e:
@@ -463,8 +444,6 @@ async def process_successful_payment(
     db: Database,
     cascade_router: CascadeRouter,
     payment_manager: PaymentManager,
-    create_or_restore_peer_for_user,
-    send_config_with_confirmation,
     notify_admins,
     format_admin_payment_notification,
     user_action_locks: UserActionLocks,
@@ -577,16 +556,14 @@ async def process_successful_payment(
 
     expire_date = payment_result["expire_date"]
     if is_banned:
-        primary_peer = await asyncio.to_thread(db.get_primary_client_peer, user_id)
-        if primary_peer:
-            sync_result = await cascade_router.sync_client_state(user_id)
-            if sync_result["failed"]:
-                db.add_provisioning_task(
-                    user_id,
-                    "sync_client_state",
-                    {},
-                    f"Failed peers: {sync_result['failed']}",
-                )
+        sync_result = await cascade_router.sync_client_state(user_id)
+        if sync_result["failed"]:
+            db.add_provisioning_task(
+                user_id,
+                "sync_client_state",
+                {},
+                f"Failed peers: {sync_result['failed']}",
+            )
         await notify_admins(
             format_admin_payment_notification(
                 "🚫 Забаненный клиент оплатил подписку",
@@ -608,42 +585,19 @@ async def process_successful_payment(
         ),
         create_main_menu_keyboard(user_id),
     )
-    primary_peer = await asyncio.to_thread(db.get_primary_client_peer, user_id)
-    if primary_peer:
-        sync_result = await cascade_router.sync_user_access(user_id, expire_date)
-        if sync_result["failed"]:
-            db.add_provisioning_task(
-                user_id,
-                "sync_access",
-                {"expire_date": expire_date},
-                f"Failed peers: {sync_result['failed']}",
-            )
-        title = "🔁 Клиент продлил подписку"
-    else:
-        ok, error, config = await create_or_restore_peer_for_user(user_id, username, tariff_key)
-        if not ok:
-            await message.answer(
-                f"⚠️ {error}. Мы повторим создание автоматически."
-            )
-            await notify_admins(
-                f"⚠️ Оплата получена, provisioning отложен\n\nTelegram ID: {user_id}\nПричина: {error}"
-            )
-            return
-        primary_peer = await asyncio.to_thread(db.get_primary_client_peer, user_id)
-        server_name = (
-            cascade_router.get_server_name(str(primary_peer["server_key"])) if primary_peer else ""
+    sync_result = await cascade_router.sync_user_access(user_id, expire_date)
+    if sync_result["failed"]:
+        db.add_provisioning_task(
+            user_id,
+            "sync_access",
+            {"expire_date": expire_date},
+            f"Failed peers: {sync_result['failed']}",
         )
-        if not await send_config_with_confirmation(
-            message.chat.id,
-            config,
-            caption=None,
-            filename=location_config_filename(server_name),
-        ):
-            await message.answer(
-                "✅ Доступ активирован, но файл конфигурации не удалось отправить. "
-                "Попробуй получить его кнопкой в главном меню."
-            )
-        title = "🆕 Новый клиент подключился"
+    title = (
+        "🔁 Клиент продлил подписку"
+        if payment_result["is_extension"]
+        else "🆕 Новый клиент оплатил подписку"
+    )
 
     await notify_admins(
         format_admin_payment_notification(
