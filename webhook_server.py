@@ -411,7 +411,7 @@ async def process_refund_succeeded(refund_data: dict) -> None:
     applied = await asyncio.to_thread(db.apply_refund, payment_id, tariff["days"])
     if not applied:
         raise RuntimeError(f"Failed to reduce access for user {payment['user_id']}")
-    user_id, expire_date = applied
+    user_id, expire_date = applied.user_id, applied.expire_date
     result = await cascade_router.sync_user_access(user_id, expire_date)
     if result["failed"]:
         db.add_provisioning_task(

@@ -27,7 +27,7 @@ from callbacks import (
     RefundConfirmationCallback,
 )
 from cascade_api import CascadeNotFound, ClientDeletionResult
-from database import Database
+from database import ActiveSubscriptionError, Database
 from handlers.access import (
     client_config_keyboard,
     config_file_back_keyboard,
@@ -48,6 +48,7 @@ from handlers.admin import (
     config_list_keyboard,
     confirm_client_deletion,
     confirm_expiry_change,
+    confirm_forced_client_deletion,
     confirmed_managed_client_group,
     delete_client,
     delete_managed_config_handler,
@@ -1124,6 +1125,100 @@ class TelegramDatabaseTests(unittest.TestCase):
             self_callback.message.edit_text.await_args.args[0],
         )
 
+    def test_active_client_delete_requires_double_forced_confirmation(self):
+        self.db.ensure_subscription(
+            10, "alice", "2099-01-01 00:00:00", "paid", "30_days", "yookassa"
+        )
+        callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=99),
+            message=SimpleNamespace(edit_text=AsyncMock()),
+        )
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                confirm_client_deletion(
+                    callback,
+                    self.db,
+                    AsyncMock(),
+                    AdminClientCallback(action="delete", user_id=10),
+                )
+            )
+        labels = [
+            button.text
+            for row in callback.message.edit_text.await_args.kwargs[
+                "reply_markup"
+            ].inline_keyboard
+            for button in row
+        ]
+        self.assertIn("🔄 Проверить статус подписки", labels)
+        self.assertIn("⚠️ Удалить без возврата", labels)
+        self.assertNotIn("🗑 Удалить навсегда", labels)
+
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                confirm_forced_client_deletion(
+                    callback,
+                    self.db,
+                    AsyncMock(),
+                    AdminClientCallback(action="delete_force", user_id=10),
+                )
+            )
+        force_labels = [
+            button.text
+            for row in callback.message.edit_text.await_args.kwargs[
+                "reply_markup"
+            ].inline_keyboard
+            for button in row
+        ]
+        self.assertIn("🗑 Подтверждаю удаление без возврата", force_labels)
+
+        blocked_router = SimpleNamespace(
+            delete_client=AsyncMock(side_effect=ActiveSubscriptionError("active"))
+        )
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                delete_client(
+                    callback,
+                    self.db,
+                    blocked_router,
+                    AsyncMock(),
+                    AdminClientCallback(action="delete_confirm", user_id=10),
+                )
+            )
+        self.assertIn("Подписка снова активна", callback.message.edit_text.await_args.args[0])
+        blocked_router.delete_client.assert_awaited_once_with(
+            10, 99, allow_active_subscription=False
+        )
+
+        async def force_delete(user_id, admin_id, *, allow_active_subscription=False):
+            self.db.delete_client_operational_data(
+                admin_id,
+                user_id,
+                deleted=0,
+                already_missing=0,
+                allow_active_subscription=allow_active_subscription,
+            )
+            return ClientDeletionResult()
+
+        force_router = SimpleNamespace(
+            delete_client=AsyncMock(side_effect=force_delete)
+        )
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                delete_client(
+                    callback,
+                    self.db,
+                    force_router,
+                    AsyncMock(),
+                    AdminClientCallback(
+                        action="delete_force_confirm", user_id=10
+                    ),
+                )
+            )
+        force_router.delete_client.assert_awaited_once_with(
+            10, 99, allow_active_subscription=True
+        )
+        self.assertIn("Клиент удалён навсегда", callback.message.edit_text.await_args.args[0])
+
     def test_admin_client_delete_reports_success_and_stale_callback(self):
         self.db.upsert_client(10, "alice")
         callback = SimpleNamespace(
@@ -1131,9 +1226,15 @@ class TelegramDatabaseTests(unittest.TestCase):
             message=SimpleNamespace(edit_text=AsyncMock()),
         )
 
-        async def delete_and_persist(user_id, admin_id):
+        async def delete_and_persist(
+            user_id, admin_id, *, allow_active_subscription=False
+        ):
             self.db.delete_client_operational_data(
-                admin_id, user_id, deleted=2, already_missing=1
+                admin_id,
+                user_id,
+                deleted=2,
+                already_missing=1,
+                allow_active_subscription=allow_active_subscription,
             )
             return ClientDeletionResult(deleted=2, already_missing=1)
 
@@ -1591,6 +1692,11 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
                 invoice_payload=payload,
             )
             telegram_bot = SimpleNamespace(refund_star_payment=AsyncMock())
+            cascade_router = SimpleNamespace(
+                sync_user_access=AsyncMock(
+                    return_value={"total": 0, "updated": 0, "missing": 0, "failed": 0}
+                )
+            )
             callback = SimpleNamespace(
                 from_user=SimpleNamespace(id=1),
                 message=SimpleNamespace(edit_text=AsyncMock()),
@@ -1603,10 +1709,12 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
                     callback_data,
                     telegram_bot,
                     database,
+                    cascade_router,
                     safe_answer,
                     lambda _user_id: True,
                 )
             self.assertEqual(telegram_bot.refund_star_payment.await_count, 1)
+            cascade_router.sync_user_access.assert_awaited_once()
         finally:
             for suffix in ("", "-wal", "-shm"):
                 try:
@@ -1614,7 +1722,7 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
                 except FileNotFoundError:
                     pass
 
-    async def test_refunded_payment_handler_never_shortens_access(self):
+    async def test_refunded_payment_handler_shortens_access_once(self):
         handle, path = tempfile.mkstemp(suffix=".db")
         os.close(handle)
         try:
@@ -1633,6 +1741,13 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
                 telegram_payment_charge_id="charge-80",
                 invoice_payload=payload,
             )
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    """
+                    UPDATE subscriptions SET expire_date=datetime('now', '+7 days')
+                    WHERE telegram_user_id=80
+                    """
+                )
             message = SimpleNamespace(
                 refunded_payment=SimpleNamespace(
                     telegram_payment_charge_id="charge-80",
@@ -1644,18 +1759,90 @@ class TelegramHandlerTests(unittest.IsolatedAsyncioTestCase):
                 chat=SimpleNamespace(id=80),
             )
             panel = SimpleNamespace(delete_user_message=AsyncMock(), render=AsyncMock())
+            cascade_router = SimpleNamespace(
+                sync_user_access=AsyncMock(
+                    return_value={"total": 0, "updated": 0, "missing": 0, "failed": 0}
+                )
+            )
             await process_refunded_payment(
                 message,
                 database,
+                cascade_router,
+                AsyncMock(),
+                panel,
+                lambda _user_id: None,
+            )
+            subscription = database.get_peer_by_telegram_id(80)
+            self.assertNotEqual(subscription["expire_date"], applied["expire_date"])
+            self.assertEqual(subscription["is_active"], 0)
+            self.assertEqual(database.get_payment_by_id(payment_id)["status"], "refunded")
+            await process_refunded_payment(
+                message,
+                database,
+                cascade_router,
                 AsyncMock(),
                 panel,
                 lambda _user_id: None,
             )
             self.assertEqual(
                 database.get_peer_by_telegram_id(80)["expire_date"],
+                subscription["expire_date"],
+            )
+            cascade_router.sync_user_access.assert_awaited_once()
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_partial_stars_refund_does_not_change_subscription(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        try:
+            database = Database(path)
+            payment_id = str(uuid.uuid4())
+            payload = f"vpn2:{payment_id}:14_days:81"
+            database.create_stars_payment_intent(
+                payment_id, 81, 100, "14_days", payload
+            )
+            applied = database.apply_verified_payment(
+                payment_id,
+                81,
+                None,
+                100,
+                "stars",
+                "14_days",
+                14,
+                telegram_payment_charge_id="charge-81",
+                invoice_payload=payload,
+            )
+            message = SimpleNamespace(
+                refunded_payment=SimpleNamespace(
+                    telegram_payment_charge_id="charge-81",
+                    total_amount=50,
+                    invoice_payload=payload,
+                ),
+                date=SimpleNamespace(timestamp=lambda: 1),
+                from_user=SimpleNamespace(id=81),
+                chat=SimpleNamespace(id=81),
+            )
+            cascade_router = SimpleNamespace(sync_user_access=AsyncMock())
+            await process_refunded_payment(
+                message,
+                database,
+                cascade_router,
+                AsyncMock(),
+                SimpleNamespace(delete_user_message=AsyncMock(), render=AsyncMock()),
+                lambda _user_id: None,
+            )
+
+            self.assertEqual(
+                database.get_peer_by_telegram_id(81)["expire_date"],
                 applied["expire_date"],
             )
-            self.assertEqual(database.get_payment_by_id(payment_id)["status"], "refunded")
+            self.assertEqual(database.get_payment_by_id(payment_id)["status"], "succeeded")
+            cascade_router.sync_user_access.assert_not_awaited()
         finally:
             for suffix in ("", "-wal", "-shm"):
                 try:

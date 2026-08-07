@@ -12,7 +12,12 @@ from weakref import WeakValueDictionary
 import httpx
 
 from config import CASCADE_REQUEST_TIMEOUT, CASCADE_SERVERS_FILE
-from database import MANAGED_CONFIG_ROLE, Database, normalize_config_name
+from database import (
+    MANAGED_CONFIG_ROLE,
+    ActiveSubscriptionError,
+    Database,
+    normalize_config_name,
+)
 from runtime_metrics import RuntimeMetrics
 
 logger = logging.getLogger(__name__)
@@ -1026,7 +1031,11 @@ class CascadeRouter:
             return peer, cascade_peer_missing
 
     async def delete_client(
-        self, user_id: int, admin_id: int
+        self,
+        user_id: int,
+        admin_id: int,
+        *,
+        allow_active_subscription: bool = False,
     ) -> ClientDeletionResult:
         """Delete all Cascade peers and then the client's operational database state."""
         user_lock = self._user_locks.get(user_id)
@@ -1034,8 +1043,20 @@ class CascadeRouter:
             user_lock = asyncio.Lock()
             self._user_locks[user_id] = user_lock
         async with user_lock:
-            if not self.db.get_admin_client_details(user_id):
+            client = self.db.get_admin_client_details(user_id)
+            if not client:
                 raise CascadeNotFound(f"No client profile for user {user_id}")
+            paid_active = self.db.has_active_subscription(user_id)
+            if paid_active and not allow_active_subscription:
+                raise ActiveSubscriptionError(
+                    f"Client {user_id} still has an active paid subscription"
+                )
+            subscription_snapshot = {
+                "expire_date": client.get("expire_date"),
+                "is_active": bool(client.get("is_active")),
+                "payment_status": client.get("payment_status"),
+                "payment_method": client.get("payment_method"),
+            }
 
             deleted = 0
             already_missing = 0
@@ -1079,6 +1100,10 @@ class CascadeRouter:
                     deleted=deleted,
                     already_missing=already_missing,
                     failed=failed,
+                    forced_without_refund=bool(
+                        paid_active and allow_active_subscription
+                    ),
+                    subscription_snapshot=subscription_snapshot,
                 )
                 return result
 
@@ -1088,7 +1113,10 @@ class CascadeRouter:
                     user_id,
                     deleted=deleted,
                     already_missing=already_missing,
+                    allow_active_subscription=allow_active_subscription,
                 )
+            except ActiveSubscriptionError:
+                raise
             except Exception as exc:
                 raise CascadeError("Failed to remove client data locally") from exc
             if removed is None:

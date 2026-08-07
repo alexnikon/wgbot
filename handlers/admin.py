@@ -20,7 +20,13 @@ from callbacks import (
 )
 from cascade_api import CascadeError, CascadeNotFound, CascadeRouter
 from config import get_admin_telegram_ids
-from database import MANAGED_CONFIG_ROLE, MAX_CLIENT_CONFIGS, Database, normalize_config_name
+from database import (
+    MANAGED_CONFIG_ROLE,
+    MAX_CLIENT_CONFIGS,
+    ActiveSubscriptionError,
+    Database,
+    normalize_config_name,
+)
 from telegram_runtime import edit_bound_message, edit_telegram_text
 from telegram_text import TelegramText, ensure_telegram_text, rich_date
 from utils import format_date_for_user, location_config_filename
@@ -1190,6 +1196,47 @@ async def confirm_client_deletion(
             callback.message, "❌ Клиент не найден.", reply_markup=admin_dashboard_keyboard()
         )
         return
+    if db.has_active_subscription(callback_data.user_id):
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="🔄 Проверить статус подписки",
+                        callback_data=AdminClientCallback(
+                            action="delete", user_id=callback_data.user_id
+                        ).pack(),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="⚠️ Удалить без возврата",
+                        callback_data=AdminClientCallback(
+                            action="delete_force", user_id=callback_data.user_id
+                        ).pack(),
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="⬅️ Назад",
+                        callback_data=AdminClientCallback(
+                            action="details", user_id=callback_data.user_id
+                        ).pack(),
+                    )
+                ],
+            ]
+        )
+        await edit_bound_message(
+            callback.message,
+            "⚠️ У клиента активная оплаченная подписка.\n\n"
+            f"Telegram ID: {callback_data.user_id}\n"
+            f"Действует до: {format_admin_expiry(client.get('expire_date'))}\n"
+            f"Способ оплаты: {client.get('payment_method') or 'не указан'}\n\n"
+            "Сначала оформи полный возврат. Для YooKassa возврат выполняется "
+            "в личном кабинете; после webhook нажми «Проверить статус подписки». "
+            "Удаление без возврата доступно только через дополнительное подтверждение.",
+            reply_markup=keyboard,
+        )
+        return
     username = str(client.get("telegram_username") or "")
     identity = f"@{username}" if username else "без username"
     keyboard = InlineKeyboardMarkup(
@@ -1221,6 +1268,87 @@ async def confirm_client_deletion(
         "Все peer'ы будут удалены из Cascade, а профиль, подписка и конфиги — "
         "из базы данных. Платёжная история и аудит сохранятся. "
         "Это действие нельзя отменить.",
+        reply_markup=keyboard,
+    )
+
+
+@router.callback_query(AdminClientCallback.filter(F.action == "delete_force"))
+async def confirm_forced_client_deletion(
+    callback: types.CallbackQuery,
+    db: Database,
+    safe_answer_callback,
+    callback_data: AdminClientCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    if callback.from_user.id == callback_data.user_id:
+        await edit_bound_message(
+            callback.message,
+            "❌ Нельзя удалить собственный профиль администратора.",
+            reply_markup=client_card_keyboard(callback_data.user_id),
+        )
+        return
+    client = db.get_admin_client_details(callback_data.user_id)
+    if not client:
+        await edit_bound_message(
+            callback.message, "❌ Клиент не найден.", reply_markup=admin_dashboard_keyboard()
+        )
+        return
+    if not db.has_active_subscription(callback_data.user_id):
+        await edit_bound_message(
+            callback.message,
+            "✅ Оплаченная подписка уже не активна. Можно удалить клиента обычным способом.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🗑 Удалить навсегда",
+                            callback_data=AdminClientCallback(
+                                action="delete_confirm",
+                                user_id=callback_data.user_id,
+                            ).pack(),
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="⬅️ Назад",
+                            callback_data=AdminClientCallback(
+                                action="details", user_id=callback_data.user_id
+                            ).pack(),
+                        )
+                    ],
+                ]
+            ),
+        )
+        return
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🗑 Подтверждаю удаление без возврата",
+                    callback_data=AdminClientCallback(
+                        action="delete_force_confirm", user_id=callback_data.user_id
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=AdminClientCallback(
+                        action="delete", user_id=callback_data.user_id
+                    ).pack(),
+                )
+            ],
+        ]
+    )
+    await edit_bound_message(
+        callback.message,
+        "🚨 Последнее подтверждение\n\n"
+        f"У клиента {callback_data.user_id} оплаченный доступ до "
+        f"{format_admin_expiry(client.get('expire_date'))}.\n\n"
+        "Деньги возвращены не будут. Профиль, подписка и конфиги будут удалены "
+        "без возможности восстановления. Действие будет записано в аудит.",
         reply_markup=keyboard,
     )
 
@@ -1393,7 +1521,11 @@ async def apply_client_ban(
     )
 
 
-@router.callback_query(AdminClientCallback.filter(F.action == "delete_confirm"))
+@router.callback_query(
+    AdminClientCallback.filter(
+        F.action.in_({"delete_confirm", "delete_force_confirm"})
+    )
+)
 async def delete_client(
     callback: types.CallbackQuery,
     db: Database,
@@ -1411,15 +1543,31 @@ async def delete_client(
             reply_markup=client_card_keyboard(callback_data.user_id),
         )
         return
-    if not db.get_admin_client_details(callback_data.user_id):
+    client = db.get_admin_client_details(callback_data.user_id)
+    if not client:
         await edit_bound_message(
             callback.message, "❌ Клиент не найден.", reply_markup=admin_dashboard_keyboard()
         )
         return
+    force_active = (
+        callback_data.action == "delete_force_confirm"
+        and db.has_active_subscription(callback_data.user_id)
+    )
     try:
         result = await cascade_router.delete_client(
-            callback_data.user_id, callback.from_user.id
+            callback_data.user_id,
+            callback.from_user.id,
+            allow_active_subscription=force_active,
         )
+    except ActiveSubscriptionError:
+        await edit_bound_message(
+            callback.message,
+            "⚠️ Подписка снова активна. Вернись к удалению и проверь её статус.",
+            reply_markup=client_card_keyboard(
+                callback_data.user_id, bool(client.get("is_banned"))
+            ),
+        )
+        return
     except CascadeNotFound:
         await edit_bound_message(
             callback.message, "❌ Клиент не найден.", reply_markup=admin_dashboard_keyboard()

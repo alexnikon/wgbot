@@ -14,6 +14,7 @@ from callbacks import (
     YooKassaCancelCallback,
 )
 from cascade_api import CascadeRouter
+from config import get_tariffs
 from database import Database
 from message_templates import format_remaining_until, payment_success_message
 from payment import PaymentManager
@@ -592,19 +593,51 @@ async def process_successful_payment(
 async def process_refunded_payment(
     message: types.Message,
     db: Database,
+    cascade_router: CascadeRouter,
     notify_admins,
     chat_panel,
     create_main_menu_keyboard,
 ):
-    """Record a Telegram Stars refund without changing VPN access automatically."""
+    """Apply a confirmed full Telegram Stars refund exactly once."""
     refund = message.refunded_payment
     user_id = message.from_user.id if message.from_user else message.chat.id
     await chat_panel.delete_user_message(message)
-    matched = await asyncio.to_thread(
-        db.mark_stars_refund_observed,
-        refund.telegram_payment_charge_id,
-        refund.total_amount,
+    payment = await asyncio.to_thread(
+        db.get_payment_by_telegram_charge, refund.telegram_payment_charge_id
     )
+    tariff = get_tariffs().get(payment.get("tariff_key")) if payment else None
+    full_refund = bool(
+        payment
+        and payment.get("payment_method") == "stars"
+        and int(payment.get("amount") or 0) == int(refund.total_amount)
+        and tariff
+    )
+    application = None
+    if full_refund:
+        application = await asyncio.to_thread(
+            db.apply_refund,
+            str(payment["payment_id"]),
+            int(tariff["days"]),
+        )
+    matched = False
+    if full_refund and application:
+        matched = await asyncio.to_thread(
+            db.mark_stars_refund_observed,
+            refund.telegram_payment_charge_id,
+            refund.total_amount,
+            "completed",
+        )
+        if application.applied:
+            result = await cascade_router.sync_user_access(
+                application.user_id, application.expire_date
+            )
+            if result["failed"]:
+                db.add_provisioning_task(
+                    application.user_id,
+                    "sync_access",
+                    {"expire_date": application.expire_date},
+                    f"Failed peers: {result['failed']}",
+                )
     await asyncio.to_thread(
         db.record_star_transaction,
         refund.telegram_payment_charge_id,
@@ -614,27 +647,35 @@ async def process_refunded_payment(
         transaction_type="invoice_payment",
         user_id=message.from_user.id if message.from_user else None,
         invoice_payload=refund.invoice_payload,
-        status="refund_pending_review" if matched else "discrepancy",
+        status="refund_applied" if matched else "discrepancy",
     )
     await asyncio.to_thread(
         db.log_operation,
         f"telegram:{message.from_user.id if message.from_user else 'unknown'}",
         "stars_refund_observed",
-        f"charge_matched={int(matched)}",
+        f"charge_matched={int(matched)}; full_refund={int(full_refund)}",
+    )
+    outcome = (
+        "Оплаченный срок обновлён."
+        if matched
+        else "Платёж или сумма не совпали; доступ не изменён."
     )
     await notify_admins(
         "⚠️ Telegram Stars сообщил о возврате\n\n"
         f"Charge ID: {refund.telegram_payment_charge_id}\n"
         f"Telegram ID: {message.from_user.id if message.from_user else 'unknown'}\n"
-        "Доступ автоматически не изменен."
+        f"{outcome}"
     )
     if await asyncio.to_thread(db.is_client_banned, user_id):
         return
     await chat_panel.render(
         message.chat.id,
         user_id,
-        "↩️ Telegram сообщил о возврате Stars.\n\n"
-        "VPN-доступ автоматически не изменён; операция передана администратору.",
+        (
+            "↩️ Возврат Stars подтверждён.\n\nОплаченный срок подписки обновлён."
+            if matched
+            else "⚠️ Возврат Stars требует проверки администратора."
+        ),
         create_main_menu_keyboard(user_id),
     )
 
@@ -764,6 +805,7 @@ async def confirm_stars_refund(
     callback_data: RefundConfirmationCallback,
     bot: Bot,
     db: Database,
+    cascade_router: CascadeRouter,
     safe_answer_callback,
     is_admin,
 ):
@@ -789,7 +831,47 @@ async def confirm_stars_refund(
             db.update_refund_request_status, payment["payment_id"], "request_failed"
         )
         raise
-    await asyncio.to_thread(db.update_refund_request_status, payment["payment_id"], "completed")
+    await asyncio.to_thread(
+        db.update_refund_request_status,
+        payment["payment_id"],
+        "provider_completed",
+    )
+    tariff = get_tariffs().get(payment.get("tariff_key"))
+    application = (
+        await asyncio.to_thread(
+            db.apply_refund,
+            payment["payment_id"],
+            int(tariff["days"]),
+        )
+        if tariff
+        else None
+    )
+    if not application:
+        await asyncio.to_thread(
+            db.update_refund_request_status,
+            payment["payment_id"],
+            "provider_completed_pending_review",
+        )
+        await edit_bound_message(
+            callback_query.message,
+            "⚠️ Возврат принят Telegram, но срок подписки не удалось обновить. "
+            "Операция требует ручной проверки.",
+        )
+        return
+    await asyncio.to_thread(
+        db.update_refund_request_status, payment["payment_id"], "completed"
+    )
+    if application.applied:
+        result = await cascade_router.sync_user_access(
+            application.user_id, application.expire_date
+        )
+        if result["failed"]:
+            db.add_provisioning_task(
+                application.user_id,
+                "sync_access",
+                {"expire_date": application.expire_date},
+                f"Failed peers: {result['failed']}",
+            )
     db.log_operation(
         f"telegram:{payment['user_id']}",
         "stars_refund_requested",
@@ -797,7 +879,7 @@ async def confirm_stars_refund(
     )
     await edit_bound_message(
         callback_query.message,
-        "✅ Возврат отправлен Telegram. VPN-доступ оставлен без изменений.",
+        "✅ Возврат выполнен. Оплаченный срок подписки обновлён.",
         reply_markup=types.InlineKeyboardMarkup(
             inline_keyboard=[
                 [

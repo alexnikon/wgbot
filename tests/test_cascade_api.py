@@ -16,7 +16,7 @@ from cascade_api import (
     CascadeServer,
     load_cascade_servers,
 )
-from database import Database
+from database import ActiveSubscriptionError, Database
 
 
 class FakeCascadeAPI:
@@ -714,6 +714,42 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
                 await router.delete_managed_config(10, peer_id)
 
             self.assertIsNotNone(db.get_client_peer(peer_id, 10))
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_client_delete_blocks_active_subscription_before_cascade(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.ensure_subscription(
+            10, "alice", "2099-01-01 00:00:00", "paid", "30_days", "yookassa"
+        )
+        db.save_client_peer(
+            10, "server-a", "if-a", "peer-a", "key-a", "alice", "managed"
+        )
+
+        api = SimpleNamespace(
+            get_peer=AsyncMock(return_value={"id": "peer-a"}),
+            delete_peer=AsyncMock(),
+        )
+        router = CascadeRouter(db, servers=[])
+        router.apis = {"server-a": api}
+        try:
+            with self.assertRaises(ActiveSubscriptionError):
+                await router.delete_client(10, 99)
+            api.get_peer.assert_not_awaited()
+            api.delete_peer.assert_not_awaited()
+            self.assertIsNotNone(db.get_admin_client_details(10))
+
+            result = await router.delete_client(
+                10, 99, allow_active_subscription=True
+            )
+            self.assertEqual(result.deleted, 1)
+            self.assertIsNone(db.get_admin_client_details(10))
         finally:
             for suffix in ("", "-wal", "-shm"):
                 try:

@@ -21,6 +21,10 @@ MAX_CONFIG_NAME_LENGTH = 48
 COMPLIMENTARY_CASCADE_EXPIRY = "2099-12-31 23:59:59"
 
 
+class ActiveSubscriptionError(RuntimeError):
+    """Block destructive client deletion while paid access is active."""
+
+
 @dataclass(frozen=True)
 class ClientAccessState:
     """Effective access after ban, identity, complimentary, and paid precedence."""
@@ -42,6 +46,15 @@ class InvitationClaimResult:
     invitation: dict[str, Any] | None = None
     client: dict[str, Any] | None = None
     conflict_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class RefundApplication:
+    """Describe an idempotent full-payment refund application."""
+
+    user_id: int
+    expire_date: str
+    applied: bool
 
 
 def normalize_config_name(value: str) -> str:
@@ -384,9 +397,17 @@ class Database:
                 "refunded_amount": "INTEGER NOT NULL DEFAULT 0",
                 "refunded_at": "TEXT",
                 "refund_review_status": "TEXT",
+                "refund_applied_at": "TEXT",
                 "invoice_message_id": "INTEGER",
             }.items():
                 self._ensure_column(conn, "payments", column, definition)
+            conn.execute(
+                """
+                UPDATE payments SET refund_applied_at=COALESCE(updated_at, CURRENT_TIMESTAMP)
+                WHERE payment_method='yookassa' AND status='refunded'
+                  AND refund_applied_at IS NULL
+                """
+            )
             self._ensure_column(conn, "client_peers", "client_group", "TEXT")
             conn.execute(
                 """
@@ -1830,6 +1851,8 @@ class Database:
         deleted: int,
         already_missing: int,
         failed: int,
+        forced_without_refund: bool = False,
+        subscription_snapshot: dict[str, Any] | None = None,
     ) -> None:
         """Audit a successful or failed administrative client deletion."""
         details = json.dumps(
@@ -1839,6 +1862,8 @@ class Database:
                 "deleted": deleted,
                 "already_missing": already_missing,
                 "failed": failed,
+                "forced_without_refund": forced_without_refund,
+                "subscription": subscription_snapshot,
             },
             sort_keys=True,
         )
@@ -1856,16 +1881,43 @@ class Database:
         *,
         deleted: int,
         already_missing: int,
+        allow_active_subscription: bool = False,
     ) -> dict[str, int] | None:
         """Atomically remove client runtime state while retaining finance and audit data."""
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            exists = conn.execute(
-                "SELECT 1 FROM clients WHERE telegram_user_id=?", (user_id,)
+            client = conn.execute(
+                """
+                SELECT c.telegram_user_id, s.expire_date, s.is_active,
+                       s.payment_status, s.payment_method
+                FROM clients c
+                LEFT JOIN subscriptions s USING(telegram_user_id)
+                WHERE c.telegram_user_id=?
+                """,
+                (user_id,),
             ).fetchone()
-            if not exists:
+            if not client:
                 conn.rollback()
                 return None
+            paid_active = bool(
+                client[2]
+                and client[3] == "paid"
+                and client[1]
+                and conn.execute(
+                    "SELECT datetime(?) > datetime('now')", (client[1],)
+                ).fetchone()[0]
+            )
+            subscription_snapshot = {
+                "expire_date": client[1],
+                "is_active": bool(client[2]),
+                "payment_status": client[3],
+                "payment_method": client[4],
+            }
+            if paid_active and not allow_active_subscription:
+                conn.rollback()
+                raise ActiveSubscriptionError(
+                    f"Client {user_id} still has an active paid subscription"
+                )
 
             counts = {
                 "peers": int(
@@ -1915,6 +1967,10 @@ class Database:
                     "deleted": deleted,
                     "already_missing": already_missing,
                     "failed": 0,
+                    "forced_without_refund": bool(
+                        paid_active and allow_active_subscription
+                    ),
+                    "subscription": subscription_snapshot,
                     "operational_rows": counts,
                 },
                 sort_keys=True,
@@ -1922,9 +1978,15 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO operation_logs(peer_name, operation, details)
-                VALUES (?, 'admin_delete_client', ?)
+                VALUES (?, ?, ?)
                 """,
-                (f"telegram:{user_id}", details),
+                (
+                    f"telegram:{user_id}",
+                    "admin_delete_client_without_refund"
+                    if paid_active and allow_active_subscription
+                    else "admin_delete_client",
+                    details,
+                ),
             )
             conn.commit()
             return counts
@@ -2114,7 +2176,7 @@ class Database:
                        c.is_complimentary, c.complimentary_at, c.complimentary_by,
                        c.identity_verified, c.identity_verified_at, c.identity_source,
                        c.is_banned, c.banned_at, c.banned_by, c.ban_reason,
-                       s.expire_date, s.is_active, s.payment_status,
+                       s.expire_date, s.is_active, s.payment_status, s.payment_method,
                        cp.server_key, cp.interface_id, cp.peer_name,
                        cp.cascade_peer_id,
                        (
@@ -2174,7 +2236,7 @@ class Database:
                        c.is_complimentary, c.complimentary_at, c.complimentary_by,
                        c.identity_verified, c.identity_verified_at, c.identity_source,
                        c.is_banned, c.banned_at, c.banned_by, c.ban_reason,
-                       s.expire_date, s.is_active, s.payment_status,
+                       s.expire_date, s.is_active, s.payment_status, s.payment_method,
                        cp.server_key, cp.interface_id, cp.peer_name,
                        cp.cascade_peer_id,
                        (
@@ -2802,18 +2864,26 @@ class Database:
         )
         return expiry
 
-    def apply_refund(self, payment_id: str, days: int) -> tuple[int, str] | None:
-        """Atomically mark a payment refunded and reduce its subscription."""
+    def apply_refund(
+        self, payment_id: str, days: int
+    ) -> RefundApplication | None:
+        """Atomically and idempotently apply one confirmed full-payment refund."""
+        if days <= 0:
+            raise ValueError("Refund duration must be positive")
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            conn.row_factory = sqlite3.Row
             payment = conn.execute(
-                "SELECT user_id FROM payments WHERE payment_id=? AND status='succeeded'",
+                """
+                SELECT user_id, status, refund_applied_at FROM payments
+                WHERE payment_id=? AND status IN ('succeeded', 'refunded')
+                """,
                 (payment_id,),
             ).fetchone()
             if not payment:
                 conn.rollback()
                 return None
-            user_id = int(payment[0])
+            user_id = int(payment["user_id"])
             subscription = conn.execute(
                 "SELECT expire_date FROM subscriptions WHERE telegram_user_id=?",
                 (user_id,),
@@ -2821,6 +2891,9 @@ class Database:
             if not subscription or not subscription[0]:
                 conn.rollback()
                 return None
+            if payment["refund_applied_at"]:
+                conn.rollback()
+                return RefundApplication(user_id, str(subscription[0]), False)
             new_expiry = datetime.fromisoformat(subscription[0]) - timedelta(days=days)
             value = new_expiry.strftime("%Y-%m-%d %H:%M:%S")
             is_future = new_expiry > datetime.now(UTC).replace(tzinfo=None)
@@ -2835,11 +2908,16 @@ class Database:
                 (value, int(is_future), payment_status, user_id),
             )
             conn.execute(
-                "UPDATE payments SET status='refunded', updated_at=CURRENT_TIMESTAMP WHERE payment_id=?",
+                """
+                UPDATE payments SET status='refunded',
+                    refund_applied_at=CURRENT_TIMESTAMP,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE payment_id=? AND refund_applied_at IS NULL
+                """,
                 (payment_id,),
             )
             conn.commit()
-            return user_id, value
+            return RefundApplication(user_id, value, True)
 
     def get_expired_peers(self) -> list[dict[str, Any]]:
         return self._subscription_query(

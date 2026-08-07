@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import tempfile
@@ -5,7 +6,12 @@ import unittest
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 
-from database import DEFAULT_CONFIG_NAME, MANAGED_CONFIG_ROLE, Database
+from database import (
+    DEFAULT_CONFIG_NAME,
+    MANAGED_CONFIG_ROLE,
+    ActiveSubscriptionError,
+    Database,
+)
 
 
 class DatabaseTests(unittest.TestCase):
@@ -45,7 +51,7 @@ class DatabaseTests(unittest.TestCase):
 
     def test_client_operational_delete_preserves_finance_and_audit(self):
         self.db.ensure_subscription(
-            10, "alice", "2030-01-01 00:00:00", "paid", "30_days", "stars"
+            10, "alice", "2000-01-01 00:00:00", "expired", "30_days", "stars"
         )
         self.db.save_client_peer(
             10, "server-a", "if-a", "primary", "key-a", "alice", "primary"
@@ -112,6 +118,39 @@ class DatabaseTests(unittest.TestCase):
                 99, 404, deleted=0, already_missing=0
             )
         )
+
+    def test_active_subscription_requires_explicit_forced_deletion(self):
+        self.db.ensure_subscription(
+            10, "alice", "2099-01-01 00:00:00", "paid", "30_days", "yookassa"
+        )
+
+        with self.assertRaises(ActiveSubscriptionError):
+            self.db.delete_client_operational_data(
+                99, 10, deleted=0, already_missing=0
+            )
+        self.assertIsNotNone(self.db.get_admin_client_details(10))
+
+        removed = self.db.delete_client_operational_data(
+            99,
+            10,
+            deleted=0,
+            already_missing=0,
+            allow_active_subscription=True,
+        )
+
+        self.assertIsNotNone(removed)
+        with closing(sqlite3.connect(self.path)) as conn:
+            conn.row_factory = sqlite3.Row
+            audit = conn.execute(
+                """
+                SELECT operation, details FROM operation_logs
+                WHERE peer_name='telegram:10' ORDER BY id DESC LIMIT 1
+                """
+            ).fetchone()
+        self.assertEqual(audit["operation"], "admin_delete_client_without_refund")
+        details = json.loads(audit["details"])
+        self.assertTrue(details["forced_without_refund"])
+        self.assertEqual(details["subscription"]["payment_method"], "yookassa")
 
     def test_client_ban_is_reversible_audited_and_filters_outbound(self):
         self.db.ensure_subscription(
@@ -226,7 +265,10 @@ class DatabaseTests(unittest.TestCase):
         first = self.db.apply_refund("payment-1", 14)
         second = self.db.apply_refund("payment-1", 14)
         self.assertIsNotNone(first)
-        self.assertIsNone(second)
+        self.assertTrue(first.applied)
+        self.assertIsNotNone(second)
+        self.assertFalse(second.applied)
+        self.assertEqual(second.expire_date, first.expire_date)
         subscription = self.db.get_peer_by_telegram_id(10)
         self.assertEqual(subscription["payment_status"], "paid")
         self.assertEqual(subscription["is_active"], 1)
@@ -242,6 +284,23 @@ class DatabaseTests(unittest.TestCase):
         subscription = self.db.get_peer_by_telegram_id(10)
         self.assertEqual(subscription["payment_status"], "expired")
         self.assertEqual(subscription["is_active"], 0)
+
+    def test_multiple_refunds_are_required_until_subscription_expires(self):
+        self.db.activate_new_access(10, "alice", 40, "30_days", "stars")
+        for payment_id, tariff_key in (
+            ("payment-new", "14_days"),
+            ("payment-old", "30_days"),
+        ):
+            self.db.add_payment(payment_id, 10, 100, "stars", tariff_key)
+            self.db.claim_payment_success(payment_id)
+
+        first = self.db.apply_refund("payment-new", 14)
+        self.assertTrue(first.applied)
+        self.assertTrue(self.db.has_active_subscription(10))
+
+        second = self.db.apply_refund("payment-old", 30)
+        self.assertTrue(second.applied)
+        self.assertFalse(self.db.has_active_subscription(10))
 
     def test_pending_provisioning_task_is_reused(self):
         first = self.db.add_provisioning_task(10, "create_peer", {"value": 1}, "one")

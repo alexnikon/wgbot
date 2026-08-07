@@ -263,7 +263,9 @@ class WebhookDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         refunded_payment = {**payment, "status": "refunded"}
         database = Mock()
         database.get_payment_by_id.side_effect = [payment, refunded_payment]
-        database.apply_refund.return_value = (10, "2000-01-01 00:00:00")
+        database.apply_refund.return_value = SimpleNamespace(
+            user_id=10, expire_date="2000-01-01 00:00:00", applied=True
+        )
         cascade_router = SimpleNamespace(
             sync_user_access=AsyncMock(return_value={"failed": 0})
         )
