@@ -3,6 +3,7 @@ import logging
 from aiogram import F, Router, types
 from aiogram.filters import CommandStart
 
+from cascade_api import CascadeRouter
 from database import Database
 from message_templates import (
     active_access_message,
@@ -28,6 +29,7 @@ async def cmd_start(
     clear_admin_state,
     user_action_locks,
     notify_admins=None,
+    cascade_router: CascadeRouter | None = None,
 ):
     """Reset transient UI state and restore the main control panel."""
     user_id = message.from_user.id
@@ -36,24 +38,83 @@ async def cmd_start(
     parts = (getattr(message, "text", None) or "").split(maxsplit=1)
     payload = parts[1].strip() if len(parts) == 2 else ""
     if payload.startswith("claim_"):
-        invitation = db.claim_client_invitation(
+        claim = db.claim_client_invitation(
             payload.removeprefix("claim_"),
             user_id,
             getattr(message.from_user, "username", None),
         )
-        if invitation:
+        if claim.status == "conflict":
+            invitation = claim.invitation or {}
             if notify_admins is not None:
                 await notify_admins(
-                    "⏳ Новая заявка на привязку клиента\n\n"
-                    f"Ожидался: @{invitation['expected_username']}\n"
+                    "⚠️ Конфликт привязки клиента\n\n"
+                    f"Ожидался: @{invitation.get('expected_username', 'нет')}\n"
                     f"Telegram ID: {user_id}\n"
                     f"Username: @{getattr(message.from_user, 'username', None) or 'нет'}\n"
-                    "Подтверди её в разделе «Ожидают привязки»."
+                    f"Причина: {claim.conflict_reason or 'неизвестно'}\n"
+                    "Проверь заявку в разделе «Ожидают привязки»."
                 )
             await chat_panel.restore_or_create(
                 message.chat.id,
                 user_id,
                 "✅ Заявка отправлена администратору. Доступ появится после подтверждения.",
+                create_main_menu_keyboard(user_id),
+            )
+            return
+        if claim.status == "auto_approved":
+            client = claim.client or {}
+            warning = ""
+            sync_result = {
+                "total": 0,
+                "updated": 0,
+                "missing": 0,
+                "failed": 0,
+                "created": 0,
+            }
+            access = db.get_client_access_state(user_id)
+            if access.active and cascade_router is not None:
+                try:
+                    sync_result = await cascade_router.ensure_client_access(user_id)
+                except Exception as exc:
+                    sync_result = {
+                        "total": 1,
+                        "updated": 0,
+                        "missing": 0,
+                        "failed": 1,
+                        "created": 0,
+                    }
+                    primary = db.get_primary_client_peer(user_id)
+                    operation = "sync_client_state" if primary else "create_peer"
+                    payload_data = (
+                        {}
+                        if primary
+                        else {
+                            "username": client.get("telegram_username") or "",
+                            "peer_name": client.get("telegram_username") or str(user_id),
+                            "expire_date": access.cascade_expiry,
+                            "tariff_key": access.source,
+                        }
+                    )
+                    db.add_provisioning_task(
+                        user_id, operation, payload_data, str(exc)
+                    )
+                    warning = "\n⚠️ Синхронизация VPN поставлена в очередь."
+            db.log_invitation_activation_sync(
+                int((claim.invitation or {})["id"]), user_id, sync_result
+            )
+            if notify_admins is not None:
+                await notify_admins(
+                    "✅ Клиент автоматически привязан\n\n"
+                    f"Telegram ID: {user_id}\n"
+                    f"Username: @{getattr(message.from_user, 'username', None) or 'нет'}"
+                    f"{warning}"
+                )
+            await chat_panel.restore_or_create(
+                message.chat.id,
+                user_id,
+                "✅ Профиль привязан. Доступ готов к использованию."
+                if access.active
+                else "✅ Профиль привязан.",
                 create_main_menu_keyboard(user_id),
             )
             return

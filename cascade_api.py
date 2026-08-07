@@ -1416,6 +1416,64 @@ class CascadeRouter:
             result["created"] = 0
             return result
 
+    async def activate_preadded_client(
+        self, user_id: int, username: str | None
+    ) -> dict[str, Any] | None:
+        """Verify a pre-added Telegram ID and reconcile access under one user lock."""
+        user_lock = self._user_locks.get(user_id)
+        if user_lock is None:
+            user_lock = asyncio.Lock()
+            self._user_locks[user_id] = user_lock
+        async with user_lock:
+            verification = self.db.verify_preadded_client(user_id, username)
+            if not verification:
+                return None
+            access = self.db.get_client_access_state(user_id)
+            result = {
+                "total": 0,
+                "updated": 0,
+                "missing": 0,
+                "failed": 0,
+                "created": 0,
+            }
+            error: str | None = None
+            if access.active:
+                try:
+                    client = verification["client"]
+                    if not self.db.get_primary_client_peer(user_id):
+                        await self._create_user_peer_unlocked(
+                            user_id,
+                            str(client.get("telegram_username") or "") or None,
+                            str(client.get("telegram_username") or user_id)[:50],
+                            str(access.cascade_expiry),
+                        )
+                        result = {
+                            "total": 1,
+                            "updated": 1,
+                            "missing": 0,
+                            "failed": 0,
+                            "created": 1,
+                        }
+                    else:
+                        result = await self._sync_user_access_unlocked(
+                            user_id, str(access.cascade_expiry)
+                        )
+                        result["created"] = 0
+                except Exception as exc:
+                    logger.exception(
+                        "Failed to activate verified pre-added client %s", user_id
+                    )
+                    result = {
+                        "total": 1,
+                        "updated": 0,
+                        "missing": 0,
+                        "failed": 1,
+                        "created": 0,
+                    }
+                    error = str(exc)
+            self.db.log_identity_activation_sync(user_id, result)
+            return {"verification": verification, "sync": result, "error": error}
+
     async def set_client_ban(
         self,
         user_id: int,

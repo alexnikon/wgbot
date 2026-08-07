@@ -183,6 +183,65 @@ class OperationLoggingMiddleware:
         return await handler(event, data)
 
 
+class ClientIdentityMiddleware:
+    """Verify pre-added Telegram IDs before access checks and handlers run."""
+
+    async def __call__(
+        self,
+        handler: Callable[[Any, dict[str, Any]], Awaitable[Any]],
+        event: Any,
+        data: dict[str, Any],
+    ) -> Any:
+        user = getattr(event, "from_user", None)
+        if not user:
+            return await handler(event, data)
+        activation = await cascade_router.activate_preadded_client(
+            int(user.id), getattr(user, "username", None)
+        )
+        if activation:
+            verification = activation["verification"]
+            sync_result = activation["sync"]
+            user_id = int(user.id)
+            if sync_result["failed"]:
+                access = db.get_client_access_state(user_id)
+                primary = db.get_primary_client_peer(user_id)
+                operation = "sync_client_state" if primary else "create_peer"
+                payload = (
+                    {}
+                    if primary
+                    else {
+                        "username": getattr(user, "username", None) or "",
+                        "peer_name": getattr(user, "username", None) or str(user_id),
+                        "expire_date": access.cascade_expiry,
+                        "tariff_key": access.source,
+                    }
+                )
+                db.add_provisioning_task(
+                    user_id,
+                    operation,
+                    payload,
+                    activation.get("error") or "Identity activation sync failed",
+                )
+            duplicates = verification.get("duplicate_username_ids") or []
+            duplicate_note = (
+                f"\n⚠️ Этот username также записан у ID: {', '.join(map(str, duplicates))}"
+                if duplicates
+                else ""
+            )
+            queue_note = (
+                "\n⚠️ Синхронизация VPN поставлена в очередь."
+                if sync_result["failed"]
+                else ""
+            )
+            await notify_admins(
+                "✅ Предварительный клиент подтвердил Telegram ID\n\n"
+                f"Telegram ID: {user_id}\n"
+                f"Username: @{getattr(user, 'username', None) or 'нет'}"
+                f"{duplicate_note}{queue_note}"
+            )
+        return await handler(event, data)
+
+
 class BannedClientMiddleware:
     """Block the interactive bot surface for administratively banned clients."""
 
@@ -254,6 +313,8 @@ class PanelTrackingMiddleware:
 
 dp.message.outer_middleware(OperationLoggingMiddleware())
 dp.callback_query.outer_middleware(OperationLoggingMiddleware())
+dp.message.outer_middleware(ClientIdentityMiddleware())
+dp.callback_query.outer_middleware(ClientIdentityMiddleware())
 dp.message.outer_middleware(BannedClientMiddleware())
 dp.callback_query.outer_middleware(BannedClientMiddleware())
 dp.callback_query.outer_middleware(PanelTrackingMiddleware())
@@ -510,6 +571,8 @@ def is_access_active(existing_peer: dict) -> bool:
         return False
 
     if existing_peer.get("is_banned"):
+        return False
+    if not existing_peer.get("identity_verified", 1):
         return False
     if existing_peer.get("is_complimentary"):
         return True

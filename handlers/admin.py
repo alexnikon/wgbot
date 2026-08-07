@@ -156,7 +156,7 @@ def pending_clients_keyboard(db: Database) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(
                 text=(
-                    f"{'🟢' if item['display_status'] == 'claim_pending' else '⏳'} "
+                    f"{'⚠️' if item['display_status'] == 'conflict' else '⏳'} "
                     f"@{item['expected_username']}"
                 ),
                 callback_data=AdminInviteCallback(
@@ -175,7 +175,7 @@ def pending_clients_keyboard(db: Database) -> InlineKeyboardMarkup:
 def invitation_details_keyboard(invitation: dict[str, Any]) -> InlineKeyboardMarkup:
     invitation_id = int(invitation["id"])
     rows: list[list[InlineKeyboardButton]] = []
-    if invitation["status"] == "claim_pending":
+    if invitation["status"] == "conflict":
         rows.extend(
             [
                 [
@@ -248,7 +248,7 @@ def invitation_details_keyboard(invitation: dict[str, Any]) -> InlineKeyboardMar
 def format_invitation(invitation: dict[str, Any], link: str | None = None) -> str:
     status = {
         "pending": "ожидает открытия ссылки",
-        "claim_pending": "ожидает подтверждения администратора",
+        "conflict": "требует решения администратора",
         "rejected": "заявка отклонена",
         "expired": "ссылка истекла",
     }.get(str(invitation.get("display_status") or invitation["status"]), "неизвестен")
@@ -260,10 +260,23 @@ def format_invitation(invitation: dict[str, Any], link: str | None = None) -> st
         f"Бесплатный доступ: {'да' if invitation['is_complimentary'] else 'нет'}"
     )
     if invitation.get("claimant_user_id"):
+        conflict_labels = {
+            "username_missing": "у пользователя отсутствует username",
+            "username_mismatch": "username не совпадает",
+            "username_owned_by_other_client": "username связан с другим клиентом",
+            "claimant_banned": "заявитель забанен",
+            "legacy_manual_review": "заявка создана до автоматической проверки",
+        }
         text += (
             f"\n\nЗаявка от ID: {invitation['claimant_user_id']}\n"
             f"Фактический username: @{invitation.get('claimant_username') or 'нет'}"
         )
+        if invitation.get("conflict_reason"):
+            reason = conflict_labels.get(
+                str(invitation["conflict_reason"]),
+                str(invitation["conflict_reason"]),
+            )
+            text += f"\nПричина проверки: {reason}"
     if link:
         text += f"\n\nОдноразовая ссылка (7 дней):\n{link}"
     return text
@@ -301,6 +314,8 @@ def client_list_keyboard(
         label = f"{user_id} | @{username}" if username else str(user_id)
         if client.get("is_banned"):
             label = f"🚫 {label}"
+        elif not client.get("identity_verified", 1):
+            label = f"⏳ {label}"
         elif client.get("is_complimentary"):
             label = f"🎁 {label}"
         rows.append(
@@ -646,6 +661,8 @@ def format_client(client: dict[str, Any]) -> TelegramText:
         "👤 Клиент\n\n"
         f"Telegram ID: {client['telegram_user_id']}\n"
         f"Username: {identity}\n"
+        f"Подтверждение: "
+        f"{'подтверждён' if client.get('identity_verified', 1) else 'ожидает первого обращения'}\n"
         f"Скидка: {int(client.get('promo') or 0)}%\n"
         f"Бесплатный доступ: {'да' if client.get('is_complimentary') else 'нет'}\n"
         f"Сервер: {client.get('server_keys') or 'не назначен'}\n"
@@ -802,7 +819,8 @@ async def approve_invitation(
         await edit_bound_message(callback.message, "❌ Заявка устарела.")
         return
     warning = ""
-    if client.get("is_complimentary"):
+    access = db.get_client_access_state(int(client["telegram_user_id"]))
+    if access.active:
         sync_result = {"total": 1, "updated": 0, "missing": 0, "failed": 1}
         try:
             result = await cascade_router.ensure_client_access(
@@ -810,17 +828,24 @@ async def approve_invitation(
             )
             sync_result = result
             if result["failed"]:
-                raise CascadeError("Complimentary provisioning failed")
-        except CascadeError as exc:
+                raise CascadeError("Invitation provisioning failed")
+        except Exception as exc:
+            logger.exception(
+                "Failed to provision manually approved invitation for %s",
+                client["telegram_user_id"],
+            )
+            primary = db.get_primary_client_peer(int(client["telegram_user_id"]))
             db.add_provisioning_task(
                 int(client["telegram_user_id"]),
-                "create_peer",
-                {
+                "sync_client_state" if primary else "create_peer",
+                {}
+                if primary
+                else {
                     "username": client.get("telegram_username") or "",
                     "peer_name": client.get("telegram_username")
                     or str(client["telegram_user_id"]),
-                    "expire_date": "2099-12-31 23:59:59",
-                    "tariff_key": "complimentary",
+                    "expire_date": access.cascade_expiry,
+                    "tariff_key": access.source,
                 },
                 str(exc),
             )
@@ -828,7 +853,7 @@ async def approve_invitation(
         db.log_client_state_sync(
             callback.from_user.id,
             int(client["telegram_user_id"]),
-            "admin_approve_complimentary_invitation_sync",
+            "admin_approve_invitation_sync",
             sync_result,
         )
     await edit_bound_message(
@@ -1693,6 +1718,14 @@ async def choose_message_client(
         await edit_bound_message(
             callback.message,
             "❌ Забаненным клиентам нельзя отправлять сообщения.",
+            reply_markup=admin_dashboard_keyboard(),
+        )
+        return
+    client = db.get_admin_client_details(user_id)
+    if client and not client.get("identity_verified", 1):
+        await edit_bound_message(
+            callback.message,
+            "❌ Клиент ещё не обратился к боту.",
             reply_markup=admin_dashboard_keyboard(),
         )
         return

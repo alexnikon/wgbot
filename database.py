@@ -19,7 +19,7 @@ COMPLIMENTARY_CASCADE_EXPIRY = "2099-12-31 23:59:59"
 
 @dataclass(frozen=True)
 class ClientAccessState:
-    """Effective access after applying ban, complimentary, and paid precedence."""
+    """Effective access after ban, identity, complimentary, and paid precedence."""
 
     active: bool
     source: str
@@ -27,6 +27,17 @@ class ClientAccessState:
     is_banned: bool
     is_complimentary: bool
     paid_expiry: str | None
+    identity_verified: bool
+
+
+@dataclass(frozen=True)
+class InvitationClaimResult:
+    """Describe an invitation claim without relying on UI-specific status text."""
+
+    status: str
+    invitation: dict[str, Any] | None = None
+    client: dict[str, Any] | None = None
+    conflict_reason: str | None = None
 
 
 def normalize_config_name(value: str) -> str:
@@ -183,6 +194,7 @@ class Database:
                     complimentary_by INTEGER,
                     claimant_user_id INTEGER,
                     claimant_username TEXT,
+                    conflict_reason TEXT,
                     claimed_at TEXT,
                     created_by INTEGER NOT NULL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -252,6 +264,17 @@ class Database:
             self._ensure_column(conn, "clients", "complimentary_at", "TEXT")
             self._ensure_column(conn, "clients", "complimentary_by", "INTEGER")
             self._ensure_column(
+                conn, "clients", "identity_verified", "INTEGER NOT NULL DEFAULT 1"
+            )
+            self._ensure_column(conn, "clients", "identity_verified_at", "TEXT")
+            self._ensure_column(
+                conn,
+                "clients",
+                "identity_source",
+                "TEXT NOT NULL DEFAULT 'telegram_id'",
+            )
+            self._ensure_column(conn, "client_invitations", "conflict_reason", "TEXT")
+            self._ensure_column(
                 conn, "clients", "telegram_reachability_updated_at", "TEXT"
             )
             self._ensure_column(conn, "client_peers", "config_name", "TEXT")
@@ -310,9 +333,47 @@ class Database:
             )
             conn.execute(
                 """
+                UPDATE clients SET identity_verified=0,
+                    identity_verified_at=NULL, identity_source='telegram_id'
+                WHERE identity_verified_at IS NULL
+                  AND EXISTS (
+                      SELECT 1 FROM operation_logs logs
+                      WHERE logs.operation='admin_add_client'
+                        AND logs.peer_name='telegram:' || clients.telegram_user_id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM telegram_ui_panels panels
+                      WHERE panels.telegram_user_id=clients.telegram_user_id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM payments payments
+                      WHERE payments.user_id=clients.telegram_user_id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM star_transactions stars
+                      WHERE stars.user_id=clients.telegram_user_id
+                  )
+                """
+            )
+            conn.execute(
+                """
+                UPDATE clients SET identity_verified_at=COALESCE(identity_verified_at, created_at)
+                WHERE identity_verified=1
+                """
+            )
+            conn.execute(
+                """
+                UPDATE client_invitations SET status='conflict',
+                    conflict_reason=COALESCE(conflict_reason, 'legacy_manual_review')
+                WHERE status='claim_pending'
+                """
+            )
+            conn.execute("DROP INDEX IF EXISTS idx_active_invitation_username")
+            conn.execute(
+                """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_active_invitation_username
                 ON client_invitations(lower(expected_username))
-                WHERE status IN ('pending', 'claim_pending')
+                WHERE status IN ('pending', 'conflict')
                 """
             )
             conn.execute(
@@ -395,6 +456,15 @@ class Database:
             ).fetchone()
         return bool(row and row[0])
 
+    def is_client_identity_verified(self, user_id: int) -> bool:
+        """Allow outbound delivery unless an existing client awaits first contact."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT identity_verified FROM clients WHERE telegram_user_id=?",
+                (user_id,),
+            ).fetchone()
+        return row is None or bool(row[0])
+
     def set_client_ban(
         self,
         user_id: int,
@@ -467,7 +537,7 @@ class Database:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 """
-                SELECT c.is_banned, c.is_complimentary,
+                SELECT c.is_banned, c.is_complimentary, c.identity_verified,
                        s.expire_date, s.is_active, s.payment_status
                 FROM clients c
                 LEFT JOIN subscriptions s USING(telegram_user_id)
@@ -476,9 +546,10 @@ class Database:
                 (user_id,),
             ).fetchone()
         if not row:
-            return ClientAccessState(False, "none", None, False, False, None)
+            return ClientAccessState(False, "none", None, False, False, None, False)
         is_banned = bool(row["is_banned"])
         is_complimentary = bool(row["is_complimentary"])
+        identity_verified = bool(row["identity_verified"])
         paid_expiry = str(row["expire_date"]) if row["expire_date"] else None
         try:
             paid_active = bool(
@@ -492,7 +563,17 @@ class Database:
             paid_active = False
         if is_banned:
             return ClientAccessState(
-                False, "none", None, True, is_complimentary, paid_expiry
+                False,
+                "none",
+                None,
+                True,
+                is_complimentary,
+                paid_expiry,
+                identity_verified,
+            )
+        if not identity_verified:
+            return ClientAccessState(
+                False, "none", None, False, is_complimentary, paid_expiry, False
             )
         if is_complimentary:
             return ClientAccessState(
@@ -502,12 +583,13 @@ class Database:
                 False,
                 True,
                 paid_expiry,
+                True,
             )
         if paid_active:
             return ClientAccessState(
-                True, "paid", paid_expiry, False, False, paid_expiry
+                True, "paid", paid_expiry, False, False, paid_expiry, True
             )
-        return ClientAccessState(False, "none", None, False, False, paid_expiry)
+        return ClientAccessState(False, "none", None, False, False, paid_expiry, True)
 
     def has_active_access(self, user_id: int) -> bool:
         return self.get_client_access_state(user_id).active
@@ -582,7 +664,7 @@ class Database:
                 """
                 SELECT * FROM client_invitations
                 WHERE lower(expected_username)=?
-                  AND status IN ('pending', 'claim_pending')
+                  AND status IN ('pending', 'conflict')
                 """,
                 (normalized,),
             ).fetchone()
@@ -658,6 +740,7 @@ class Database:
                 """
                 UPDATE client_invitations SET token=?, status='pending',
                     claimant_user_id=NULL, claimant_username=NULL, claimed_at=NULL,
+                    conflict_reason=NULL,
                     expires_at=datetime('now', ?), updated_at=CURRENT_TIMESTAMP
                 WHERE id=? AND status != 'claimed'
                 """,
@@ -682,44 +765,203 @@ class Database:
 
     def claim_client_invitation(
         self, token: str, user_id: int, username: str | None
-    ) -> dict[str, Any] | None:
+    ) -> InvitationClaimResult:
+        """Consume an invitation and auto-bind only an unambiguous claimant."""
+        actual_username = (username or "").strip().lstrip("@")
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
+            invitation = conn.execute(
                 """
                 SELECT * FROM client_invitations
                 WHERE token=? AND status='pending' AND expires_at > datetime('now')
                 """,
                 (token,),
             ).fetchone()
-            if not row:
+            if not invitation:
                 conn.rollback()
-                return None
+                return InvitationClaimResult("invalid")
+
+            expected_username = str(invitation["expected_username"])
+            conflict_reason: str | None = None
+            if not actual_username:
+                conflict_reason = "username_missing"
+            elif actual_username.casefold() != expected_username.casefold():
+                conflict_reason = "username_mismatch"
+            else:
+                other_owners = conn.execute(
+                    """
+                    SELECT telegram_user_id FROM clients
+                    WHERE lower(telegram_username)=lower(?)
+                      AND telegram_user_id != ?
+                    ORDER BY telegram_user_id
+                    """,
+                    (expected_username, user_id),
+                ).fetchall()
+                claimant = conn.execute(
+                    "SELECT is_banned FROM clients WHERE telegram_user_id=?",
+                    (user_id,),
+                ).fetchone()
+                if other_owners:
+                    conflict_reason = "username_owned_by_other_client"
+                elif claimant and claimant["is_banned"]:
+                    conflict_reason = "claimant_banned"
+
+            invitation_id = int(invitation["id"])
+            if conflict_reason:
+                conn.execute(
+                    """
+                    UPDATE client_invitations SET token=NULL, status='conflict',
+                        claimant_user_id=?, claimant_username=?,
+                        conflict_reason=?, claimed_at=CURRENT_TIMESTAMP,
+                        updated_at=CURRENT_TIMESTAMP WHERE id=?
+                    """,
+                    (user_id, actual_username, conflict_reason, invitation_id),
+                )
+                conn.execute(
+                    "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                    (
+                        f"invite:{invitation_id}",
+                        "client_claim_invitation_conflict",
+                        json.dumps(
+                            {
+                                "claimant_user_id": user_id,
+                                "claimant_username": actual_username or None,
+                                "conflict_reason": conflict_reason,
+                            },
+                            sort_keys=True,
+                        ),
+                    ),
+                )
+                claimed = conn.execute(
+                    "SELECT * FROM client_invitations WHERE id=?", (invitation_id,)
+                ).fetchone()
+                conn.commit()
+                return InvitationClaimResult(
+                    "conflict", dict(claimed), None, conflict_reason
+                )
+
             conn.execute(
                 """
-                UPDATE client_invitations SET token=NULL, status='claim_pending',
+                UPDATE client_invitations SET token=NULL,
                     claimant_user_id=?, claimant_username=?, claimed_at=CURRENT_TIMESTAMP,
                     updated_at=CURRENT_TIMESTAMP WHERE id=?
                 """,
-                (user_id, (username or "").strip().lstrip("@"), int(row["id"])),
+                (user_id, actual_username, invitation_id),
+            )
+            refreshed = conn.execute(
+                "SELECT * FROM client_invitations WHERE id=?", (invitation_id,)
+            ).fetchone()
+            merge = self._bind_invitation_client(
+                conn, refreshed, identity_source="username_invite"
             )
             conn.execute(
                 "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
                 (
-                    f"invite:{int(row['id'])}",
-                    "client_claim_invitation",
+                    f"telegram:{user_id}",
+                    "client_auto_approve_invitation",
                     json.dumps(
-                        {"claimant_user_id": user_id, "claimant_username": username},
+                        {
+                            "invitation_id": invitation_id,
+                            "claimant_user_id": user_id,
+                            "claimant_username": actual_username,
+                            **merge,
+                        },
                         sort_keys=True,
                     ),
                 ),
             )
             claimed = conn.execute(
-                "SELECT * FROM client_invitations WHERE id=?", (int(row["id"]),)
+                "SELECT * FROM client_invitations WHERE id=?", (invitation_id,)
             ).fetchone()
             conn.commit()
-        return dict(claimed)
+        return InvitationClaimResult(
+            "auto_approved",
+            dict(claimed),
+            self.get_admin_client_details(user_id),
+        )
+
+    @staticmethod
+    def _bind_invitation_client(
+        conn: sqlite3.Connection,
+        invitation: sqlite3.Row,
+        *,
+        identity_source: str,
+    ) -> dict[str, Any]:
+        """Bind a reviewed invitation while only improving existing benefits."""
+        user_id = int(invitation["claimant_user_id"])
+        username = str(invitation["claimant_username"] or "")
+        existing = conn.execute(
+            """
+            SELECT promo, is_complimentary, complimentary_at, complimentary_by
+            FROM clients WHERE telegram_user_id=?
+            """,
+            (user_id,),
+        ).fetchone()
+        previous_promo = int(existing["promo"]) if existing else 0
+        previous_complimentary = bool(existing["is_complimentary"]) if existing else False
+        invitation_promo = int(invitation["promo"])
+        invitation_complimentary = bool(invitation["is_complimentary"])
+        merged_promo = max(previous_promo, invitation_promo)
+        merged_complimentary = previous_complimentary or invitation_complimentary
+        if previous_complimentary:
+            complimentary_at = existing["complimentary_at"]
+            complimentary_by = existing["complimentary_by"]
+        elif invitation_complimentary:
+            complimentary_at = invitation["complimentary_at"]
+            complimentary_by = invitation["complimentary_by"]
+        else:
+            complimentary_at = None
+            complimentary_by = None
+        conn.execute(
+            """
+            INSERT INTO clients(
+                telegram_user_id, telegram_username, promo, is_complimentary,
+                complimentary_at, complimentary_by, identity_verified,
+                identity_verified_at, identity_source
+            ) VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, ?)
+            ON CONFLICT(telegram_user_id) DO UPDATE SET
+                telegram_username=CASE WHEN excluded.telegram_username != ''
+                    THEN excluded.telegram_username ELSE clients.telegram_username END,
+                promo=excluded.promo,
+                is_complimentary=excluded.is_complimentary,
+                complimentary_at=excluded.complimentary_at,
+                complimentary_by=excluded.complimentary_by,
+                identity_verified=1,
+                identity_verified_at=CURRENT_TIMESTAMP,
+                identity_source=excluded.identity_source,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (
+                user_id,
+                username,
+                merged_promo,
+                int(merged_complimentary),
+                complimentary_at,
+                complimentary_by,
+                identity_source,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO subscriptions(telegram_user_id, payment_status)
+            VALUES (?, 'unpaid') ON CONFLICT(telegram_user_id) DO NOTHING
+            """,
+            (user_id,),
+        )
+        conn.execute(
+            """
+            UPDATE client_invitations SET status='claimed', conflict_reason=NULL,
+                updated_at=CURRENT_TIMESTAMP WHERE id=?
+            """,
+            (int(invitation["id"]),),
+        )
+        return {
+            "previous_promo": previous_promo,
+            "merged_promo": merged_promo,
+            "previous_complimentary": previous_complimentary,
+            "merged_complimentary": merged_complimentary,
+        }
 
     def approve_client_invitation(
         self, invitation_id: int, admin_id: int
@@ -731,7 +973,7 @@ class Database:
             invitation = conn.execute(
                 """
                 SELECT * FROM client_invitations
-                WHERE id=? AND status='claim_pending' AND claimant_user_id IS NOT NULL
+                WHERE id=? AND status='conflict' AND claimant_user_id IS NOT NULL
                 """,
                 (invitation_id,),
             ).fetchone()
@@ -739,44 +981,8 @@ class Database:
                 conn.rollback()
                 return None
             user_id = int(invitation["claimant_user_id"])
-            username = str(invitation["claimant_username"] or "")
-            conn.execute(
-                """
-                INSERT INTO clients(
-                    telegram_user_id, telegram_username, promo, is_complimentary,
-                    complimentary_at, complimentary_by
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(telegram_user_id) DO UPDATE SET
-                    telegram_username=CASE WHEN excluded.telegram_username != ''
-                        THEN excluded.telegram_username ELSE clients.telegram_username END,
-                    promo=excluded.promo,
-                    is_complimentary=excluded.is_complimentary,
-                    complimentary_at=excluded.complimentary_at,
-                    complimentary_by=excluded.complimentary_by,
-                    updated_at=CURRENT_TIMESTAMP
-                """,
-                (
-                    user_id,
-                    username,
-                    int(invitation["promo"]),
-                    int(invitation["is_complimentary"]),
-                    invitation["complimentary_at"],
-                    invitation["complimentary_by"],
-                ),
-            )
-            conn.execute(
-                """
-                INSERT INTO subscriptions(telegram_user_id, payment_status)
-                VALUES (?, 'unpaid') ON CONFLICT(telegram_user_id) DO NOTHING
-                """,
-                (user_id,),
-            )
-            conn.execute(
-                """
-                UPDATE client_invitations SET status='claimed',
-                    updated_at=CURRENT_TIMESTAMP WHERE id=?
-                """,
-                (invitation_id,),
+            merge = self._bind_invitation_client(
+                conn, invitation, identity_source="admin_override"
             )
             conn.execute(
                 "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
@@ -784,7 +990,11 @@ class Database:
                     f"telegram:{user_id}",
                     "admin_approve_client_invitation",
                     json.dumps(
-                        {"admin_id": admin_id, "invitation_id": invitation_id},
+                        {
+                            "admin_id": admin_id,
+                            "invitation_id": invitation_id,
+                            **merge,
+                        },
                         sort_keys=True,
                     ),
                 ),
@@ -799,7 +1009,7 @@ class Database:
                 """
                 UPDATE client_invitations SET status='rejected', token=NULL,
                     updated_at=CURRENT_TIMESTAMP
-                WHERE id=? AND status='claim_pending'
+                WHERE id=? AND status='conflict'
                 """,
                 (invitation_id,),
             )
@@ -1244,7 +1454,8 @@ class Database:
             row = conn.execute(
                 """
                 SELECT cp.*, s.payment_status, c.is_complimentary, c.is_banned,
-                       CASE WHEN c.is_banned=0 AND (
+                       c.identity_verified,
+                       CASE WHEN c.is_banned=0 AND c.identity_verified=1 AND (
                            c.is_complimentary=1 OR (
                                s.is_active=1 AND s.payment_status='paid'
                                AND s.expire_date IS NOT NULL
@@ -1272,7 +1483,8 @@ class Database:
             rows = conn.execute(
                 """
                 SELECT cp.*, s.payment_status, c.is_complimentary, c.is_banned,
-                       CASE WHEN c.is_banned=0 AND (
+                       c.identity_verified,
+                       CASE WHEN c.is_banned=0 AND c.identity_verified=1 AND (
                            c.is_complimentary=1 OR (
                                s.is_active=1 AND s.payment_status='paid'
                                AND s.expire_date IS NOT NULL
@@ -1521,6 +1733,43 @@ class Database:
             )
             conn.commit()
 
+    def log_identity_activation_sync(
+        self, user_id: int, result: dict[str, int]
+    ) -> None:
+        """Audit Cascade reconciliation triggered by first-contact verification."""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                (
+                    f"telegram:{user_id}",
+                    "client_identity_activation_sync",
+                    json.dumps({"client_id": user_id, **result}, sort_keys=True),
+                ),
+            )
+            conn.commit()
+
+    def log_invitation_activation_sync(
+        self, invitation_id: int, user_id: int, result: dict[str, int]
+    ) -> None:
+        """Audit Cascade reconciliation after an automatic invitation binding."""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                (
+                    f"telegram:{user_id}",
+                    "client_invitation_activation_sync",
+                    json.dumps(
+                        {
+                            "invitation_id": invitation_id,
+                            "client_id": user_id,
+                            **result,
+                        },
+                        sort_keys=True,
+                    ),
+                ),
+            )
+            conn.commit()
+
     def log_admin_client_group_change(
         self,
         admin_id: int,
@@ -1672,6 +1921,7 @@ class Database:
                 """
                 SELECT c.telegram_user_id, c.telegram_username, c.promo,
                        c.is_complimentary, c.complimentary_at, c.complimentary_by,
+                       c.identity_verified, c.identity_verified_at, c.identity_source,
                        c.is_banned,
                        s.*, cp.peer_name, cp.public_key, cp.cascade_peer_id,
                        cp.server_key, cp.interface_id, cp.role, cp.enabled
@@ -1709,6 +1959,7 @@ class Database:
                     SELECT telegram_user_id FROM clients
                     WHERE (telegram_reachable IS NULL OR telegram_reachable=1)
                       AND is_banned=0
+                      AND identity_verified=1
                     ORDER BY telegram_user_id
                     """
                 )
@@ -1846,6 +2097,7 @@ class Database:
                 f"""
                 SELECT c.telegram_user_id, c.telegram_username, c.promo,
                        c.is_complimentary, c.complimentary_at, c.complimentary_by,
+                       c.identity_verified, c.identity_verified_at, c.identity_source,
                        c.is_banned, c.banned_at, c.banned_by, c.ban_reason,
                        s.expire_date, s.is_active, s.payment_status,
                        cp.server_key, cp.interface_id, cp.peer_name,
@@ -1903,6 +2155,7 @@ class Database:
                 """
                 SELECT c.telegram_user_id, c.telegram_username, c.promo,
                        c.is_complimentary, c.complimentary_at, c.complimentary_by,
+                       c.identity_verified, c.identity_verified_at, c.identity_source,
                        c.is_banned, c.banned_at, c.banned_by, c.ban_reason,
                        s.expire_date, s.is_active, s.payment_status,
                        cp.server_key, cp.interface_id, cp.peer_name,
@@ -1969,7 +2222,13 @@ class Database:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             created = conn.execute(
-                "INSERT INTO clients(telegram_user_id) VALUES (?) ON CONFLICT DO NOTHING",
+                """
+                INSERT INTO clients(
+                    telegram_user_id, identity_verified,
+                    identity_verified_at, identity_source
+                ) VALUES (?, 0, NULL, 'telegram_id')
+                ON CONFLICT DO NOTHING
+                """,
                 (user_id,),
             )
             conn.execute(
@@ -1996,6 +2255,61 @@ class Database:
         if not result:
             raise RuntimeError("Created client could not be read")
         return result
+
+    def verify_preadded_client(
+        self, user_id: int, username: str | None
+    ) -> dict[str, Any] | None:
+        """Verify an admin-added Telegram ID on its first real bot interaction."""
+        normalized_username = (username or "").strip().lstrip("@")
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """
+                UPDATE clients SET identity_verified=1,
+                    identity_verified_at=CURRENT_TIMESTAMP,
+                    identity_source='telegram_id',
+                    telegram_username=CASE WHEN ? != '' THEN ? ELSE telegram_username END,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE telegram_user_id=? AND identity_verified=0
+                """,
+                (normalized_username, normalized_username, user_id),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                return None
+            duplicates: list[int] = []
+            if normalized_username:
+                duplicates = [
+                    int(row[0])
+                    for row in conn.execute(
+                        """
+                        SELECT telegram_user_id FROM clients
+                        WHERE lower(telegram_username)=lower(?)
+                          AND telegram_user_id != ?
+                        ORDER BY telegram_user_id
+                        """,
+                        (normalized_username, user_id),
+                    ).fetchall()
+                ]
+            details = {
+                "client_id": user_id,
+                "username": normalized_username or None,
+                "duplicate_username_ids": duplicates,
+            }
+            conn.execute(
+                "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                (
+                    f"telegram:{user_id}",
+                    "client_verify_telegram_id",
+                    json.dumps(details, sort_keys=True),
+                ),
+            )
+            conn.commit()
+        client = self.get_admin_client_details(user_id)
+        if not client:
+            return None
+        return {"client": client, **details}
 
     def set_admin_subscription_expiry(
         self,
@@ -2611,6 +2925,7 @@ class Database:
                   AND (c.telegram_reachable IS NULL OR c.telegram_reachable=1)
                   AND c.is_banned=0
                   AND c.is_complimentary=0
+                  AND c.identity_verified=1
                 ORDER BY s.expire_date
                 """
             ).fetchall()

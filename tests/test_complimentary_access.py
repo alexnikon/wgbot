@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sqlite3
 import tempfile
@@ -6,12 +7,14 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import bot as bot_module
 from callbacks import PaymentMethod, PaymentMethodCallback
 from cascade_api import CascadeRouter, CascadeServer
 from database import COMPLIMENTARY_CASCADE_EXPIRY, Database
+from handlers.navigation import cmd_start
 from handlers.payments import handle_pay_stars_callback
 from provisioning import ProvisioningWorker
-from telegram_runtime import UserActionLocks
+from telegram_runtime import TelegramSender, UserActionLocks
 
 
 class ComplimentaryDatabaseTests(unittest.TestCase):
@@ -34,6 +37,8 @@ class ComplimentaryDatabaseTests(unittest.TestCase):
         self.assertEqual(created["telegram_user_id"], 123456)
         self.assertEqual(existing["telegram_user_id"], 123456)
         self.assertEqual(existing["payment_status"], "unpaid")
+        self.assertEqual(existing["identity_verified"], 0)
+        self.assertFalse(self.db.get_client_access_state(123456).active)
         with sqlite3.connect(self.path) as connection:
             audit_count = connection.execute(
                 "SELECT COUNT(*) FROM operation_logs WHERE operation='admin_add_client'"
@@ -69,7 +74,7 @@ class ComplimentaryDatabaseTests(unittest.TestCase):
         self.assertEqual(restored.source, "paid")
         self.assertEqual(restored.cascade_expiry, paid_expiry)
 
-    def test_invitation_is_one_time_and_requires_approval(self):
+    def test_invitation_conflict_is_one_time_and_requires_approval(self):
         invitation = self.db.create_client_invitation("@Alice_123", 99)
         duplicate = self.db.create_client_invitation("alice_123", 100)
         self.assertEqual(invitation["id"], duplicate["id"])
@@ -86,9 +91,13 @@ class ComplimentaryDatabaseTests(unittest.TestCase):
         claimed = self.db.claim_client_invitation(
             invitation["token"], 777, "Actual_User"
         )
-        self.assertIsNotNone(claimed)
-        self.assertIsNone(
-            self.db.claim_client_invitation(invitation["token"], 778, "forwarded")
+        self.assertEqual(claimed.status, "conflict")
+        self.assertEqual(claimed.conflict_reason, "username_mismatch")
+        self.assertEqual(
+            self.db.claim_client_invitation(
+                invitation["token"], 778, "forwarded"
+            ).status,
+            "invalid",
         )
         self.assertIsNone(self.db.get_admin_client_details(777))
 
@@ -104,20 +113,86 @@ class ComplimentaryDatabaseTests(unittest.TestCase):
             {item["id"] for item in self.db.list_client_invitations()},
         )
 
+    def test_exact_username_invitation_is_automatically_approved(self):
+        invitation = self.db.create_client_invitation("Alice_123", 99)
+        self.db.set_invitation_promo(invitation["id"], 99, 30)
+        self.db.set_invitation_complimentary(invitation["id"], 99, True)
+
+        claimed = self.db.claim_client_invitation(
+            invitation["token"], 777, "aLiCe_123"
+        )
+
+        self.assertEqual(claimed.status, "auto_approved")
+        self.assertEqual(claimed.client["telegram_user_id"], 777)
+        self.assertEqual(claimed.client["identity_source"], "username_invite")
+        self.assertEqual(claimed.client["promo"], 30)
+        self.assertEqual(claimed.client["is_complimentary"], 1)
+        self.assertEqual(
+            self.db.claim_client_invitation(invitation["token"], 777, "Alice_123").status,
+            "invalid",
+        )
+
+    def test_invitation_merge_only_improves_existing_benefits(self):
+        paid_expiry = "2030-01-01 00:00:00"
+        self.db.ensure_subscription(
+            777, "alice", paid_expiry, "paid", "30_days", "stars"
+        )
+        self.db.set_client_promo(777, 40)
+        self.db.set_client_complimentary(777, 99, True)
+        invitation = self.db.create_client_invitation("alice", 99)
+        self.db.set_invitation_promo(invitation["id"], 99, 10)
+
+        claimed = self.db.claim_client_invitation(invitation["token"], 777, "ALICE")
+
+        self.assertEqual(claimed.status, "auto_approved")
+        client = self.db.get_admin_client_details(777)
+        self.assertEqual(client["promo"], 40)
+        self.assertEqual(client["is_complimentary"], 1)
+        self.assertEqual(client["expire_date"], paid_expiry)
+        self.assertEqual(client["payment_status"], "paid")
+
+    def test_ambiguous_invitation_claims_require_manual_review(self):
+        missing = self.db.create_client_invitation("missing_name", 99)
+        missing_claim = self.db.claim_client_invitation(missing["token"], 10, None)
+        self.assertEqual(missing_claim.conflict_reason, "username_missing")
+
+        self.db.ensure_subscription(20, "owned_name", None, "unpaid")
+        owned = self.db.create_client_invitation("owned_name", 99)
+        owned_claim = self.db.claim_client_invitation(
+            owned["token"], 21, "OWNED_NAME"
+        )
+        self.assertEqual(
+            owned_claim.conflict_reason, "username_owned_by_other_client"
+        )
+
+        self.db.ensure_subscription(30, "banned_name", None, "unpaid")
+        self.db.set_client_ban(30, 99, True, "review")
+        banned = self.db.create_client_invitation("banned_name", 99)
+        banned_claim = self.db.claim_client_invitation(
+            banned["token"], 30, "banned_name"
+        )
+        self.assertEqual(banned_claim.conflict_reason, "claimant_banned")
+
     def test_expired_or_rejected_invitation_can_be_reissued(self):
         invitation = self.db.create_client_invitation("expired_user", 99, ttl_days=-1)
         self.assertEqual(
             self.db.get_client_invitation(invitation["id"])["display_status"],
             "expired",
         )
-        self.assertIsNone(
-            self.db.claim_client_invitation(invitation["token"], 10, "expired_user")
+        self.assertEqual(
+            self.db.claim_client_invitation(
+                invitation["token"], 10, "expired_user"
+            ).status,
+            "invalid",
         )
 
         reissued = self.db.reissue_client_invitation(invitation["id"], 99)
         self.assertNotEqual(reissued["token"], invitation["token"])
-        self.assertIsNotNone(
-            self.db.claim_client_invitation(reissued["token"], 10, "expired_user")
+        self.assertEqual(
+            self.db.claim_client_invitation(
+                reissued["token"], 10, "different_user"
+            ).status,
+            "conflict",
         )
         self.assertTrue(self.db.reject_client_invitation(invitation["id"], 99))
         rejected = self.db.get_client_invitation(invitation["id"])
@@ -135,6 +210,63 @@ class ComplimentaryDatabaseTests(unittest.TestCase):
 
         recipients = self.db.get_users_for_notification(days_before=3)
         self.assertNotIn(10, {item["telegram_user_id"] for item in recipients})
+
+    def test_unverified_clients_are_excluded_from_outgoing_recipients(self):
+        self.db.admin_add_client(10, 99)
+        self.assertNotIn(10, self.db.get_client_telegram_ids())
+
+        self.db.verify_preadded_client(10, "alice")
+
+        self.assertIn(10, self.db.get_client_telegram_ids())
+
+    def test_numeric_id_verification_does_not_block_duplicate_username(self):
+        self.db.ensure_subscription(10, "shared_name")
+        self.db.admin_add_client(20, 99)
+        self.db.set_client_complimentary(20, 99, True)
+
+        verification = self.db.verify_preadded_client(20, "SHARED_NAME")
+
+        self.assertEqual(verification["duplicate_username_ids"], [10])
+        self.assertTrue(self.db.get_client_access_state(20).active)
+
+    def test_identity_migration_keeps_existing_users_verified(self):
+        legacy_handle, legacy_path = tempfile.mkstemp(suffix=".db")
+        os.close(legacy_handle)
+        self.addCleanup(
+            lambda: [
+                os.remove(legacy_path + suffix)
+                for suffix in ("", "-wal", "-shm")
+                if os.path.exists(legacy_path + suffix)
+            ]
+        )
+        with sqlite3.connect(legacy_path) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE clients (
+                    telegram_user_id INTEGER PRIMARY KEY,
+                    telegram_username TEXT NOT NULL DEFAULT '',
+                    promo INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE TABLE operation_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    peer_name TEXT,
+                    operation TEXT NOT NULL,
+                    details TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT INTO clients(telegram_user_id, telegram_username)
+                VALUES (1, 'existing'), (2, 'preadded');
+                INSERT INTO operation_logs(peer_name, operation, details)
+                VALUES ('telegram:2', 'admin_add_client', '{}');
+                """
+            )
+
+        migrated = Database(legacy_path)
+
+        self.assertTrue(migrated.get_client_access_state(1).identity_verified)
+        self.assertFalse(migrated.get_client_access_state(2).identity_verified)
 
     def test_paid_expiry_sweep_does_not_disable_free_configs(self):
         self.db.ensure_subscription(
@@ -162,6 +294,7 @@ class ComplimentaryDatabaseTests(unittest.TestCase):
 
         self.db.admin_add_client(10, 99)
         self.db.set_client_complimentary(10, 99, True)
+        self.db.verify_preadded_client(10, "alice")
         with patch.object(bot_module, "db", self.db, create=True):
             keyboard = bot_module.create_main_menu_keyboard(10)
 
@@ -328,3 +461,125 @@ class ComplimentaryCascadeTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT status FROM provisioning_tasks WHERE telegram_user_id=20"
             ).fetchone()[0]
         self.assertEqual(status, "completed")
+
+    async def test_preadded_free_client_is_provisioned_only_after_first_contact(self):
+        self.db.admin_add_client(20, 99)
+        self.db.set_client_complimentary(20, 99, True)
+        self.assertFalse(self.db.get_client_access_state(20).active)
+        self.assertEqual(self.api.created_expiries, [])
+
+        first, second = await asyncio.gather(
+            self.router.activate_preadded_client(20, "pending_user"),
+            self.router.activate_preadded_client(20, "pending_user"),
+        )
+
+        activations = [result for result in (first, second) if result is not None]
+        self.assertEqual(len(activations), 1)
+        self.assertEqual(activations[0]["sync"]["created"], 1)
+        self.assertEqual(
+            self.api.created_expiries,
+            [(COMPLIMENTARY_CASCADE_EXPIRY, "if-production")],
+        )
+        access = self.db.get_client_access_state(20)
+        self.assertTrue(access.identity_verified)
+        self.assertEqual(access.source, "complimentary")
+
+    async def test_preadded_paid_client_activates_with_paid_expiry(self):
+        self.db.admin_add_client(20, 99)
+        paid_expiry = "2030-01-01 00:00:00"
+        self.db.ensure_subscription(
+            20, "", paid_expiry, "paid", "30_days", "stars"
+        )
+        self.assertFalse(self.db.get_client_access_state(20).active)
+
+        activation = await self.router.activate_preadded_client(20, "paid_user")
+
+        self.assertEqual(activation["sync"]["failed"], 0)
+        self.assertEqual(
+            self.api.created_expiries,
+            [(paid_expiry, "if-production")],
+        )
+
+    async def test_outbound_sender_skips_preadded_client_until_first_contact(self):
+        self.db.admin_add_client(20, 99)
+        sender = TelegramSender(SimpleNamespace(), self.db)
+        operation = AsyncMock(return_value="sent")
+
+        self.assertIsNone(await sender.call(20, operation))
+        operation.assert_not_awaited()
+
+        self.db.verify_preadded_client(20, "verified_user")
+        self.assertEqual(await sender.call(20, operation), "sent")
+
+    async def test_identity_middleware_queues_failed_activation(self):
+        self.db.admin_add_client(20, 99)
+        self.db.set_client_complimentary(20, 99, True)
+        activation_router = SimpleNamespace(
+            activate_preadded_client=AsyncMock(
+                return_value={
+                    "verification": {"duplicate_username_ids": []},
+                    "sync": {
+                        "total": 1,
+                        "updated": 0,
+                        "missing": 0,
+                        "failed": 1,
+                        "created": 0,
+                    },
+                    "error": "offline",
+                }
+            )
+        )
+        self.db.verify_preadded_client(20, "pending_user")
+        handler = AsyncMock(return_value="handled")
+        event = SimpleNamespace(from_user=SimpleNamespace(id=20, username="pending_user"))
+        notify_admins = AsyncMock()
+        with (
+            patch.object(bot_module, "db", self.db, create=True),
+            patch.object(
+                bot_module, "cascade_router", activation_router, create=True
+            ),
+            patch.object(bot_module, "notify_admins", notify_admins, create=True),
+        ):
+            result = await bot_module.ClientIdentityMiddleware()(handler, event, {})
+
+        self.assertEqual(result, "handled")
+        with sqlite3.connect(self.path) as connection:
+            task = connection.execute(
+                "SELECT operation, status FROM provisioning_tasks WHERE telegram_user_id=20"
+            ).fetchone()
+        self.assertEqual(task, ("create_peer", "pending"))
+        notify_admins.assert_awaited_once()
+
+    async def test_start_link_auto_approves_exact_username_and_provisions(self):
+        invitation = self.db.create_client_invitation("invite_user", 99)
+        self.db.set_invitation_complimentary(invitation["id"], 99, True)
+        panel = SimpleNamespace(
+            delete_user_message=AsyncMock(), restore_or_create=AsyncMock()
+        )
+        notify_admins = AsyncMock()
+        message = SimpleNamespace(
+            text=f"/start claim_{invitation['token']}",
+            from_user=SimpleNamespace(id=30, username="INVITE_USER"),
+            chat=SimpleNamespace(id=30),
+        )
+
+        await cmd_start(
+            message,
+            self.db,
+            lambda _user_id: SimpleNamespace(),
+            panel,
+            unittest.mock.Mock(),
+            user_action_locks=UserActionLocks(),
+            notify_admins=notify_admins,
+            cascade_router=self.router,
+        )
+
+        client = self.db.get_admin_client_details(30)
+        self.assertEqual(client["identity_source"], "username_invite")
+        self.assertEqual(client["is_complimentary"], 1)
+        self.assertIsNotNone(self.db.get_primary_client_peer(30))
+        notify_admins.assert_awaited_once()
+        self.assertIn(
+            "автоматически привязан",
+            notify_admins.await_args.args[0],
+        )
