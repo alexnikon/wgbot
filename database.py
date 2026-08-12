@@ -2168,6 +2168,14 @@ class Database:
                 GROUP BY method, tariff ORDER BY method, tariff
                 """
             ).fetchall()
+            refunds = conn.execute(
+                """
+                SELECT COALESCE(payment_method, 'unknown') AS method,
+                       COALESCE(tariff_key, 'unknown') AS tariff, COUNT(*) AS count
+                FROM payments WHERE status='refunded'
+                GROUP BY method, tariff ORDER BY method, tariff
+                """
+            ).fetchall()
             amounts = conn.execute(
                 """
                 SELECT
@@ -2261,6 +2269,7 @@ class Database:
             },
             "payment_records": [dict(row) for row in payment_records],
             "completed_payments": [dict(row) for row in completed_payments],
+            "refunds": [dict(row) for row in refunds],
             "amounts": {
                 key: float(value) for key, value in dict(amounts).items()
             },

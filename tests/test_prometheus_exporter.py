@@ -128,6 +128,13 @@ class PrometheusDatabaseSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["amounts"]["yookassa_refunded"], 300.0)
         self.assertEqual(snapshot["amounts"]["stars_received"], 300.0)
         self.assertEqual(snapshot["amounts"]["stars_refunded"], 50.0)
+        self.assertEqual(
+            snapshot["refunds"],
+            [
+                {"method": "stars", "tariff": "30_days", "count": 1},
+                {"method": "yookassa", "tariff": "30_days", "count": 1},
+            ],
+        )
         self.assertIn(
             {"server_key": "server-b", "access": "inactive", "count": 2},
             snapshot["server_clients"],
@@ -171,9 +178,11 @@ class PrometheusExporterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("wgbot_paid_clients", families)
         self.assertIn("wgbot_payments_completed", families)
+        self.assertIn("wgbot_refunds", families)
         self.assertIn("wgbot_metrics_collection_success", families)
         self.assertIn("# HELP wgbot_server_clients", payload)
         self.assertIn("wgbot_payments_completed_total", payload)
+        self.assertIn("wgbot_refunds_total", payload)
         self.assertIn("wgbot_yookassa_received_rubles_total", payload)
         self.assertNotIn("private_username", payload)
         self.assertNotIn("telegram_user_id", payload)

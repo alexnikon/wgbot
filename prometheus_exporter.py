@@ -73,6 +73,17 @@ class WGBotCollector:
             )
         yield completed
 
+        refunds = CounterMetricFamily(
+            "wgbot_refunds",
+            "Unique payments with an observed refund.",
+            labels=["method", "tariff"],
+        )
+        for row in snapshot["refunds"]:
+            refunds.add_metric(
+                [str(row["method"]), str(row["tariff"])], int(row["count"])
+            )
+        yield refunds
+
         amounts = snapshot["amounts"]
         for name, documentation, key in (
             (
