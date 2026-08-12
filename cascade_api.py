@@ -506,8 +506,11 @@ class CascadeRouter:
         return list(shared.values()) if shared else []
 
     async def validate(self) -> dict[str, str]:
-        """Validate health, token, and interface on every configured server."""
+        """Validate every enabled server and report disabled servers."""
+
         async def check(server: CascadeServer) -> tuple[str, str]:
+            if not server.enabled:
+                return server.server_key, "disabled"
             try:
                 health = await self.get_api(server.server_key).health()
                 if health.get("status") != "ok":
@@ -521,8 +524,7 @@ class CascadeRouter:
                     await self.get_api(server.server_key).resolve_client_group_id(
                         group_name
                     )
-                status = "ok" if server.enabled else "ok-disabled"
-                return server.server_key, status
+                return server.server_key, "ok"
             except Exception as exc:
                 return server.server_key, f"error: {exc}"
 

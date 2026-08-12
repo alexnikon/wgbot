@@ -86,6 +86,42 @@ class GrafanaDashboardTests(unittest.TestCase):
         )
         self.assertTrue(tariff_query["instant"])
 
+    def test_total_revenue_compares_payments_refunds_and_net_rubles(self):
+        panel = self.dashboard["elements"]["panel-31"]["spec"]
+        self.assertEqual(panel["title"], "Total revenue")
+        self.assertEqual(panel["vizConfig"]["group"], "timeseries")
+        self.assertEqual(
+            panel["vizConfig"]["spec"]["fieldConfig"]["defaults"]["unit"],
+            "currencyRUB",
+        )
+
+        queries = {
+            query["spec"]["query"]["spec"]["legendFormat"]: query["spec"][
+                "query"
+            ]["spec"]
+            for query in panel["data"]["spec"]["queries"]
+        }
+        self.assertEqual(
+            queries["Payments RUB"]["expr"],
+            'wgbot_financial_payment_amount{period="$financial_period",'
+            'currency="RUB"}',
+        )
+        self.assertEqual(
+            queries["Refunds RUB"]["expr"],
+            'wgbot_financial_refund_amount{period="$financial_period",'
+            'currency="RUB"}',
+        )
+        self.assertEqual(
+            queries["Net revenue RUB"]["expr"],
+            'wgbot_financial_payment_amount{period="$financial_period",'
+            'currency="RUB"} - '
+            'wgbot_financial_refund_amount{period="$financial_period",'
+            'currency="RUB"}',
+        )
+        for query in queries.values():
+            self.assertFalse(query["instant"])
+            self.assertTrue(query["range"])
+
     def test_service_health_combines_ready_and_collection_success(self):
         service_health = self.dashboard["elements"]["panel-7"]["spec"]
         expression = service_health["data"]["spec"]["queries"][0]["spec"][

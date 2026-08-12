@@ -27,6 +27,13 @@ class FakeCascadeAPI:
         return [{"id": str(index)} for index in range(self.peer_count)]
 
 
+class ValidationCascadeAPI:
+    def __init__(self, health=None):
+        self.health = AsyncMock(return_value=health or {"status": "ok"})
+        self.get_interface = AsyncMock(return_value={"id": "interface-a"})
+        self.resolve_client_group_id = AsyncMock(return_value="group-id")
+
+
 class ProvisioningCascadeAPI(FakeCascadeAPI):
     def __init__(self):
         super().__init__(peer_count=0)
@@ -172,6 +179,56 @@ class CascadeServerRegistryTests(unittest.TestCase):
 
 
 class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
+    async def test_validation_skips_disabled_server(self):
+        server = CascadeServer(
+            "server-a",
+            "https://vpn.example/admin",
+            "token",
+            "interface-a",
+            1,
+            10,
+            enabled=False,
+        )
+        api = ValidationCascadeAPI()
+        router = CascadeRouter(SimpleNamespace(), servers=[])
+        router.servers = [server]
+        router.apis = {"server-a": api}
+
+        self.assertEqual(await router.validate(), {"server-a": "disabled"})
+        api.health.assert_not_awaited()
+        api.get_interface.assert_not_awaited()
+        api.resolve_client_group_id.assert_not_awaited()
+
+    async def test_validation_accepts_healthy_enabled_server(self):
+        server = CascadeServer(
+            "server-a", "https://vpn.example/admin", "token", "interface-a", 1, 10
+        )
+        api = ValidationCascadeAPI()
+        router = CascadeRouter(SimpleNamespace(), servers=[])
+        router.servers = [server]
+        router.apis = {"server-a": api}
+
+        self.assertEqual(await router.validate(), {"server-a": "ok"})
+        api.health.assert_awaited_once_with()
+        api.get_interface.assert_awaited_once_with()
+        api.resolve_client_group_id.assert_awaited_once_with("Basic")
+
+    async def test_validation_reports_enabled_server_error(self):
+        server = CascadeServer(
+            "server-a", "https://vpn.example/admin", "token", "interface-a", 1, 10
+        )
+        api = ValidationCascadeAPI()
+        api.health.side_effect = CascadeError("connection failed")
+        router = CascadeRouter(SimpleNamespace(), servers=[])
+        router.servers = [server]
+        router.apis = {"server-a": api}
+
+        self.assertEqual(
+            await router.validate(),
+            {"server-a": "error: connection failed"},
+        )
+        api.get_interface.assert_not_awaited()
+
     async def test_peer_not_found_400_is_normalized(self):
         def handler(request):
             return httpx.Response(400, json={"error": "peer not found"})

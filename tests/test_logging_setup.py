@@ -2,7 +2,7 @@ import logging
 import unittest
 from unittest.mock import patch
 
-from logging_setup import configure_logging
+from logging_setup import UvicornAccessLogFilter, configure_logging
 
 
 class LoggingSetupTests(unittest.TestCase):
@@ -35,7 +35,8 @@ class LoggingSetupTests(unittest.TestCase):
 
         self.assertEqual(self.root.level, logging.INFO)
         self.assertEqual(logging.getLogger("aiogram.event").level, logging.WARNING)
-        self.assertEqual(logging.getLogger("uvicorn.access").level, logging.WARNING)
+        self.assertEqual(logging.getLogger("uvicorn.access").level, logging.DEBUG)
+        self.assertEqual(self.root.handlers[0].level, logging.INFO)
 
     def test_debug_enables_verbose_dependency_logs(self):
         with patch("logging_setup.LOG_LEVEL", "DEBUG"):
@@ -44,6 +45,40 @@ class LoggingSetupTests(unittest.TestCase):
         self.assertEqual(self.root.level, logging.DEBUG)
         self.assertEqual(logging.getLogger("aiogram.event").level, logging.DEBUG)
         self.assertEqual(logging.getLogger("uvicorn.access").level, logging.DEBUG)
+        self.assertEqual(self.root.handlers[0].level, logging.DEBUG)
+
+    def test_successful_metrics_request_is_lowered_to_debug(self):
+        record = self._access_record("/metrics", 200)
+
+        self.assertTrue(UvicornAccessLogFilter().filter(record))
+
+        self.assertEqual(record.levelno, logging.DEBUG)
+        self.assertEqual(record.levelname, "DEBUG")
+
+    def test_metrics_error_remains_info(self):
+        record = self._access_record("/metrics", 500)
+
+        self.assertTrue(UvicornAccessLogFilter().filter(record))
+
+        self.assertEqual(record.levelno, logging.INFO)
+        self.assertEqual(record.levelname, "INFO")
+
+    def test_healthcheck_request_is_suppressed(self):
+        record = self._access_record("/webhook/yookassa/health", 200)
+
+        self.assertFalse(UvicornAccessLogFilter().filter(record))
+
+    @staticmethod
+    def _access_record(path: str, status_code: int) -> logging.LogRecord:
+        return logging.LogRecord(
+            "uvicorn.access",
+            logging.INFO,
+            __file__,
+            1,
+            '%s - "%s %s HTTP/%s" %d',
+            ("10.8.2.2:38778", "GET", path, "1.1", status_code),
+            None,
+        )
 
 
 if __name__ == "__main__":

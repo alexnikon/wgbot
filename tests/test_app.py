@@ -1,7 +1,15 @@
 import asyncio
 import unittest
 
-from app import supervise_runtime
+from app import create_http_server, supervise_runtime
+
+
+class HTTPServerConfigurationTests(unittest.TestCase):
+    def test_http_server_preserves_application_logging(self):
+        server = create_http_server(object(), 9000)
+
+        self.assertIsNone(server.config.log_config)
+        self.assertIsNone(server.config.log_level)
 
 
 class RuntimeSupervisorTests(unittest.IsolatedAsyncioTestCase):

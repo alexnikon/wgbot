@@ -31,7 +31,8 @@ def create_http_server(application: object, port: int) -> NoSignalServer:
         application,
         host="0.0.0.0",
         port=port,
-        log_level="info",
+        log_config=None,
+        log_level=None,
         lifespan="on",
     )
     return NoSignalServer(config)
