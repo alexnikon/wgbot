@@ -67,7 +67,7 @@ class GrafanaDashboardTests(unittest.TestCase):
     def test_financial_period_filter_and_tariff_breakdown_are_present(self):
         variables = {variable["spec"]["name"]: variable for variable in self.dashboard["variables"]}
         period = variables["financial_period"]["spec"]
-        self.assertEqual(period["current"]["value"], ["today"])
+        self.assertEqual(period["current"]["value"], "month")
         self.assertEqual(
             period["definition"],
             "label_values(wgbot_financial_period_info, period)",
