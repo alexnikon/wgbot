@@ -250,7 +250,26 @@ class WebhookDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             send_message.await_args_list[0].args[2]["inline_keyboard"][0][0]["text"],
             "📥 Создать файл конфигурации",
         )
+        self.assertEqual(
+            send_message.await_args_list[0].args[2]["inline_keyboard"][1],
+            [{"text": "На главную", "callback_data": "main"}],
+        )
         database.add_provisioning_task.assert_not_called()
+
+    async def test_paid_access_with_config_also_has_home_button(self):
+        database = Mock()
+        database.count_managed_configs.return_value = 1
+
+        with patch.object(webhook_server, "db", database):
+            markup = webhook_server.create_access_reply_markup(10)
+
+        self.assertEqual(
+            markup["inline_keyboard"],
+            [
+                [{"text": "📥 Файлы конфигурации", "callback_data": "get_config"}],
+                [{"text": "На главную", "callback_data": "main"}],
+            ],
+        )
 
     async def test_refund_webhook_reports_inactive_subscription_once(self):
         payment = {

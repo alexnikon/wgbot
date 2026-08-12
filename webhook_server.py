@@ -89,19 +89,19 @@ def create_home_reply_markup() -> dict:
 
 def create_access_reply_markup(user_id: int) -> dict:
     if db.count_managed_configs(user_id) == 0:
-        return {
-            "inline_keyboard": [
-                [
-                    {
-                        "text": "📥 Создать файл конфигурации",
-                        "callback_data": ClientConfigCallback(action="create").pack(),
-                    }
-                ]
-            ]
+        config_button = {
+            "text": "📥 Создать файл конфигурации",
+            "callback_data": ClientConfigCallback(action="create").pack(),
+        }
+    else:
+        config_button = {
+            "text": "📥 Файлы конфигурации",
+            "callback_data": "get_config",
         }
     return {
         "inline_keyboard": [
-            [{"text": "📥 Файлы конфигурации", "callback_data": "get_config"}]
+            [config_button],
+            [{"text": "На главную", "callback_data": "main"}],
         ]
     }
 
