@@ -106,6 +106,9 @@ class PrometheusDatabaseSnapshotTests(unittest.TestCase):
                 ) VALUES ('discrepancy-1', 'incoming', 10, 1, 'discrepancy')
                 """
             )
+            conn.execute(
+                "UPDATE payments SET created_at=datetime('now', '-400 days') WHERE payment_id='y-1'"
+            )
 
     def test_snapshot_aggregates_finance_access_expiry_and_placement(self):
         snapshot = self.db.get_prometheus_metrics_snapshot()
@@ -134,6 +137,43 @@ class PrometheusDatabaseSnapshotTests(unittest.TestCase):
                 {"method": "stars", "tariff": "30_days", "count": 1},
                 {"method": "yookassa", "tariff": "30_days", "count": 1},
             ],
+        )
+        self.assertEqual(
+            [
+                row
+                for row in snapshot["period_payments"]
+                if row["period"] == "today"
+            ],
+            [
+                {"period": "today", "method": "stars", "tariff": "14_days", "count": 1},
+                {"period": "today", "method": "stars", "tariff": "30_days", "count": 1},
+                {
+                    "period": "today",
+                    "method": "yookassa",
+                    "tariff": "30_days",
+                    "count": 1,
+                },
+            ],
+        )
+        self.assertIn(
+            {"period": "all", "method": "yookassa", "tariff": "14_days", "count": 1},
+            snapshot["period_payments"],
+        )
+        self.assertIn(
+            {"period": "today", "currency": "RUB", "amount": 300.0},
+            snapshot["period_payment_amounts"],
+        )
+        self.assertIn(
+            {"period": "today", "currency": "XTR", "amount": 300.0},
+            snapshot["period_payment_amounts"],
+        )
+        self.assertIn(
+            {"period": "today", "method": "yookassa", "tariff": "30_days", "count": 1},
+            snapshot["period_refunds"],
+        )
+        self.assertIn(
+            {"period": "today", "currency": "RUB", "amount": 300.0},
+            snapshot["period_refund_amounts"],
         )
         self.assertIn(
             {"server_key": "server-b", "access": "inactive", "count": 2},
@@ -179,6 +219,11 @@ class PrometheusExporterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("wgbot_paid_clients", families)
         self.assertIn("wgbot_payments_completed", families)
         self.assertIn("wgbot_refunds", families)
+        self.assertIn("wgbot_financial_period_info", families)
+        self.assertIn("wgbot_financial_payments", families)
+        self.assertIn("wgbot_financial_payment_amount", families)
+        self.assertIn("wgbot_financial_refunds", families)
+        self.assertIn("wgbot_financial_refund_amount", families)
         self.assertIn("wgbot_metrics_collection_success", families)
         self.assertIn("# HELP wgbot_server_clients", payload)
         self.assertIn("wgbot_payments_completed_total", payload)

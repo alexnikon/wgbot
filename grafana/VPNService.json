@@ -43,7 +43,7 @@
                     "kind": "DataQuery",
                     "spec": {
                       "editorMode": "code",
-                      "expr": "sum(increase(wgbot_stars_received_total[$__range])) or vector(0)",
+                      "expr": "sum(wgbot_financial_payment_amount{period=\"$financial_period\",currency=\"XTR\"}) or vector(0)",
                       "instant": true,
                       "legendFormat": "Payments Stars",
                       "range": false
@@ -58,7 +58,7 @@
             "transformations": []
           }
         },
-        "description": "Gross Telegram Stars payments received during the selected dashboard time range.",
+        "description": "Gross Telegram Stars payments from SQLite for the selected Financial period.",
         "id": 10,
         "links": [],
         "title": "Payments Stars",
@@ -1772,7 +1772,7 @@
                     "kind": "DataQuery",
                     "spec": {
                       "editorMode": "code",
-                      "expr": "min(wgbot_ready, wgbot_metrics_collection_success)",
+                      "expr": "wgbot_ready * wgbot_metrics_collection_success",
                       "instant": true,
                       "legendFormat": "WGBot",
                       "range": false
@@ -1787,7 +1787,7 @@
             "transformations": []
           }
         },
-        "description": "",
+        "description": "UP when the WGBot runtime is ready and the latest metric collection succeeded.",
         "id": 7,
         "links": [],
         "title": "Service health",
@@ -1872,7 +1872,7 @@
                     "kind": "DataQuery",
                     "spec": {
                       "editorMode": "code",
-                      "expr": "sum(increase(wgbot_yookassa_received_rubles_total[$__range])) or vector(0)",
+                      "expr": "sum(wgbot_financial_payment_amount{period=\"$financial_period\",currency=\"RUB\"}) or vector(0)",
                       "instant": true,
                       "legendFormat": "Payments RUB",
                       "range": false
@@ -1887,7 +1887,7 @@
             "transformations": []
           }
         },
-        "description": "Gross YooKassa payments received during the selected dashboard time range.",
+        "description": "Gross YooKassa payments from SQLite for the selected Financial period.",
         "id": 9,
         "links": [],
         "title": "Payments RUB",
@@ -1959,7 +1959,7 @@
                     "kind": "DataQuery",
                     "spec": {
                       "editorMode": "code",
-                      "expr": "sum(increase(wgbot_payments_completed_total{method=~\"$method\",tariff=~\"$tariff\"}[$__range])) or vector(0)",
+                      "expr": "sum(wgbot_financial_payments{period=\"$financial_period\",method=~\"$method\",tariff=~\"$tariff\"}) or vector(0)",
                       "instant": true,
                       "legendFormat": "Payments",
                       "range": false
@@ -1974,7 +1974,7 @@
             "transformations": []
           }
         },
-        "description": "Successfully applied payments during the selected dashboard time range, filtered by payment method and tariff.",
+        "description": "Successfully applied payments from SQLite for the selected Financial period, payment method, and tariff.",
         "id": 25,
         "links": [],
         "title": "Payment count",
@@ -2041,7 +2041,7 @@
                     "kind": "DataQuery",
                     "spec": {
                       "editorMode": "code",
-                      "expr": "sum(increase(wgbot_refunds_total{method=~\"$method\",tariff=~\"$tariff\"}[$__range])) or vector(0)",
+                      "expr": "sum(wgbot_financial_refunds{period=\"$financial_period\",method=~\"$method\",tariff=~\"$tariff\"}) or vector(0)",
                       "instant": true,
                       "legendFormat": "Refunds",
                       "range": false
@@ -2056,7 +2056,7 @@
             "transformations": []
           }
         },
-        "description": "Unique refunded payments during the selected dashboard time range, filtered by payment method and tariff.",
+        "description": "Unique refunded payments from SQLite for the selected Financial period, payment method, and tariff.",
         "id": 26,
         "links": [],
         "title": "Refund count",
@@ -2127,7 +2127,7 @@
                     "kind": "DataQuery",
                     "spec": {
                       "editorMode": "code",
-                      "expr": "sum(increase(wgbot_yookassa_refunded_rubles_total[$__range])) or vector(0)",
+                      "expr": "sum(wgbot_financial_refund_amount{period=\"$financial_period\",currency=\"RUB\"}) or vector(0)",
                       "instant": true,
                       "legendFormat": "Refunds RUB",
                       "range": false
@@ -2142,7 +2142,7 @@
             "transformations": []
           }
         },
-        "description": "YooKassa refunds observed during the selected dashboard time range.",
+        "description": "YooKassa refunds from SQLite for the selected Financial period.",
         "id": 27,
         "links": [],
         "title": "Refunds RUB",
@@ -2214,7 +2214,7 @@
                     "kind": "DataQuery",
                     "spec": {
                       "editorMode": "code",
-                      "expr": "sum(increase(wgbot_stars_refunded_total[$__range])) or vector(0)",
+                      "expr": "sum(wgbot_financial_refund_amount{period=\"$financial_period\",currency=\"XTR\"}) or vector(0)",
                       "instant": true,
                       "legendFormat": "Refunds Stars",
                       "range": false
@@ -2229,7 +2229,7 @@
             "transformations": []
           }
         },
-        "description": "Telegram Stars refunds observed during the selected dashboard time range.",
+        "description": "Telegram Stars refunds from SQLite for the selected Financial period.",
         "id": 28,
         "links": [],
         "title": "Refunds Stars",
@@ -2358,6 +2358,96 @@
               "showPercentChange": false,
               "textMode": "auto",
               "wideLayout": true
+            }
+          },
+          "version": "13.1.1"
+        }
+      }
+    },
+    "panel-30": {
+      "kind": "Panel",
+      "spec": {
+        "data": {
+          "kind": "QueryGroup",
+          "spec": {
+            "queries": [
+              {
+                "kind": "PanelQuery",
+                "spec": {
+                  "hidden": false,
+                  "query": {
+                    "datasource": {
+                      "name": "bf0o2zpwh26tce"
+                    },
+                    "group": "prometheus",
+                    "kind": "DataQuery",
+                    "spec": {
+                      "editorMode": "code",
+                      "expr": "sum by (tariff) (wgbot_financial_payments{period=\"$financial_period\",method=~\"$method\",tariff=~\"$tariff\"})",
+                      "instant": true,
+                      "legendFormat": "{{tariff}}",
+                      "range": false
+                    },
+                    "version": "v0"
+                  },
+                  "refId": "A"
+                }
+              }
+            ],
+            "queryOptions": {},
+            "transformations": []
+          }
+        },
+        "description": "Purchase count for each tariff from SQLite for the selected Financial period and payment method.",
+        "id": 30,
+        "links": [],
+        "title": "Payments by tariff",
+        "vizConfig": {
+          "group": "bargauge",
+          "kind": "VizConfig",
+          "spec": {
+            "fieldConfig": {
+              "defaults": {
+                "color": {
+                  "mode": "palette-classic"
+                },
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    }
+                  ]
+                },
+                "unit": "short"
+              },
+              "overrides": []
+            },
+            "options": {
+              "displayMode": "gradient",
+              "legend": {
+                "calcs": [],
+                "displayMode": "list",
+                "overflow": "ellipsis",
+                "placement": "bottom",
+                "showLegend": false
+              },
+              "maxVizHeight": 300,
+              "minVizHeight": 16,
+              "minVizWidth": 8,
+              "namePlacement": "auto",
+              "orientation": "horizontal",
+              "reduceOptions": {
+                "calcs": [
+                  "lastNotNull"
+                ],
+                "fields": "",
+                "values": false
+              },
+              "showUnfilled": true,
+              "sizing": "auto",
+              "valueMode": "color"
             }
           },
           "version": "13.1.1"
@@ -2584,6 +2674,19 @@
                       "width": 12,
                       "x": 12,
                       "y": 0
+                    }
+                  },
+                  {
+                    "kind": "GridLayoutItem",
+                    "spec": {
+                      "element": {
+                        "kind": "ElementReference",
+                        "name": "panel-30"
+                      },
+                      "height": 7,
+                      "width": 24,
+                      "x": 0,
+                      "y": 8
                     }
                   }
                 ]
@@ -2818,6 +2921,45 @@
         "regexApplyTo": "value",
         "skipUrlSync": false,
         "sort": "alphabeticalAsc"
+      }
+    },
+    {
+      "kind": "QueryVariable",
+      "spec": {
+        "allValue": ".*",
+        "allowCustomValue": false,
+        "current": {
+          "text": [
+            "today"
+          ],
+          "value": [
+            "today"
+          ]
+        },
+        "definition": "label_values(wgbot_financial_period_info, period)",
+        "hide": "dontHide",
+        "includeAll": false,
+        "label": "Financial period",
+        "multi": false,
+        "name": "financial_period",
+        "options": [],
+        "query": {
+          "datasource": {
+            "name": "bf0o2zpwh26tce"
+          },
+          "group": "prometheus",
+          "kind": "DataQuery",
+          "spec": {
+            "query": "label_values(wgbot_financial_period_info, period)",
+            "refId": "PrometheusVariableQueryEditor-VariableQuery"
+          },
+          "version": "v0"
+        },
+        "refresh": "onDashboardLoad",
+        "regex": "",
+        "regexApplyTo": "value",
+        "skipUrlSync": false,
+        "sort": "disabled"
       }
     },
     {

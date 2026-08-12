@@ -84,6 +84,61 @@ class WGBotCollector:
             )
         yield refunds
 
+        periods = GaugeMetricFamily(
+            "wgbot_financial_period_info",
+            "Available SQLite-backed financial reporting periods.",
+            labels=["period"],
+        )
+        for period in snapshot["financial_periods"]:
+            periods.add_metric([str(period)], 1)
+        yield periods
+
+        period_payments = GaugeMetricFamily(
+            "wgbot_financial_payments",
+            "Successfully applied payments in the SQLite-backed reporting period.",
+            labels=["period", "method", "tariff"],
+        )
+        for row in snapshot["period_payments"]:
+            period_payments.add_metric(
+                [str(row["period"]), str(row["method"]), str(row["tariff"])],
+                int(row["count"]),
+            )
+        yield period_payments
+
+        payment_amounts = GaugeMetricFamily(
+            "wgbot_financial_payment_amount",
+            "Gross payment amount in the SQLite-backed reporting period.",
+            labels=["period", "currency"],
+        )
+        for row in snapshot["period_payment_amounts"]:
+            payment_amounts.add_metric(
+                [str(row["period"]), str(row["currency"])], float(row["amount"])
+            )
+        yield payment_amounts
+
+        period_refunds = GaugeMetricFamily(
+            "wgbot_financial_refunds",
+            "Unique refunded payments in the SQLite-backed reporting period.",
+            labels=["period", "method", "tariff"],
+        )
+        for row in snapshot["period_refunds"]:
+            period_refunds.add_metric(
+                [str(row["period"]), str(row["method"]), str(row["tariff"])],
+                int(row["count"]),
+            )
+        yield period_refunds
+
+        refund_amounts = GaugeMetricFamily(
+            "wgbot_financial_refund_amount",
+            "Refunded amount in the SQLite-backed reporting period.",
+            labels=["period", "currency"],
+        )
+        for row in snapshot["period_refund_amounts"]:
+            refund_amounts.add_metric(
+                [str(row["period"]), str(row["currency"])], float(row["amount"])
+            )
+        yield refund_amounts
+
         amounts = snapshot["amounts"]
         for name, documentation, key in (
             (

@@ -2096,6 +2096,15 @@ class Database:
 
     def get_prometheus_metrics_snapshot(self) -> dict[str, Any]:
         """Return one consistent, non-sensitive database snapshot for Prometheus."""
+        financial_periods = {
+            "today": "start of day",
+            "7d": "-7 days",
+            "month": "start of month",
+            "30d": "-30 days",
+            "90d": "-90 days",
+            "year": "start of year",
+            "all": None,
+        }
         paid_period = """
             s.is_active=1 AND s.payment_status='paid'
             AND s.expire_date IS NOT NULL
@@ -2176,6 +2185,90 @@ class Database:
                 GROUP BY method, tariff ORDER BY method, tariff
                 """
             ).fetchall()
+            period_payments: list[dict[str, Any]] = []
+            period_payment_amounts: list[dict[str, Any]] = []
+            period_refunds: list[dict[str, Any]] = []
+            period_refund_amounts: list[dict[str, Any]] = []
+            for period, modifier in financial_periods.items():
+                payment_filter = (
+                    "" if modifier is None else "AND datetime(created_at) >= datetime('now', ?)"
+                )
+                refund_filter = (
+                    ""
+                    if modifier is None
+                    else """
+                        AND datetime(COALESCE(refunded_at, refund_applied_at, updated_at))
+                            >= datetime('now', ?)
+                    """
+                )
+                parameters: tuple[str, ...] = (modifier,) if modifier else ()
+                for row in conn.execute(
+                    f"""
+                    SELECT COALESCE(payment_method, 'unknown') AS method,
+                           COALESCE(tariff_key, 'unknown') AS tariff,
+                           COUNT(*) AS count
+                    FROM payments
+                    WHERE status IN ('succeeded', 'refunded') {payment_filter}
+                    GROUP BY method, tariff ORDER BY method, tariff
+                    """,
+                    parameters,
+                ).fetchall():
+                    period_payments.append({"period": period, **dict(row)})
+                payment_amounts = conn.execute(
+                    f"""
+                    SELECT
+                        COALESCE(SUM(CASE WHEN payment_method='yookassa'
+                            THEN amount END), 0) / 100.0 AS RUB,
+                        COALESCE(SUM(CASE WHEN payment_method='stars'
+                            THEN amount END), 0) AS XTR
+                    FROM payments
+                    WHERE status IN ('succeeded', 'refunded') {payment_filter}
+                    """,
+                    parameters,
+                ).fetchone()
+                for currency in ("RUB", "XTR"):
+                    period_payment_amounts.append(
+                        {
+                            "period": period,
+                            "currency": currency,
+                            "amount": float(payment_amounts[currency]),
+                        }
+                    )
+                for row in conn.execute(
+                    f"""
+                    SELECT COALESCE(payment_method, 'unknown') AS method,
+                           COALESCE(tariff_key, 'unknown') AS tariff,
+                           COUNT(*) AS count
+                    FROM payments
+                    WHERE status='refunded' {refund_filter}
+                    GROUP BY method, tariff ORDER BY method, tariff
+                    """,
+                    parameters,
+                ).fetchall():
+                    period_refunds.append({"period": period, **dict(row)})
+                refund_amounts = conn.execute(
+                    f"""
+                    SELECT
+                        COALESCE(SUM(CASE WHEN payment_method='yookassa'
+                            THEN CASE WHEN refunded_amount > 0
+                                THEN refunded_amount ELSE amount END END), 0) / 100.0
+                            AS RUB,
+                        COALESCE(SUM(CASE WHEN payment_method='stars'
+                            THEN CASE WHEN refunded_amount > 0
+                                THEN refunded_amount ELSE amount END END), 0) AS XTR
+                    FROM payments
+                    WHERE status='refunded' {refund_filter}
+                    """,
+                    parameters,
+                ).fetchone()
+                for currency in ("RUB", "XTR"):
+                    period_refund_amounts.append(
+                        {
+                            "period": period,
+                            "currency": currency,
+                            "amount": float(refund_amounts[currency]),
+                        }
+                    )
             amounts = conn.execute(
                 """
                 SELECT
@@ -2270,6 +2363,11 @@ class Database:
             "payment_records": [dict(row) for row in payment_records],
             "completed_payments": [dict(row) for row in completed_payments],
             "refunds": [dict(row) for row in refunds],
+            "financial_periods": list(financial_periods),
+            "period_payments": period_payments,
+            "period_payment_amounts": period_payment_amounts,
+            "period_refunds": period_refunds,
+            "period_refund_amounts": period_refund_amounts,
             "amounts": {
                 key: float(value) for key, value in dict(amounts).items()
             },

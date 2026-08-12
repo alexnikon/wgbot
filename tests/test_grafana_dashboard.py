@@ -22,29 +22,31 @@ class GrafanaDashboardTests(unittest.TestCase):
         self.assertEqual(set(layout_names), element_names)
         self.assertEqual(len(layout_names), len(set(layout_names)))
 
-    def test_financial_stats_follow_dashboard_time_range(self):
+    def test_financial_stats_follow_selected_financial_period(self):
         expected = {
             "Payment count": (
-                'sum(increase(wgbot_payments_completed_total{method=~"$method",'
-                'tariff=~"$tariff"}[$__range])) or vector(0)'
+                'sum(wgbot_financial_payments{period="$financial_period",'
+                'method=~"$method",tariff=~"$tariff"}) or vector(0)'
             ),
             "Refund count": (
-                'sum(increase(wgbot_refunds_total{method=~"$method",'
-                'tariff=~"$tariff"}[$__range])) or vector(0)'
+                'sum(wgbot_financial_refunds{period="$financial_period",'
+                'method=~"$method",tariff=~"$tariff"}) or vector(0)'
             ),
             "Payments RUB": (
-                "sum(increase(wgbot_yookassa_received_rubles_total[$__range])) "
-                "or vector(0)"
+                'sum(wgbot_financial_payment_amount{period="$financial_period",'
+                'currency="RUB"}) or vector(0)'
             ),
             "Payments Stars": (
-                "sum(increase(wgbot_stars_received_total[$__range])) or vector(0)"
+                'sum(wgbot_financial_payment_amount{period="$financial_period",'
+                'currency="XTR"}) or vector(0)'
             ),
             "Refunds RUB": (
-                "sum(increase(wgbot_yookassa_refunded_rubles_total[$__range])) "
-                "or vector(0)"
+                'sum(wgbot_financial_refund_amount{period="$financial_period",'
+                'currency="RUB"}) or vector(0)'
             ),
             "Refunds Stars": (
-                "sum(increase(wgbot_stars_refunded_total[$__range])) or vector(0)"
+                'sum(wgbot_financial_refund_amount{period="$financial_period",'
+                'currency="XTR"}) or vector(0)'
             ),
         }
         panels = {
@@ -61,6 +63,37 @@ class GrafanaDashboardTests(unittest.TestCase):
                 self.assertTrue(query["instant"])
                 self.assertFalse(query["range"])
                 self.assertEqual(panel["spec"]["vizConfig"]["group"], "stat")
+
+    def test_financial_period_filter_and_tariff_breakdown_are_present(self):
+        variables = {variable["spec"]["name"]: variable for variable in self.dashboard["variables"]}
+        period = variables["financial_period"]["spec"]
+        self.assertEqual(period["current"]["value"], ["today"])
+        self.assertEqual(
+            period["definition"],
+            "label_values(wgbot_financial_period_info, period)",
+        )
+        panels = {
+            panel["spec"]["title"]: panel
+            for panel in self.dashboard["elements"].values()
+        }
+        tariff_query = panels["Payments by tariff"]["spec"]["data"]["spec"][
+            "queries"
+        ][0]["spec"]["query"]["spec"]
+        self.assertEqual(
+            tariff_query["expr"],
+            'sum by (tariff) (wgbot_financial_payments{period="$financial_period",'
+            'method=~"$method",tariff=~"$tariff"})',
+        )
+        self.assertTrue(tariff_query["instant"])
+
+    def test_service_health_combines_ready_and_collection_success(self):
+        service_health = self.dashboard["elements"]["panel-7"]["spec"]
+        expression = service_health["data"]["spec"]["queries"][0]["spec"][
+            "query"
+        ]["spec"]["expr"]
+        self.assertEqual(
+            expression, "wgbot_ready * wgbot_metrics_collection_success"
+        )
 
     def test_access_names_and_active_configuration_filter_are_clear(self):
         panels = {
