@@ -106,6 +106,7 @@ class RuntimeMetrics:
                 cascade[server_key] = {
                     "requests": requests,
                     "errors": int(values["errors"]),
+                    "duration_seconds": duration,
                     "average_duration_seconds": round(duration / requests, 4)
                     if requests
                     else 0.0,

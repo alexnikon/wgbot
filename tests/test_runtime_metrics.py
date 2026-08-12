@@ -19,6 +19,7 @@ class RuntimeMetricsTests(unittest.TestCase):
 
         self.assertEqual(snapshot["cascade"]["server-a"]["requests"], 2)
         self.assertEqual(snapshot["cascade"]["server-a"]["errors"], 1)
+        self.assertEqual(snapshot["cascade"]["server-a"]["duration_seconds"], 1.0)
         self.assertEqual(
             snapshot["cascade"]["server-a"]["average_duration_seconds"], 0.5
         )

@@ -3,10 +3,18 @@ from functools import lru_cache
 from pathlib import Path
 
 
-def _get_int(name: str, default: int, *, minimum: int | None = None) -> int:
+def _get_int(
+    name: str,
+    default: int,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int:
     value = int(os.getenv(name, str(default)))
     if minimum is not None and value < minimum:
         raise ValueError(f"{name} must be at least {minimum}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name} must be at most {maximum}")
     return value
 
 
@@ -65,6 +73,7 @@ DOMAIN = os.getenv("DOMAIN")
 WEBHOOK_MAX_BODY_BYTES = _get_int("WEBHOOK_MAX_BODY_BYTES", 65536, minimum=1024)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 INTERNAL_METRICS_TOKEN = os.getenv("INTERNAL_METRICS_TOKEN", "").strip()
+METRICS_PORT = _get_int("METRICS_PORT", 9100, minimum=1, maximum=65535)
 
 # Support
 SUPPORT_URL = os.getenv("SUPPORT_URL")

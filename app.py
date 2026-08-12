@@ -8,7 +8,9 @@ import uvicorn
 
 import bot as bot_module
 import webhook_server
+from config import METRICS_PORT
 from logging_setup import configure_logging
+from prometheus_exporter import create_metrics_app
 from services import AppServices, create_services
 
 configure_logging()
@@ -23,31 +25,43 @@ class NoSignalServer(uvicorn.Server):
         yield
 
 
-def create_webhook_server() -> NoSignalServer:
-    """Create the webhook server without installing competing signal handlers."""
+def create_http_server(application: object, port: int) -> NoSignalServer:
+    """Create one HTTP server without installing competing signal handlers."""
     config = uvicorn.Config(
-        webhook_server.app,
+        application,
         host="0.0.0.0",
-        port=8001,
+        port=port,
         log_level="info",
         lifespan="on",
     )
     return NoSignalServer(config)
 
 
+def create_webhook_server() -> NoSignalServer:
+    """Create the YooKassa webhook HTTP server."""
+    return create_http_server(webhook_server.app, 8001)
+
+
+def create_metrics_server(services: AppServices) -> NoSignalServer:
+    """Create the private Prometheus exposition HTTP server."""
+    return create_http_server(create_metrics_app(services), METRICS_PORT)
+
+
 async def supervise_runtime(
     bot_runtime: Awaitable[None],
     webhook_runtime: Awaitable[None],
+    metrics_runtime: Awaitable[None],
     shutdown_requested: asyncio.Event,
     request_shutdown: Callable[[], Awaitable[None]],
 ) -> None:
-    """Keep both runtimes alive and coordinate an explicit graceful shutdown."""
+    """Keep all runtimes alive and coordinate an explicit graceful shutdown."""
     bot_task = asyncio.create_task(bot_runtime, name="bot-polling")
     webhook_task = asyncio.create_task(webhook_runtime, name="webhook-server")
+    metrics_task = asyncio.create_task(metrics_runtime, name="metrics-server")
     shutdown_task = asyncio.create_task(
         shutdown_requested.wait(), name="shutdown-signal"
     )
-    runtime_tasks = (bot_task, webhook_task)
+    runtime_tasks = (bot_task, webhook_task, metrics_task)
     all_tasks = (*runtime_tasks, shutdown_task)
     try:
         done, _ = await asyncio.wait(all_tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -56,7 +70,7 @@ async def supervise_runtime(
                 raise task.exception()  # type: ignore[misc]
 
         if shutdown_task not in done:
-            finished = bot_task if bot_task in done else webhook_task
+            finished = next(task for task in runtime_tasks if task in done)
             raise RuntimeError(f"Long-running task {finished.get_name()} exited unexpectedly")
 
         logger.info("Shutdown signal received")
@@ -102,11 +116,13 @@ async def main() -> None:
     services: AppServices = create_services()
     webhook_server.configure_runtime(services)
     server = create_webhook_server()
+    metrics_server = create_metrics_server(services)
     shutdown_requested = asyncio.Event()
     remove_signal_handlers = install_shutdown_handlers(shutdown_requested)
 
     async def request_shutdown() -> None:
         server.should_exit = True
+        metrics_server.should_exit = True
         with suppress(RuntimeError):
             await bot_module.dp.stop_polling()
 
@@ -114,6 +130,7 @@ async def main() -> None:
         await supervise_runtime(
             bot_module.main(services),
             server.serve(),
+            metrics_server.serve(),
             shutdown_requested,
             request_shutdown,
         )

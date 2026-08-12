@@ -9,6 +9,7 @@ class RuntimeSupervisorTests(unittest.IsolatedAsyncioTestCase):
         shutdown_requested = asyncio.Event()
         bot_stopped = asyncio.Event()
         webhook_stopped = asyncio.Event()
+        metrics_stopped = asyncio.Event()
 
         async def bot_runtime():
             await bot_stopped.wait()
@@ -16,14 +17,19 @@ class RuntimeSupervisorTests(unittest.IsolatedAsyncioTestCase):
         async def webhook_runtime():
             await webhook_stopped.wait()
 
+        async def metrics_runtime():
+            await metrics_stopped.wait()
+
         async def request_shutdown():
             bot_stopped.set()
             webhook_stopped.set()
+            metrics_stopped.set()
 
         task = asyncio.create_task(
             supervise_runtime(
                 bot_runtime(),
                 webhook_runtime(),
+                metrics_runtime(),
                 shutdown_requested,
                 request_shutdown,
             )
@@ -42,12 +48,16 @@ class RuntimeSupervisorTests(unittest.IsolatedAsyncioTestCase):
         async def webhook_runtime():
             await never_finished.wait()
 
+        async def metrics_runtime():
+            await never_finished.wait()
+
         with self.assertRaisesRegex(
             RuntimeError, "Long-running task bot-polling exited unexpectedly"
         ):
             await supervise_runtime(
                 bot_runtime(),
                 webhook_runtime(),
+                metrics_runtime(),
                 asyncio.Event(),
                 self._no_op_shutdown,
             )
@@ -61,10 +71,34 @@ class RuntimeSupervisorTests(unittest.IsolatedAsyncioTestCase):
         async def webhook_runtime():
             await never_finished.wait()
 
+        async def metrics_runtime():
+            await never_finished.wait()
+
         with self.assertRaisesRegex(ValueError, "polling failed"):
             await supervise_runtime(
                 bot_runtime(),
                 webhook_runtime(),
+                metrics_runtime(),
+                asyncio.Event(),
+                self._no_op_shutdown,
+            )
+
+    async def test_clean_metrics_exit_is_fatal(self):
+        never_finished = asyncio.Event()
+
+        async def long_runtime():
+            await never_finished.wait()
+
+        async def metrics_runtime():
+            return None
+
+        with self.assertRaisesRegex(
+            RuntimeError, "Long-running task metrics-server exited unexpectedly"
+        ):
+            await supervise_runtime(
+                long_runtime(),
+                long_runtime(),
+                metrics_runtime(),
                 asyncio.Event(),
                 self._no_op_shutdown,
             )

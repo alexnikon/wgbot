@@ -2094,6 +2094,185 @@ class Database:
             "legacy_callbacks_today": int(row[10] or 0),
         }
 
+    def get_prometheus_metrics_snapshot(self) -> dict[str, Any]:
+        """Return one consistent, non-sensitive database snapshot for Prometheus."""
+        paid_period = """
+            s.is_active=1 AND s.payment_status='paid'
+            AND s.expire_date IS NOT NULL
+            AND datetime(s.expire_date) > datetime('now')
+        """
+        effective_paid = f"""
+            ({paid_period}) AND c.is_banned=0 AND c.identity_verified=1
+            AND c.is_complimentary=0
+        """
+        effective_complimentary = """
+            c.is_banned=0 AND c.identity_verified=1 AND c.is_complimentary=1
+        """
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN")
+            client_row = conn.execute(
+                f"""
+                SELECT
+                    SUM(CASE WHEN {paid_period} THEN 1 ELSE 0 END) AS paid_clients,
+                    SUM(CASE WHEN ({paid_period}) AND
+                        (c.is_banned=1 OR c.identity_verified=0)
+                        THEN 1 ELSE 0 END) AS paid_clients_blocked,
+                    SUM(CASE WHEN {effective_paid} THEN 1 ELSE 0 END) AS paid_access,
+                    SUM(CASE WHEN {effective_complimentary}
+                        THEN 1 ELSE 0 END) AS complimentary_access,
+                    SUM(CASE WHEN ({effective_paid} OR {effective_complimentary})
+                        AND NOT EXISTS (
+                            SELECT 1 FROM client_peers cp
+                            WHERE cp.telegram_user_id=c.telegram_user_id
+                              AND cp.role='managed'
+                              AND cp.server_key IS NOT NULL
+                              AND cp.interface_id IS NOT NULL
+                              AND cp.cascade_peer_id IS NOT NULL
+                        ) THEN 1 ELSE 0 END) AS active_without_config
+                FROM clients c
+                LEFT JOIN subscriptions s USING(telegram_user_id)
+                """
+            ).fetchone()
+            expiry_row = conn.execute(
+                f"""
+                SELECT
+                    SUM(CASE WHEN datetime(s.expire_date) <= datetime('now', '+1 day')
+                        THEN 1 ELSE 0 END) AS day_1,
+                    SUM(CASE WHEN datetime(s.expire_date) <= datetime('now', '+3 days')
+                        THEN 1 ELSE 0 END) AS day_3,
+                    SUM(CASE WHEN datetime(s.expire_date) <= datetime('now', '+7 days')
+                        THEN 1 ELSE 0 END) AS day_7,
+                    SUM(CASE WHEN datetime(s.expire_date) <= datetime('now', '+14 days')
+                        THEN 1 ELSE 0 END) AS day_14,
+                    SUM(CASE WHEN datetime(s.expire_date) <= datetime('now', '+30 days')
+                        THEN 1 ELSE 0 END) AS day_30,
+                    MIN(CAST(strftime('%s', s.expire_date) AS INTEGER)) AS nearest
+                FROM clients c
+                JOIN subscriptions s USING(telegram_user_id)
+                WHERE {effective_paid}
+                """
+            ).fetchone()
+            payment_records = conn.execute(
+                """
+                SELECT COALESCE(payment_method, 'unknown') AS method,
+                       COALESCE(status, 'unknown') AS status, COUNT(*) AS count
+                FROM payments GROUP BY method, status ORDER BY method, status
+                """
+            ).fetchall()
+            completed_payments = conn.execute(
+                """
+                SELECT COALESCE(payment_method, 'unknown') AS method,
+                       COALESCE(tariff_key, 'unknown') AS tariff, COUNT(*) AS count
+                FROM payments WHERE status IN ('succeeded', 'refunded')
+                GROUP BY method, tariff ORDER BY method, tariff
+                """
+            ).fetchall()
+            amounts = conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN payment_method='yookassa'
+                        AND status IN ('succeeded', 'refunded') THEN amount END), 0) / 100.0
+                        AS yookassa_received,
+                    COALESCE(SUM(CASE WHEN payment_method='yookassa' AND status='refunded'
+                        THEN CASE WHEN refunded_amount > 0 THEN refunded_amount ELSE amount END
+                        END), 0) / 100.0 AS yookassa_refunded,
+                    COALESCE(SUM(CASE WHEN payment_method='stars'
+                        AND status IN ('succeeded', 'refunded') THEN amount END), 0)
+                        AS stars_received,
+                    COALESCE(SUM(CASE WHEN payment_method='stars' AND status='refunded'
+                        THEN CASE WHEN refunded_amount > 0 THEN refunded_amount ELSE amount END
+                        END), 0) AS stars_refunded
+                FROM payments
+                """
+            ).fetchone()
+            server_clients = conn.execute(
+                f"""
+                WITH placements AS (
+                    SELECT DISTINCT cp.server_key, cp.telegram_user_id
+                    FROM client_peers cp
+                    WHERE cp.role='managed' AND cp.server_key IS NOT NULL
+                      AND cp.interface_id IS NOT NULL AND cp.cascade_peer_id IS NOT NULL
+                )
+                SELECT p.server_key,
+                    CASE
+                        WHEN {effective_complimentary} THEN 'complimentary'
+                        WHEN {effective_paid} THEN 'paid'
+                        ELSE 'inactive'
+                    END AS access,
+                    COUNT(*) AS count
+                FROM placements p
+                JOIN clients c ON c.telegram_user_id=p.telegram_user_id
+                LEFT JOIN subscriptions s USING(telegram_user_id)
+                GROUP BY p.server_key, access ORDER BY p.server_key, access
+                """
+            ).fetchall()
+            server_configs = conn.execute(
+                """
+                SELECT server_key,
+                    CASE WHEN enabled=1 AND admin_enabled=1
+                        THEN 'enabled' ELSE 'disabled' END AS state,
+                    COUNT(*) AS count
+                FROM client_peers
+                WHERE role='managed' AND server_key IS NOT NULL
+                  AND interface_id IS NOT NULL AND cascade_peer_id IS NOT NULL
+                GROUP BY server_key, state ORDER BY server_key, state
+                """
+            ).fetchall()
+            provisioning = conn.execute(
+                """
+                SELECT status, COUNT(*) AS count FROM provisioning_tasks
+                GROUP BY status ORDER BY status
+                """
+            ).fetchall()
+            operational = conn.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM clients WHERE telegram_reachable=1)
+                        AS telegram_reachable,
+                    (SELECT COUNT(*) FROM clients WHERE telegram_reachable=0)
+                        AS telegram_blocked,
+                    (SELECT COUNT(*) FROM clients WHERE telegram_reachable IS NULL)
+                        AS telegram_unknown,
+                    (SELECT COUNT(*) FROM star_transactions WHERE status='discrepancy')
+                        AS stars_discrepancies,
+                    (SELECT CAST(strftime('%s', 'now') - strftime('%s', completed_at)
+                        AS INTEGER) FROM star_reconciliation_runs WHERE status='completed'
+                        ORDER BY id DESC LIMIT 1) AS stars_last_success_age_seconds
+                """
+            ).fetchone()
+
+        return {
+            "clients": {
+                "paid": int(client_row["paid_clients"] or 0),
+                "paid_blocked": int(client_row["paid_clients_blocked"] or 0),
+                "paid_access": int(client_row["paid_access"] or 0),
+                "complimentary_access": int(client_row["complimentary_access"] or 0),
+                "active_without_config": int(client_row["active_without_config"] or 0),
+            },
+            "expiry": {
+                "windows": {
+                    days: int(expiry_row[f"day_{days}"] or 0)
+                    for days in (1, 3, 7, 14, 30)
+                },
+                "nearest": int(expiry_row["nearest"])
+                if expiry_row["nearest"] is not None
+                else None,
+            },
+            "payment_records": [dict(row) for row in payment_records],
+            "completed_payments": [dict(row) for row in completed_payments],
+            "amounts": {
+                key: float(value) for key, value in dict(amounts).items()
+            },
+            "server_clients": [dict(row) for row in server_clients],
+            "server_configs": [dict(row) for row in server_configs],
+            "provisioning": [dict(row) for row in provisioning],
+            "operational": {
+                key: int(value) if value is not None else None
+                for key, value in dict(operational).items()
+            },
+        }
+
     def record_telegram_daily_metric(self, name: str) -> None:
         """Persist a low-volume Telegram counter for rollout decisions."""
         if name not in {"legacy_callbacks", "unhandled_errors"}:
