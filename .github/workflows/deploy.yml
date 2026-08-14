@@ -131,7 +131,7 @@ jobs:
           test -r secrets/cascade_servers.json
           test -r DB/wgbot.db
           test -w DB
-          python3 scripts/backup_runtime.py --root "$DEPLOY_PATH" --label production
+          python3 scripts/backup_runtime.py --root "$DEPLOY_PATH"
 
           printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
           docker pull "$IMAGE"

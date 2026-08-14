@@ -1,11 +1,14 @@
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import sqlite3
 import tempfile
 import unittest
+import zipfile
 from contextlib import closing
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).parents[1] / "scripts" / "backup_runtime.py"
@@ -20,148 +23,228 @@ class RuntimeBackupTests(unittest.TestCase):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary_directory.cleanup)
         self.root = Path(self.temporary_directory.name)
+        self.environment = self.root / ".env"
+        self.environment.write_text(
+            "BOT_TOKEN=secret\nBACKUP_RETENTION_DAYS=30\n",
+            encoding="utf-8",
+        )
+
         (self.root / "DB").mkdir()
         self.database = self.root / "DB" / "wgbot.db"
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute("CREATE TABLE values_table(value TEXT)")
             connection.execute("INSERT INTO values_table VALUES ('saved')")
 
-    def test_creates_consistent_database_backup(self):
-        now = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
-
-        created = backup_runtime.create_runtime_backup(self.root, "dev", now)
-
-        self.assertEqual(len(created), 1)
-        self.assertEqual(created[0].name, "wgbot.db.dev.20300102-030405")
-        with closing(sqlite3.connect(created[0])) as connection, connection:
-            value = connection.execute("SELECT value FROM values_table").fetchone()[0]
-        self.assertEqual(value, "saved")
-        self.assertEqual(list((self.root / "backups").glob("*.tmp-*")), [])
-        self.assertEqual(created[0].stat().st_mode & 0o777, 0o600)
-
-    def test_backs_up_valid_cascade_registry_with_protected_permissions(self):
         secrets = self.root / "secrets"
         secrets.mkdir()
-        registry = secrets / "cascade_servers.json"
-        registry.write_text(
+        self.registry = secrets / "cascade_servers.json"
+        self.registry.write_text(
             json.dumps({"servers": [{"server_key": "server-a"}]}),
             encoding="utf-8",
         )
 
-        created = backup_runtime.create_runtime_backup(
+    def _create_backup(self, now=None):
+        return backup_runtime.create_runtime_backup(
             self.root,
-            "dev",
-            datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
+            "ignored-label",
+            now or datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
         )
 
-        self.assertEqual(
-            [path.name for path in created],
-            [
-                "wgbot.db.dev.20300102-030405",
-                "cascade_servers.json.dev.20300102-030405",
-            ],
-        )
-        registry_backup = created[1]
-        self.assertEqual(registry_backup.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(json.loads(registry_backup.read_text()), json.loads(registry.read_text()))
+    def test_creates_protected_archive_with_complete_runtime_snapshot(self):
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("INSERT INTO values_table VALUES ('from-wal')")
+            connection.commit()
+            self.assertTrue(Path(f"{self.database}-wal").exists())
 
-    def test_rejects_invalid_cascade_registry_without_partial_backup(self):
-        secrets = self.root / "secrets"
-        secrets.mkdir()
-        (secrets / "cascade_servers.json").write_text("{invalid", encoding="utf-8")
+            created = self._create_backup()
+
+        expected = (
+            self.root
+            / "backups"
+            / "02-01-30"
+            / "wgbot-02-01-30-03-04-05.zip"
+        )
+        self.assertEqual(created, [expected])
+        self.assertEqual(expected.stat().st_mode & 0o777, 0o600)
+
+        with zipfile.ZipFile(expected) as archive:
+            self.assertEqual(
+                archive.namelist(),
+                [".env", "wgbot.db", "cascade_servers.json"],
+            )
+            self.assertIsNone(archive.testzip())
+            self.assertEqual(archive.read(".env"), self.environment.read_bytes())
+            self.assertEqual(archive.read("cascade_servers.json"), self.registry.read_bytes())
+            extracted_database = self.root / "extracted.db"
+            extracted_database.write_bytes(archive.read("wgbot.db"))
+
+        with closing(sqlite3.connect(extracted_database)) as connection:
+            self.assertEqual(
+                connection.execute("PRAGMA integrity_check").fetchone()[0], "ok"
+            )
+            values = connection.execute(
+                "SELECT value FROM values_table ORDER BY rowid"
+            ).fetchall()
+        self.assertEqual(values, [("saved",), ("from-wal",)])
+        self.assertEqual(list((self.root / "backups").glob(".wgbot-backup-*")), [])
+
+    def test_rejects_invalid_cascade_registry_without_partial_archive(self):
+        self.registry.write_text("{invalid", encoding="utf-8")
 
         with self.assertRaises(json.JSONDecodeError):
-            backup_runtime.create_runtime_backup(
-                self.root,
-                "dev",
-                datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
-            )
+            self._create_backup()
 
-        self.assertEqual(
-            list((self.root / "backups").glob("cascade_servers.json*")), []
-        )
+        self.assertEqual(list((self.root / "backups").rglob("*.zip")), [])
+        self.assertEqual(list((self.root / "backups").glob(".wgbot-backup-*")), [])
+        self.assertFalse((self.root / "backups" / "02-01-30").exists())
 
     def test_rejects_registry_without_servers_list(self):
-        secrets = self.root / "secrets"
-        secrets.mkdir()
-        (secrets / "cascade_servers.json").write_text("{}", encoding="utf-8")
+        self.registry.write_text("{}", encoding="utf-8")
 
         with self.assertRaisesRegex(ValueError, "servers list"):
-            backup_runtime.create_runtime_backup(
-                self.root,
-                "dev",
-                datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
-            )
+            self._create_backup()
 
-    def test_ignores_unmanaged_runtime_files(self):
-        unmanaged = self.root / "runtime-notes.json"
-        unmanaged.write_text("{}", encoding="utf-8")
+        self.assertEqual(list((self.root / "backups").rglob("*.zip")), [])
 
-        created = backup_runtime.create_runtime_backup(
-            self.root,
-            "dev",
-            datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
+    def test_missing_required_file_logs_info_and_skips_archive(self):
+        for path in (self.environment, self.database, self.registry):
+            with self.subTest(path=path.relative_to(self.root)):
+                content = path.read_bytes()
+                path.unlink()
+                output = io.StringIO()
+
+                with contextlib.redirect_stdout(output):
+                    created = self._create_backup()
+
+                self.assertEqual(created, [])
+                self.assertIn("INFO: Runtime backup skipped", output.getvalue())
+                self.assertIn(str(path.relative_to(self.root)), output.getvalue())
+                self.assertEqual(list((self.root / "backups").rglob("*.zip")), [])
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+
+    def test_does_not_overwrite_archive_with_same_timestamp(self):
+        created = self._create_backup()
+        original = created[0].read_bytes()
+
+        with self.assertRaisesRegex(FileExistsError, "already exists"):
+            self._create_backup()
+
+        self.assertEqual(created[0].read_bytes(), original)
+        self.assertEqual(list((self.root / "backups").rglob("*.zip")), created)
+        self.assertEqual(list((self.root / "backups").glob(".wgbot-backup-*")), [])
+
+    def test_converts_supplied_time_to_utc_for_archive_name(self):
+        moscow_time = datetime(
+            2030,
+            1,
+            2,
+            1,
+            4,
+            5,
+            tzinfo=timezone(timedelta(hours=3)),
         )
 
-        self.assertEqual(len(created), 1)
-        self.assertTrue(unmanaged.exists())
-        self.assertEqual(list((self.root / "backups").glob("runtime-notes.json.*")), [])
+        created = self._create_backup(moscow_time)
 
-    def test_prunes_by_age_and_count_without_deleting_unmanaged_files(self):
+        self.assertEqual(created[0].parent.name, "01-01-30")
+        self.assertEqual(created[0].name, "wgbot-01-01-30-22-04-05.zip")
+
+    def test_prunes_expired_archives_and_legacy_files_only(self):
         backup_dir = self.root / "backups"
-        backup_dir.mkdir()
+        old_day = backup_dir / "01-01-30"
+        fresh_day = backup_dir / "09-01-30"
+        old_day.mkdir(parents=True)
+        fresh_day.mkdir()
         now = datetime(2030, 1, 10, tzinfo=UTC)
+
+        old_archive = old_day / "wgbot-01-01-30-00-00-00.zip"
+        fresh_archive = fresh_day / "wgbot-09-01-30-00-00-00.zip"
+        old_legacy = backup_dir / "wgbot.db.production.20300101-000000"
+        fresh_legacy = backup_dir / "cascade_servers.json.rollback.20300109-000000"
         unmanaged = backup_dir / "notes.txt"
-        unmanaged.write_text("keep", encoding="utf-8")
+        unmanaged_in_day = old_day / "keep.txt"
+        unmanaged_dir = backup_dir / "manual"
+        unmanaged_dir.mkdir()
+        unmanaged_dir_file = unmanaged_dir / "wgbot-01-01-30-00-00-00.zip"
         temporary_sidecar = backup_dir / "wgbot.db.dev.20300109-000000.tmp-shm"
-        temporary_sidecar.write_text("temporary", encoding="utf-8")
-        paths = []
-        for index in range(4):
-            path = backup_dir / f"wgbot.db.dev.2030010{index + 1}-000000"
-            path.write_text(str(index), encoding="utf-8")
-            modified = (now - timedelta(days=9 - index)).timestamp()
-            os.utime(path, (modified, modified))
-            paths.append(path)
+
+        for path in (
+            old_archive,
+            fresh_archive,
+            old_legacy,
+            fresh_legacy,
+            unmanaged,
+            unmanaged_in_day,
+            unmanaged_dir_file,
+            temporary_sidecar,
+        ):
+            path.write_text("data", encoding="utf-8")
+        old_timestamp = (now - timedelta(days=9)).timestamp()
+        fresh_timestamp = (now - timedelta(days=1)).timestamp()
+        for path in (old_archive, old_legacy):
+            os.utime(path, (old_timestamp, old_timestamp))
+        for path in (fresh_archive, fresh_legacy):
+            os.utime(path, (fresh_timestamp, fresh_timestamp))
 
         removed = backup_runtime.prune_backups(
             backup_dir,
             retention_days=7,
-            max_files=2,
             now=now,
         )
 
-        self.assertEqual(len(removed), 3)
-        self.assertTrue(unmanaged.exists())
+        self.assertIn(old_archive, removed)
+        self.assertIn(old_legacy, removed)
+        self.assertIn(temporary_sidecar, removed)
+        self.assertFalse(old_archive.exists())
+        self.assertFalse(old_legacy.exists())
         self.assertFalse(temporary_sidecar.exists())
-        self.assertEqual(len(list(backup_dir.glob("wgbot.db.*"))), 2)
+        self.assertTrue(old_day.exists())
+        self.assertTrue(unmanaged_in_day.exists())
+        for path in (fresh_archive, fresh_legacy, unmanaged, unmanaged_dir_file):
+            self.assertTrue(path.exists())
 
-    def test_prunes_database_and_registry_backups_independently(self):
+    def test_removes_empty_managed_day_directory(self):
         backup_dir = self.root / "backups"
-        backup_dir.mkdir()
+        day = backup_dir / "01-01-30"
+        day.mkdir(parents=True)
+        archive = day / "wgbot-01-01-30-00-00-00.zip"
+        archive.write_text("old", encoding="utf-8")
         now = datetime(2030, 1, 10, tzinfo=UTC)
-        for source in ("wgbot.db", "cascade_servers.json"):
-            for index in range(3):
-                path = backup_dir / f"{source}.dev.2030010{index + 1}-000000"
-                path.write_text(str(index), encoding="utf-8")
-                os.utime(path, (now.timestamp() + index, now.timestamp() + index))
+        old_timestamp = (now - timedelta(days=9)).timestamp()
+        os.utime(archive, (old_timestamp, old_timestamp))
 
-        backup_runtime.prune_backups(
+        removed = backup_runtime.prune_backups(
             backup_dir,
-            retention_days=0,
-            max_files=2,
+            retention_days=7,
             now=now,
         )
 
-        self.assertEqual(len(list(backup_dir.glob("wgbot.db.*"))), 2)
-        self.assertEqual(len(list(backup_dir.glob("cascade_servers.json.*"))), 2)
+        self.assertIn(archive, removed)
+        self.assertIn(day, removed)
+        self.assertFalse(day.exists())
 
-    def test_zero_disables_retention_rule(self):
-        values = {
-            "BACKUP_RETENTION_DAYS": "0",
-            "BACKUP_MAX_FILES": "0",
-        }
-
-        self.assertEqual(
-            backup_runtime.parse_nonnegative_int(values, "BACKUP_RETENTION_DAYS", 30),
-            0,
+    def test_zero_disables_age_retention_and_max_files_is_ignored(self):
+        self.environment.write_text(
+            "BACKUP_RETENTION_DAYS=0\nBACKUP_MAX_FILES=invalid\n",
+            encoding="utf-8",
         )
+        now = datetime(2030, 1, 10, tzinfo=UTC)
+        created = self._create_backup(now)
+        archive = created[0]
+        old_timestamp = (now - timedelta(days=100)).timestamp()
+        os.utime(archive, (old_timestamp, old_timestamp))
+
+        removed = backup_runtime.prune_backups(
+            self.root / "backups",
+            retention_days=0,
+            now=now,
+        )
+
+        self.assertEqual(removed, [])
+        self.assertTrue(archive.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()
