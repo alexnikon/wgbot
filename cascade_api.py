@@ -45,6 +45,15 @@ class ClientDeletionResult:
 
 
 @dataclass(frozen=True)
+class ManagedConfigRebindResult:
+    """Describe a manual replacement of one managed config binding."""
+
+    previous: dict[str, Any]
+    current: dict[str, Any]
+    sync: dict[str, int]
+
+
+@dataclass(frozen=True)
 class CascadeServer:
     server_key: str
     base_url: str
@@ -753,6 +762,155 @@ class CascadeRouter:
             self.db.set_client_peer_enabled(peer["cascade_peer_id"], False)
             raise
         return peer, content
+
+    async def rebind_managed_config(
+        self,
+        user_id: int,
+        peer_id: int,
+        server_key: str,
+        interface_id: str,
+        public_key: str,
+    ) -> ManagedConfigRebindResult:
+        """Repair one missing managed config by binding an existing Cascade peer."""
+        public_key = public_key.strip()
+        if not public_key:
+            raise CascadeError("Public key is required")
+
+        user_lock = self._user_locks.get(user_id)
+        if user_lock is None:
+            user_lock = asyncio.Lock()
+            self._user_locks[user_id] = user_lock
+        async with user_lock:
+            previous = self.db.get_client_peer(peer_id, user_id)
+            if (
+                not previous
+                or previous.get("role") != MANAGED_CONFIG_ROLE
+                or not previous.get("server_key")
+                or not previous.get("interface_id")
+                or not previous.get("cascade_peer_id")
+            ):
+                raise CascadeNotFound(f"No managed configuration {peer_id}")
+            if not previous.get("admin_enabled"):
+                raise CascadeError("Deactivated configurations cannot be rebound")
+            if not self.db.has_active_access(user_id):
+                raise CascadeError("Active access is required")
+
+            try:
+                await self.get_api(str(previous["server_key"])).get_peer(
+                    str(previous["cascade_peer_id"]),
+                    str(previous["interface_id"]),
+                )
+            except CascadeNotFound:
+                pass
+            else:
+                raise CascadeError("The existing Cascade peer is still available")
+
+            target = await self.inspect_rebind_target(
+                server_key, interface_id, public_key
+            )
+            target_id = str(target["cascade_peer_id"])
+            target_public_key = str(target["public_key"])
+            client_group = str(target["client_group"])
+
+            other_configs = [
+                item
+                for item in self.db.get_managed_client_configs(user_id)
+                if int(item["id"]) != peer_id
+            ]
+            if other_configs:
+                groups = {
+                    str(item.get("client_group") or "").strip().casefold()
+                    for item in other_configs
+                }
+                if "" in groups or len(groups) != 1:
+                    raise CascadeError("Client configurations have no confirmed group")
+                if client_group.casefold() not in groups:
+                    raise CascadeError("Cascade peer client group does not match the client")
+
+            rebound = self.db.rebind_managed_config(
+                peer_id,
+                user_id,
+                server_key=server_key,
+                interface_id=interface_id,
+                cascade_peer_id=target_id,
+                public_key=target_public_key,
+                peer_name=str(target["peer_name"]),
+                client_group=client_group,
+            )
+            if not rebound:
+                raise CascadeError("Cascade peer is already bound or the config changed")
+
+            access = self.db.get_client_access_state(user_id)
+            expire_date = access.cascade_expiry or "1970-01-01 00:00:00"
+            sync = await self._sync_user_access_unlocked(user_id, expire_date)
+            current = self.db.get_client_peer(peer_id, user_id)
+            if not current:
+                raise CascadeError("Rebound managed configuration could not be read")
+            return ManagedConfigRebindResult(
+                previous=dict(previous),
+                current=current,
+                sync=sync,
+            )
+
+    async def inspect_rebind_target(
+        self,
+        server_key: str,
+        interface_id: str,
+        public_key: str,
+    ) -> dict[str, str]:
+        """Validate and describe one existing Cascade peer without binding it."""
+        public_key = public_key.strip()
+        if not public_key:
+            raise CascadeError("Public key is required")
+        server = self.get_server(server_key)
+        if not server.enabled:
+            raise CascadeError(f"Cascade server is disabled: {server_key}")
+        api = self.get_api(server_key)
+        interfaces = await api.list_interfaces()
+        if not any(str(item.get("id") or "") == interface_id for item in interfaces):
+            raise CascadeNotFound(
+                f"Interface {interface_id} was not found on {server_key}"
+            )
+
+        matches = [
+            item
+            for item in await api.list_peers(interface_id)
+            if str(item.get("publicKey") or "").strip() == public_key
+        ]
+        if not matches:
+            raise CascadeNotFound("No Cascade peer has the supplied public key")
+        if len(matches) != 1:
+            raise CascadeError("Multiple Cascade peers have the supplied public key")
+        listed_peer = matches[0]
+        target_id = str(listed_peer.get("id") or "").strip()
+        if not target_id:
+            raise CascadeError("Matched Cascade peer has no ID")
+
+        target = {**listed_peer, **await api.get_peer(target_id, interface_id)}
+        target_public_key = str(target.get("publicKey") or public_key).strip()
+        if target_public_key != public_key:
+            raise CascadeError("Cascade peer public key changed during validation")
+        peer_type = str(target.get("peerType") or "").strip().casefold()
+        if peer_type and peer_type != "client":
+            raise CascadeError("Only client peers can be bound to configurations")
+        group_id = str(target.get("groupId") or "").strip()
+        if not group_id:
+            raise CascadeError("Cascade peer has no client group")
+        client_group = await api.resolve_client_group_name(group_id)
+        if not client_group:
+            raise CascadeError("Cascade peer client group could not be resolved")
+        allowed_groups = {
+            value.casefold(): value for value in server.selectable_client_groups
+        }
+        if client_group.casefold() not in allowed_groups:
+            raise CascadeError("Cascade peer client group is not assignable")
+        await api.download_config(target_id, interface_id)
+        return {
+            "cascade_peer_id": target_id,
+            "public_key": target_public_key,
+            "peer_name": str(target.get("name") or target_id),
+            "client_group": allowed_groups[client_group.casefold()],
+        }
 
     async def build_managed_peer_name(
         self,

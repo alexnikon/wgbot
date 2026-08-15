@@ -143,9 +143,7 @@ def prune_backups(
 
 
 def _create_archive(
-    environment: Path,
-    database: Path,
-    cascade_servers: Path,
+    sources: dict[str, Path],
     destination: Path,
     now: datetime,
 ) -> None:
@@ -156,15 +154,18 @@ def _create_archive(
     backup_dir = destination.parent.parent
     with tempfile.TemporaryDirectory(prefix=".wgbot-backup-", dir=backup_dir) as raw:
         staging = Path(raw)
-        staged_environment = staging / ".env"
-        staged_database = staging / "wgbot.db"
-        staged_registry = staging / "cascade_servers.json"
         temporary_archive = staging / destination.name
 
-        staged_environment.write_bytes(environment.read_bytes())
-        staged_environment.chmod(0o600)
-        backup_sqlite(database, staged_database)
-        backup_json(cascade_servers, staged_registry)
+        if ".env" in sources:
+            staged_environment = staging / ".env"
+            staged_environment.write_bytes(sources[".env"].read_bytes())
+            staged_environment.chmod(0o600)
+        if "wgbot.db" in sources:
+            backup_sqlite(sources["wgbot.db"], staging / "wgbot.db")
+        if "cascade_servers.json" in sources:
+            backup_json(
+                sources["cascade_servers.json"], staging / "cascade_servers.json"
+            )
 
         with zipfile.ZipFile(
             temporary_archive,
@@ -172,9 +173,9 @@ def _create_archive(
             compression=zipfile.ZIP_DEFLATED,
             compresslevel=9,
         ) as archive:
-            archive.write(staged_environment, arcname=".env")
-            archive.write(staged_database, arcname="wgbot.db")
-            archive.write(staged_registry, arcname="cascade_servers.json")
+            for name in (".env", "wgbot.db", "cascade_servers.json"):
+                if name in sources:
+                    archive.write(staging / name, arcname=name)
 
         with zipfile.ZipFile(temporary_archive) as archive:
             invalid_entry = archive.testzip()
@@ -211,19 +212,25 @@ def create_runtime_backup(
     backup_dir = root / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
 
+    source_paths = {
+        ".env": environment,
+        "wgbot.db": database,
+        "cascade_servers.json": cascade_servers,
+    }
+    sources = {name: path for name, path in source_paths.items() if path.is_file()}
     missing = [
         str(path.relative_to(root))
-        for path in (environment, database, cascade_servers)
+        for path in source_paths.values()
         if not path.is_file()
     ]
-    if missing:
+    if not sources:
         removed = prune_backups(
             backup_dir,
             retention_days=retention_days,
             now=now,
         )
         print(
-            "INFO: Runtime backup skipped; missing required files: "
+            "INFO: Runtime backup skipped; no source files are available: "
             f"{', '.join(missing)}; removed={len(removed)} "
             f"retention_days={retention_days}"
         )
@@ -232,16 +239,22 @@ def create_runtime_backup(
     day = now.strftime("%d-%m-%y")
     timestamp = now.strftime("%d-%m-%y-%H-%M-%S")
     destination = backup_dir / day / f"wgbot-{timestamp}.zip"
-    _create_archive(environment, database, cascade_servers, destination, now)
+    _create_archive(sources, destination, now)
 
     removed = prune_backups(
         backup_dir,
         retention_days=retention_days,
         now=now,
     )
+    if missing:
+        print(
+            "INFO: Runtime backup is incomplete; missing source files: "
+            f"{', '.join(missing)}; entries={len(sources)}"
+        )
     print(
         "Runtime backup complete: created=1 "
-        f"removed={len(removed)} retention_days={retention_days}"
+        f"entries={len(sources)} removed={len(removed)} "
+        f"retention_days={retention_days}"
     )
     return [destination]
 

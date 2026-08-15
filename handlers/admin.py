@@ -552,6 +552,17 @@ def config_details_keyboard(config: dict[str, Any]) -> InlineKeyboardMarkup:
         ),
     ]
     if config["role"] == MANAGED_CONFIG_ROLE:
+        if can_download and config["admin_enabled"] and not config["enabled"]:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="🔗 Перепривязать peer",
+                        callback_data=AdminConfigCallback(
+                            action="rebind", user_id=user_id, peer_id=peer_id
+                        ).pack(),
+                    )
+                ]
+            )
         action = "deactivate" if config["admin_enabled"] else "restore"
         text = "⏸ Деактивировать" if config["admin_enabled"] else "♻️ Восстановить"
         rows.append(
@@ -585,19 +596,32 @@ def config_details_keyboard(config: dict[str, Any]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def config_error_back_keyboard(user_id: int, peer_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+def config_error_back_keyboard(
+    user_id: int, peer_id: int, *, allow_rebind: bool = False
+) -> InlineKeyboardMarkup:
+    rows = []
+    if allow_rebind:
+        rows.append(
             [
                 InlineKeyboardButton(
-                    text="⬅️ Назад",
+                    text="🔗 Перепривязать peer",
                     callback_data=AdminConfigCallback(
-                        action="view", user_id=user_id, peer_id=peer_id
+                        action="rebind", user_id=user_id, peer_id=peer_id
                     ).pack(),
                 )
             ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=AdminConfigCallback(
+                    action="view", user_id=user_id, peer_id=peer_id
+                ).pack(),
+            )
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def config_display_name(config: dict[str, Any]) -> str:
@@ -2196,8 +2220,12 @@ async def download_paid_client_config(
     except CascadeNotFound:
         await edit_bound_message(
             callback.message,
-            "❌ Peer отсутствует в Cascade. Создай новый конфиг.",
-            reply_markup=config_error_back_keyboard(callback_data.user_id, callback_data.peer_id),
+            "❌ Peer отсутствует в Cascade. Перепривяжи его или создай новый конфиг.",
+            reply_markup=config_error_back_keyboard(
+                callback_data.user_id,
+                callback_data.peer_id,
+                allow_rebind=True,
+            ),
         )
         return
     except CascadeError:
@@ -2222,6 +2250,263 @@ async def download_paid_client_config(
         callback_data.peer_id,
         "admin_download_config",
         server_key=str(config["server_key"]),
+    )
+
+
+@router.callback_query(AdminConfigCallback.filter(F.action == "rebind"))
+async def start_config_rebind(
+    callback: types.CallbackQuery,
+    db: Database,
+    cascade_router: CascadeRouter,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+    callback_data: AdminConfigCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    config = db.get_admin_managed_config(callback_data.peer_id, callback_data.user_id)
+    if (
+        not config
+        or not config.get("has_active_access")
+        or not config.get("admin_enabled")
+        or config.get("enabled")
+    ):
+        await edit_bound_message(
+            callback.message,
+            "❌ Перепривязка доступна только для активного недоступного конфига.",
+            reply_markup=config_error_back_keyboard(
+                callback_data.user_id, callback_data.peer_id
+            ),
+        )
+        return
+    servers = [server.server_key for server in cascade_router.get_enabled_servers()]
+    if not servers:
+        await edit_bound_message(
+            callback.message,
+            "❌ Нет активных Cascade-серверов.",
+            reply_markup=config_error_back_keyboard(
+                callback_data.user_id, callback_data.peer_id
+            ),
+        )
+        return
+    admin_workflows.set(
+        callback.from_user.id,
+        "rebind_select_server",
+        user_id=callback_data.user_id,
+        peer_id=callback_data.peer_id,
+        servers=servers,
+        service_chat_id=callback.message.chat.id,
+        service_message_id=callback.message.message_id,
+    )
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=cascade_router.get_server_name(server_key),
+                callback_data=AdminConfigCallback(
+                    action="rebind_server",
+                    user_id=callback_data.user_id,
+                    peer_id=callback_data.peer_id,
+                    value=index,
+                ).pack(),
+            )
+        ]
+        for index, server_key in enumerate(servers)
+    ]
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="admin_flow_cancel")])
+    await edit_bound_message(
+        callback.message,
+        f"Перепривязка «{config_display_name(config)}»\n\nВыбери сервер.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@router.callback_query(AdminConfigCallback.filter(F.action == "rebind_server"))
+async def select_rebind_server(
+    callback: types.CallbackQuery,
+    cascade_router: CascadeRouter,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+    callback_data: AdminConfigCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    flow = admin_workflows.get(callback.from_user.id)
+    servers = flow.get("servers", []) if flow else []
+    if (
+        not flow
+        or flow.get("state") != "rebind_select_server"
+        or int(flow.get("user_id", 0)) != callback_data.user_id
+        or int(flow.get("peer_id", 0)) != callback_data.peer_id
+        or not 0 <= callback_data.value < len(servers)
+    ):
+        await edit_bound_message(callback.message, "❌ Сценарий перепривязки устарел.")
+        return
+    server_key = str(servers[callback_data.value])
+    try:
+        interfaces = await cascade_router.list_server_interfaces(server_key)
+    except CascadeError:
+        logger.exception("Failed to list interfaces for config rebind")
+        await edit_bound_message(
+            callback.message,
+            "❌ Не удалось получить интерфейсы сервера.",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    options = [
+        {
+            "id": str(item.get("id") or ""),
+            "name": str(item.get("name") or item.get("address") or "Интерфейс"),
+        }
+        for item in interfaces
+        if item.get("id")
+    ]
+    if not options:
+        await edit_bound_message(
+            callback.message,
+            "❌ На сервере нет доступных интерфейсов.",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    admin_workflows.set(
+        callback.from_user.id,
+        "rebind_select_interface",
+        **{key: value for key, value in flow.items() if key not in {"state", "servers"}},
+        server_key=server_key,
+        interfaces=options,
+    )
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=f"{item['name']} · {item['id'][:8]}",
+                callback_data=AdminConfigCallback(
+                    action="rebind_interface",
+                    user_id=callback_data.user_id,
+                    peer_id=callback_data.peer_id,
+                    value=index,
+                ).pack(),
+            )
+        ]
+        for index, item in enumerate(options)
+    ]
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="admin_flow_cancel")])
+    await edit_bound_message(
+        callback.message,
+        f"Сервер: {cascade_router.get_server_name(server_key)}\n\nВыбери интерфейс.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@router.callback_query(AdminConfigCallback.filter(F.action == "rebind_interface"))
+async def select_rebind_interface(
+    callback: types.CallbackQuery,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+    callback_data: AdminConfigCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    flow = admin_workflows.get(callback.from_user.id)
+    interfaces = flow.get("interfaces", []) if flow else []
+    if (
+        not flow
+        or flow.get("state") != "rebind_select_interface"
+        or int(flow.get("user_id", 0)) != callback_data.user_id
+        or int(flow.get("peer_id", 0)) != callback_data.peer_id
+        or not 0 <= callback_data.value < len(interfaces)
+    ):
+        await edit_bound_message(callback.message, "❌ Сценарий перепривязки устарел.")
+        return
+    interface = interfaces[callback_data.value]
+    admin_workflows.set(
+        callback.from_user.id,
+        "await_rebind_public_key",
+        **{key: value for key, value in flow.items() if key not in {"state", "interfaces"}},
+        interface_id=str(interface["id"]),
+        interface_name=str(interface["name"]),
+    )
+    await edit_bound_message(
+        callback.message,
+        "Введи public key существующего Cascade peer.",
+        reply_markup=cancel_keyboard(),
+    )
+
+
+@router.callback_query(AdminConfigCallback.filter(F.action == "rebind_confirm"))
+async def confirm_config_rebind(
+    callback: types.CallbackQuery,
+    db: Database,
+    cascade_router: CascadeRouter,
+    admin_workflows: AdminWorkflowService,
+    safe_answer_callback,
+    callback_data: AdminConfigCallback,
+) -> None:
+    await safe_answer_callback(callback)
+    if not is_admin(callback.from_user.id):
+        return
+    flow = admin_workflows.get(callback.from_user.id)
+    if (
+        not flow
+        or flow.get("state") != "confirm_rebind"
+        or int(flow.get("user_id", 0)) != callback_data.user_id
+        or int(flow.get("peer_id", 0)) != callback_data.peer_id
+    ):
+        await edit_bound_message(callback.message, "❌ Подтверждение перепривязки устарело.")
+        return
+    try:
+        result = await cascade_router.rebind_managed_config(
+            callback_data.user_id,
+            callback_data.peer_id,
+            str(flow["server_key"]),
+            str(flow["interface_id"]),
+            str(flow["public_key"]),
+        )
+    except CascadeNotFound:
+        await edit_bound_message(
+            callback.message,
+            "❌ Старый или новый peer не найден. Данные не изменены.",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    except CascadeError:
+        logger.exception("Failed to rebind managed configuration")
+        await edit_bound_message(
+            callback.message,
+            "❌ Не удалось перепривязать peer. Данные не изменены.",
+            reply_markup=cancel_keyboard(),
+        )
+        return
+    admin_workflows.clear(callback.from_user.id)
+    db.log_admin_config_rebind(
+        callback.from_user.id,
+        callback_data.user_id,
+        callback_data.peer_id,
+        result.previous,
+        result.current,
+    )
+    warning = ""
+    if result.sync["failed"]:
+        db.add_provisioning_task(
+            callback_data.user_id,
+            "sync_client_state",
+            {},
+            f"Failed peers: {result.sync['failed']}",
+        )
+        warning = "\n\n⚠️ Часть конфигов будет синхронизирована автоматически."
+    refreshed = db.get_admin_managed_config(callback_data.peer_id, callback_data.user_id)
+    await edit_bound_message(
+        callback.message,
+        f"✅ Peer перепривязан.\n\n"
+        f"Peer: {result.current['peer_name']}\n"
+        f"Группа: {result.current['client_group']}\n"
+        f"Обновлено: {result.sync['updated']} · "
+        f"Отсутствует: {result.sync['missing']} · Ошибок: {result.sync['failed']}"
+        f"{warning}",
+        reply_markup=config_details_keyboard(refreshed)
+        if refreshed
+        else client_card_keyboard(callback_data.user_id),
     )
 
 
@@ -3007,6 +3292,152 @@ async def capture_admin_input(
             ),
             reply_markup=keyboard,
         )
+    elif state == "await_rebind_public_key":
+        public_key = (message.text or "").strip()
+        if (
+            not public_key
+            or len(public_key) > 256
+            or any(character.isspace() or ord(character) < 32 for character in public_key)
+        ):
+            await edit_telegram_text(
+                bot,
+                chat_id=flow["service_chat_id"],
+                message_id=flow["service_message_id"],
+                text="Public key должен быть одной непустой строкой.",
+                reply_markup=cancel_keyboard(),
+            )
+            with suppress(Exception):
+                await message.delete()
+            return
+        try:
+            target = await cascade_router.inspect_rebind_target(
+                str(flow["server_key"]),
+                str(flow["interface_id"]),
+                public_key,
+            )
+        except CascadeNotFound:
+            await edit_telegram_text(
+                bot,
+                chat_id=flow["service_chat_id"],
+                message_id=flow["service_message_id"],
+                text="❌ Peer с таким public key не найден на выбранном интерфейсе.",
+                reply_markup=cancel_keyboard(),
+            )
+            with suppress(Exception):
+                await message.delete()
+            return
+        except CascadeError:
+            logger.exception("Failed to inspect Cascade peer for config rebind")
+            await edit_telegram_text(
+                bot,
+                chat_id=flow["service_chat_id"],
+                message_id=flow["service_message_id"],
+                text="❌ Не удалось проверить peer. Проверь public key и Cascade.",
+                reply_markup=cancel_keyboard(),
+            )
+            with suppress(Exception):
+                await message.delete()
+            return
+        bound = db.get_client_peer_by_cascade_id(
+            str(flow["server_key"]),
+            str(flow["interface_id"]),
+            str(target["cascade_peer_id"]),
+        )
+        if bound and int(bound["id"]) != int(flow["peer_id"]):
+            await edit_telegram_text(
+                bot,
+                chat_id=flow["service_chat_id"],
+                message_id=flow["service_message_id"],
+                text="❌ Этот Cascade peer уже привязан к другому конфигу.",
+                reply_markup=cancel_keyboard(),
+            )
+            with suppress(Exception):
+                await message.delete()
+            return
+        other_configs = [
+            item
+            for item in db.get_managed_client_configs(int(flow["user_id"]))
+            if int(item["id"]) != int(flow["peer_id"])
+        ]
+        if other_configs:
+            groups = {
+                str(item.get("client_group") or "").strip().casefold()
+                for item in other_configs
+            }
+            if "" in groups or len(groups) != 1:
+                await edit_telegram_text(
+                    bot,
+                    chat_id=flow["service_chat_id"],
+                    message_id=flow["service_message_id"],
+                    text="❌ Группа остальных конфигов клиента не подтверждена.",
+                    reply_markup=cancel_keyboard(),
+                )
+                with suppress(Exception):
+                    await message.delete()
+                return
+            if str(target["client_group"]).casefold() not in groups:
+                await edit_telegram_text(
+                    bot,
+                    chat_id=flow["service_chat_id"],
+                    message_id=flow["service_message_id"],
+                    text=(
+                        f"❌ Группа peer «{target['client_group']}» не совпадает "
+                        "с группой клиента."
+                    ),
+                    reply_markup=cancel_keyboard(),
+                )
+                with suppress(Exception):
+                    await message.delete()
+                return
+        current = db.get_client_peer(int(flow["peer_id"]), int(flow["user_id"]))
+        if not current or current.get("role") != MANAGED_CONFIG_ROLE:
+            admin_workflows.clear(message.from_user.id)
+            await edit_telegram_text(
+                bot,
+                chat_id=flow["service_chat_id"],
+                message_id=flow["service_message_id"],
+                text="❌ Конфиг больше не существует.",
+                reply_markup=client_card_keyboard(int(flow["user_id"])),
+            )
+            with suppress(Exception):
+                await message.delete()
+            return
+        admin_workflows.set(
+            message.from_user.id,
+            "confirm_rebind",
+            **{key: value for key, value in flow.items() if key != "state"},
+            public_key=public_key,
+            target=target,
+        )
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Перепривязать",
+                        callback_data=AdminConfigCallback(
+                            action="rebind_confirm",
+                            user_id=int(flow["user_id"]),
+                            peer_id=int(flow["peer_id"]),
+                        ).pack(),
+                    )
+                ],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="admin_flow_cancel")],
+            ]
+        )
+        await edit_telegram_text(
+            bot,
+            chat_id=flow["service_chat_id"],
+            message_id=flow["service_message_id"],
+            text=(
+                f"Перепривязать «{config_display_name(current)}»?\n\n"
+                f"Старый peer: {current['peer_name']} · {current['cascade_peer_id']}\n"
+                f"Новый peer: {target['peer_name']} · {target['cascade_peer_id']}\n"
+                f"Сервер: {flow['server_key']}\n"
+                f"Интерфейс: {flow['interface_name']} · {flow['interface_id']}\n"
+                f"Группа: {target['client_group']}"
+            ),
+            reply_markup=keyboard,
+        )
     elif state in {"await_config_name", "await_config_rename"}:
         try:
             config_name = normalize_config_name(message.text or "")
@@ -3246,7 +3677,7 @@ async def cancel_flow(
         and flow.get("user_id")
         and any(
             marker in str(flow.get("state", ""))
-            for marker in ("config", "expiry", "group")
+            for marker in ("config", "expiry", "group", "rebind")
         )
     ):
         reply_markup = client_card_keyboard(int(flow["user_id"]))

@@ -26,7 +26,11 @@ from callbacks import (
     PaymentMethodCallback,
     RefundConfirmationCallback,
 )
-from cascade_api import CascadeNotFound, ClientDeletionResult
+from cascade_api import (
+    CascadeNotFound,
+    ClientDeletionResult,
+    ManagedConfigRebindResult,
+)
 from database import ActiveSubscriptionError, Database
 from handlers.access import (
     client_config_keyboard,
@@ -40,6 +44,7 @@ from handlers.admin import (
     ActiveAdminWorkflow,
     AdminWorkflowService,
     admin_dashboard_keyboard,
+    capture_admin_input,
     client_card_keyboard,
     client_group_label,
     client_list_keyboard,
@@ -47,6 +52,7 @@ from handlers.admin import (
     config_error_back_keyboard,
     config_list_keyboard,
     confirm_client_deletion,
+    confirm_config_rebind,
     confirm_expiry_change,
     confirm_forced_client_deletion,
     confirmed_managed_client_group,
@@ -59,6 +65,9 @@ from handlers.admin import (
     reject_legacy_config_group_selection,
     select_client_group_change,
     select_config_interface,
+    select_rebind_interface,
+    select_rebind_server,
+    start_config_rebind,
 )
 from handlers.fallback import handle_unknown
 from handlers.navigation import cmd_start, handle_main_callback, home_message
@@ -1017,6 +1026,243 @@ class TelegramDatabaseTests(unittest.TestCase):
         self.assertIn("🗑 Удалить навсегда", labels)
         self.assertIn("Сервер: Finland (fin-1)", format_config(config, "Finland"))
         self.assertIn("Группа: не подтверждена", format_config(config, "Finland"))
+
+    def test_unavailable_paid_config_can_be_prepared_for_manual_rebind(self):
+        self.db.ensure_subscription(
+            10, "alice", "2099-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        self.db.save_client_peer(
+            10,
+            "fin-1",
+            "if-old",
+            "missing-peer",
+            "old-key",
+            "old-peer",
+            enabled=False,
+            config_name="Phone",
+            client_group="Basic",
+        )
+        peer_id = int(self.db.get_managed_client_configs(10)[0]["id"])
+        config = self.db.get_admin_managed_config(peer_id, 10)
+        labels = [
+            button.text
+            for row in config_details_keyboard(config).inline_keyboard
+            for button in row
+        ]
+        self.assertIn("🔗 Перепривязать peer", labels)
+        error_labels = [
+            button.text
+            for row in config_error_back_keyboard(
+                10, peer_id, allow_rebind=True
+            ).inline_keyboard
+            for button in row
+        ]
+        self.assertIn("🔗 Перепривязать peer", error_labels)
+
+        workflow = AdminWorkflowService(self.db)
+        callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=99),
+            message=SimpleNamespace(
+                edit_text=AsyncMock(),
+                chat=SimpleNamespace(id=99),
+                message_id=500,
+            ),
+        )
+        cascade_router = SimpleNamespace(
+            get_enabled_servers=lambda: [SimpleNamespace(server_key="fin-1")],
+            get_server_name=lambda _server_key: "Finland",
+            list_server_interfaces=AsyncMock(
+                return_value=[{"id": "if-new", "name": "wg-new"}]
+            ),
+            inspect_rebind_target=AsyncMock(
+                return_value={
+                    "cascade_peer_id": "replacement-peer",
+                    "public_key": "replacement-key",
+                    "peer_name": "replacement-name",
+                    "client_group": "Basic",
+                }
+            ),
+        )
+
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                start_config_rebind(
+                    callback,
+                    self.db,
+                    cascade_router,
+                    workflow,
+                    AsyncMock(),
+                    AdminConfigCallback(action="rebind", user_id=10, peer_id=peer_id),
+                )
+            )
+            asyncio.run(
+                select_rebind_server(
+                    callback,
+                    cascade_router,
+                    workflow,
+                    AsyncMock(),
+                    AdminConfigCallback(
+                        action="rebind_server",
+                        user_id=10,
+                        peer_id=peer_id,
+                        value=0,
+                    ),
+                )
+            )
+            asyncio.run(
+                select_rebind_interface(
+                    callback,
+                    workflow,
+                    AsyncMock(),
+                    AdminConfigCallback(
+                        action="rebind_interface",
+                        user_id=10,
+                        peer_id=peer_id,
+                        value=0,
+                    ),
+                )
+            )
+
+        self.assertEqual(workflow.get(99)["state"], "await_rebind_public_key")
+        telegram_bot = SimpleNamespace(edit_message_text=AsyncMock())
+        message = SimpleNamespace(
+            from_user=SimpleNamespace(id=99),
+            text="replacement-key",
+            chat=SimpleNamespace(id=99),
+            message_id=501,
+            delete=AsyncMock(),
+        )
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                capture_admin_input(
+                    message,
+                    telegram_bot,
+                    self.db,
+                    cascade_router,
+                    workflow,
+                )
+            )
+
+        prepared = workflow.get(99)
+        self.assertEqual(prepared["state"], "confirm_rebind")
+        self.assertEqual(prepared["public_key"], "replacement-key")
+        self.assertIn(
+            "replacement-peer",
+            telegram_bot.edit_message_text.await_args.kwargs["rich_message"].html,
+        )
+        cascade_router.inspect_rebind_target.assert_awaited_once_with(
+            "fin-1", "if-new", "replacement-key"
+        )
+
+    def test_confirm_manual_rebind_audits_and_queues_failed_sync(self):
+        self.db.ensure_subscription(
+            10, "alice", "2099-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        self.db.save_client_peer(
+            10,
+            "fin-1",
+            "if-old",
+            "missing-peer",
+            "old-key",
+            "old-peer",
+            enabled=False,
+            config_name="Phone",
+            client_group="Basic",
+        )
+        current = self.db.get_managed_client_configs(10)[0]
+        peer_id = int(current["id"])
+        workflow = AdminWorkflowService(self.db)
+        workflow.set(
+            99,
+            "confirm_rebind",
+            user_id=10,
+            peer_id=peer_id,
+            server_key="fin-2",
+            interface_id="if-new",
+            public_key="replacement-key",
+        )
+        previous = dict(current)
+        rebound = {
+            **current,
+            "server_key": "fin-2",
+            "interface_id": "if-new",
+            "cascade_peer_id": "replacement-peer",
+            "public_key": "replacement-key",
+            "peer_name": "replacement-name",
+        }
+        cascade_router = SimpleNamespace(
+            rebind_managed_config=AsyncMock(
+                return_value=ManagedConfigRebindResult(
+                    previous=previous,
+                    current=rebound,
+                    sync={"total": 1, "updated": 0, "missing": 0, "failed": 1},
+                )
+            )
+        )
+        callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=99),
+            message=SimpleNamespace(edit_text=AsyncMock()),
+        )
+
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                confirm_config_rebind(
+                    callback,
+                    self.db,
+                    cascade_router,
+                    workflow,
+                    AsyncMock(),
+                    AdminConfigCallback(
+                        action="rebind_confirm", user_id=10, peer_id=peer_id
+                    ),
+                )
+            )
+
+        self.assertIsNone(workflow.get(99))
+        self.assertIn("синхронизирована автоматически", callback.message.edit_text.await_args.args[0])
+        with closing(sqlite3.connect(self.path)) as connection:
+            operation = connection.execute(
+                "SELECT operation FROM operation_logs ORDER BY id DESC LIMIT 1"
+            ).fetchone()[0]
+            queued = connection.execute(
+                "SELECT operation FROM provisioning_tasks WHERE status='pending'"
+            ).fetchone()[0]
+        self.assertEqual(operation, "admin_rebind_config")
+        self.assertEqual(queued, "sync_client_state")
+
+    def test_stale_manual_rebind_confirmation_does_not_call_cascade(self):
+        workflow = AdminWorkflowService(self.db)
+        workflow.set(
+            99,
+            "confirm_rebind",
+            user_id=10,
+            peer_id=20,
+            server_key="fin-1",
+            interface_id="if-a",
+            public_key="key-a",
+        )
+        cascade_router = SimpleNamespace(rebind_managed_config=AsyncMock())
+        callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=99),
+            message=SimpleNamespace(edit_text=AsyncMock()),
+        )
+
+        with patch("handlers.admin.is_admin", return_value=True):
+            asyncio.run(
+                confirm_config_rebind(
+                    callback,
+                    self.db,
+                    cascade_router,
+                    workflow,
+                    AsyncMock(),
+                    AdminConfigCallback(
+                        action="rebind_confirm", user_id=11, peer_id=20
+                    ),
+                )
+            )
+
+        cascade_router.rebind_managed_config.assert_not_awaited()
+        self.assertIn("устарело", callback.message.edit_text.await_args.args[0])
 
     def test_admin_permanent_delete_is_owner_bound_and_audited(self):
         self.db.save_client_peer(

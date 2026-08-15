@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 import unittest
@@ -107,22 +108,56 @@ class RuntimeBackupTests(unittest.TestCase):
 
         self.assertEqual(list((self.root / "backups").rglob("*.zip")), [])
 
-    def test_missing_required_file_logs_info_and_skips_archive(self):
-        for path in (self.environment, self.database, self.registry):
-            with self.subTest(path=path.relative_to(self.root)):
-                content = path.read_bytes()
-                path.unlink()
+    def test_rejects_corrupt_available_database_without_partial_archive(self):
+        self.database.write_bytes(b"not a sqlite database")
+        self.registry.unlink()
+
+        with self.assertRaises(sqlite3.DatabaseError):
+            self._create_backup()
+
+        self.assertEqual(list((self.root / "backups").rglob("*.zip")), [])
+        self.assertEqual(list((self.root / "backups").glob(".wgbot-backup-*")), [])
+
+    def test_creates_partial_archive_for_every_available_source_combination(self):
+        source_names = (".env", "wgbot.db", "cascade_servers.json")
+        for mask in range(8):
+            with self.subTest(mask=mask):
+                case_root = self.root / f"case-{mask}"
+                case_root.mkdir()
+                if mask & 1:
+                    shutil.copy2(self.environment, case_root / ".env")
+                if mask & 2:
+                    (case_root / "DB").mkdir()
+                    shutil.copy2(self.database, case_root / "DB" / "wgbot.db")
+                if mask & 4:
+                    (case_root / "secrets").mkdir()
+                    shutil.copy2(
+                        self.registry,
+                        case_root / "secrets" / "cascade_servers.json",
+                    )
+                expected_names = [
+                    name for index, name in enumerate(source_names) if mask & (1 << index)
+                ]
                 output = io.StringIO()
 
                 with contextlib.redirect_stdout(output):
-                    created = self._create_backup()
+                    created = backup_runtime.create_runtime_backup(
+                        case_root,
+                        now=datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
+                    )
 
-                self.assertEqual(created, [])
-                self.assertIn("INFO: Runtime backup skipped", output.getvalue())
-                self.assertIn(str(path.relative_to(self.root)), output.getvalue())
-                self.assertEqual(list((self.root / "backups").rglob("*.zip")), [])
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(content)
+                if not expected_names:
+                    self.assertEqual(created, [])
+                    self.assertIn("INFO: Runtime backup skipped", output.getvalue())
+                    self.assertEqual(list((case_root / "backups").rglob("*.zip")), [])
+                    continue
+                self.assertEqual(len(created), 1)
+                with zipfile.ZipFile(created[0]) as archive:
+                    self.assertEqual(archive.namelist(), expected_names)
+                    self.assertIsNone(archive.testzip())
+                if len(expected_names) < len(source_names):
+                    self.assertIn("INFO: Runtime backup is incomplete", output.getvalue())
+                    self.assertIn(f"entries={len(expected_names)}", output.getvalue())
 
     def test_does_not_overwrite_archive_with_same_timestamp(self):
         created = self._create_backup()

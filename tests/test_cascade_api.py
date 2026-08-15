@@ -1450,5 +1450,278 @@ class CascadeAPITests(unittest.IsolatedAsyncioTestCase):
                 except FileNotFoundError:
                     pass
 
+    async def test_rebind_managed_config_validates_target_and_syncs_access(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.ensure_subscription(
+            10, "alice", "2099-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        db.save_client_peer(
+            10,
+            "server-a",
+            "if-a",
+            "missing-peer",
+            "old-key",
+            "old-name",
+            config_name="Phone",
+            client_group="Basic",
+        )
+        peer_id = int(db.get_managed_client_configs(10)[0]["id"])
+
+        class MissingAPI:
+            async def get_peer(self, cascade_peer_id, interface_id=None):
+                raise CascadeNotFound("missing")
+
+        class TargetAPI:
+            def __init__(self):
+                self.updated = []
+                self.enabled = []
+
+            async def list_interfaces(self):
+                return [{"id": "if-b"}]
+
+            async def list_peers(self, interface_id=None):
+                return [
+                    {
+                        "id": "replacement-peer",
+                        "name": "replacement-name",
+                        "publicKey": "replacement-key",
+                    }
+                ]
+
+            async def get_peer(self, cascade_peer_id, interface_id=None):
+                return {
+                    "id": cascade_peer_id,
+                    "name": "replacement-name",
+                    "publicKey": "replacement-key",
+                    "peerType": "client",
+                    "groupId": "basic-id",
+                }
+
+            async def resolve_client_group_name(self, group_id):
+                return "Basic" if group_id == "basic-id" else None
+
+            async def download_config(self, cascade_peer_id, interface_id=None):
+                return b"[Interface]\nPrivateKey = test"
+
+            async def update_expiry(self, cascade_peer_id, expiry, interface_id=None):
+                self.updated.append((cascade_peer_id, expiry, interface_id))
+
+            async def enable_peer(self, cascade_peer_id, interface_id=None):
+                self.enabled.append((cascade_peer_id, interface_id))
+
+            async def disable_peer(self, cascade_peer_id, interface_id=None):
+                raise AssertionError("Active peer should be enabled")
+
+        servers = [
+            CascadeServer("server-a", "https://a.test", "a" * 32, "if-a", 1, 10),
+            CascadeServer("server-b", "https://b.test", "b" * 32, "if-b", 2, 10),
+        ]
+        router = CascadeRouter(db, servers=[])
+        target_api = TargetAPI()
+        router.servers = servers
+        router.apis = {"server-a": MissingAPI(), "server-b": target_api}
+        try:
+            result = await router.rebind_managed_config(
+                10, peer_id, "server-b", "if-b", "replacement-key"
+            )
+
+            self.assertEqual(result.previous["cascade_peer_id"], "missing-peer")
+            self.assertEqual(result.current["cascade_peer_id"], "replacement-peer")
+            self.assertEqual(result.current["config_name"], "Phone")
+            self.assertEqual(result.current["client_group"], "Basic")
+            self.assertEqual(result.current["enabled"], 1)
+            self.assertEqual(result.sync["updated"], 1)
+            self.assertEqual(target_api.enabled, [("replacement-peer", "if-b")])
+            self.assertEqual(target_api.updated[0][0], "replacement-peer")
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_rebind_managed_config_requires_old_peer_to_be_missing(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.ensure_subscription(
+            10, "alice", "2099-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        db.save_client_peer(10, "server-a", "if-a", "old-peer", "old-key", "old")
+        peer_id = int(db.get_managed_client_configs(10)[0]["id"])
+
+        old_api = SimpleNamespace(get_peer=AsyncMock(return_value={"id": "old-peer"}))
+        target_api = SimpleNamespace(list_interfaces=AsyncMock())
+        router = CascadeRouter(db, servers=[])
+        router.servers = [
+            CascadeServer("server-a", "https://a.test", "a" * 32, "if-a", 1, 10),
+            CascadeServer("server-b", "https://b.test", "b" * 32, "if-b", 2, 10),
+        ]
+        router.apis = {"server-a": old_api, "server-b": target_api}
+        try:
+            with self.assertRaisesRegex(CascadeError, "still available"):
+                await router.rebind_managed_config(
+                    10, peer_id, "server-b", "if-b", "replacement-key"
+                )
+            target_api.list_interfaces.assert_not_awaited()
+            self.assertEqual(
+                db.get_client_peer(peer_id, 10)["cascade_peer_id"], "old-peer"
+            )
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_rebind_managed_config_blocks_on_old_peer_api_failure(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.ensure_subscription(
+            10, "alice", "2099-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        db.save_client_peer(10, "server-a", "if-a", "old-peer", "old-key", "old")
+        peer_id = int(db.get_managed_client_configs(10)[0]["id"])
+
+        old_api = SimpleNamespace(
+            get_peer=AsyncMock(side_effect=CascadeError("server unavailable"))
+        )
+        target_api = SimpleNamespace(list_interfaces=AsyncMock())
+        router = CascadeRouter(db, servers=[])
+        router.servers = [
+            CascadeServer("server-a", "https://a.test", "a" * 32, "if-a", 1, 10),
+            CascadeServer("server-b", "https://b.test", "b" * 32, "if-b", 2, 10),
+        ]
+        router.apis = {"server-a": old_api, "server-b": target_api}
+        try:
+            with self.assertRaisesRegex(CascadeError, "server unavailable"):
+                await router.rebind_managed_config(
+                    10, peer_id, "server-b", "if-b", "replacement-key"
+                )
+            target_api.list_interfaces.assert_not_awaited()
+            self.assertEqual(
+                db.get_client_peer(peer_id, 10)["cascade_peer_id"], "old-peer"
+            )
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    async def test_inspect_rebind_target_rejects_interface_and_key_ambiguity(self):
+        api = SimpleNamespace(
+            list_interfaces=AsyncMock(return_value=[]),
+            list_peers=AsyncMock(),
+        )
+        router = CascadeRouter(None, servers=[])
+        router.servers = [
+            CascadeServer("server-a", "https://a.test", "a" * 32, "if-a", 1, 10)
+        ]
+        router.apis = {"server-a": api}
+
+        with self.assertRaisesRegex(CascadeNotFound, "Interface"):
+            await router.inspect_rebind_target("server-a", "missing-if", "key-a")
+        api.list_peers.assert_not_awaited()
+
+        api.list_interfaces.return_value = [{"id": "if-a"}]
+        api.list_peers.return_value = []
+        with self.assertRaisesRegex(CascadeNotFound, "public key"):
+            await router.inspect_rebind_target("server-a", "if-a", "key-a")
+
+        api.list_peers.return_value = [
+            {"id": "peer-a", "publicKey": "key-a"},
+            {"id": "peer-b", "publicKey": "key-a"},
+        ]
+        with self.assertRaisesRegex(CascadeError, "Multiple"):
+            await router.inspect_rebind_target("server-a", "if-a", "key-a")
+
+    async def test_rebind_managed_config_rejects_group_mismatch(self):
+        handle, path = tempfile.mkstemp(suffix=".db")
+        os.close(handle)
+        db = Database(path)
+        db.ensure_subscription(
+            10, "alice", "2099-01-01 00:00:00", "paid", "30_days", "stars"
+        )
+        db.save_client_peer(
+            10,
+            "server-a",
+            "if-a",
+            "missing-peer",
+            "old-key",
+            "old",
+            config_name="Phone",
+            client_group="Basic",
+        )
+        db.save_client_peer(
+            10,
+            "server-a",
+            "if-a",
+            "existing-peer",
+            "existing-key",
+            "existing",
+            config_name="Tablet",
+            client_group="Basic",
+        )
+        peer_id = int(db.get_managed_client_configs(10)[0]["id"])
+
+        missing_api = SimpleNamespace(
+            get_peer=AsyncMock(side_effect=CascadeNotFound("missing"))
+        )
+        target_api = SimpleNamespace(
+            list_interfaces=AsyncMock(return_value=[{"id": "if-b"}]),
+            list_peers=AsyncMock(
+                return_value=[
+                    {
+                        "id": "replacement-peer",
+                        "publicKey": "replacement-key",
+                    }
+                ]
+            ),
+            get_peer=AsyncMock(
+                return_value={
+                    "id": "replacement-peer",
+                    "publicKey": "replacement-key",
+                    "groupId": "premium-id",
+                }
+            ),
+            resolve_client_group_name=AsyncMock(return_value="Premium"),
+            download_config=AsyncMock(),
+        )
+        router = CascadeRouter(db, servers=[])
+        router.servers = [
+            CascadeServer("server-a", "https://a.test", "a" * 32, "if-a", 1, 10),
+            CascadeServer(
+                "server-b",
+                "https://b.test",
+                "b" * 32,
+                "if-b",
+                2,
+                10,
+                assignable_client_groups=("Basic", "Premium"),
+            ),
+        ]
+        router.apis = {"server-a": missing_api, "server-b": target_api}
+        try:
+            with self.assertRaisesRegex(CascadeError, "does not match"):
+                await router.rebind_managed_config(
+                    10, peer_id, "server-b", "if-b", "replacement-key"
+                )
+            target_api.download_config.assert_awaited_once_with(
+                "replacement-peer", "if-b"
+            )
+            self.assertEqual(
+                db.get_client_peer(peer_id, 10)["cascade_peer_id"], "missing-peer"
+            )
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(path + suffix)
+                except FileNotFoundError:
+                    pass
+
 if __name__ == "__main__":
     unittest.main()

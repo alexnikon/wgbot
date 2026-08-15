@@ -543,6 +543,95 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(config["admin_enabled"], 0)
         self.assertIsNone(self.db.get_admin_managed_config(peer_id, 11))
 
+    def test_rebind_managed_config_preserves_local_lifecycle(self):
+        self.db.save_client_peer(
+            10,
+            "server-a",
+            "if-a",
+            "missing-peer",
+            "old-key",
+            "old-name",
+            config_name="Phone",
+            admin_enabled=True,
+            client_group="Basic",
+        )
+        previous = self.db.get_managed_client_configs(10)[0]
+
+        rebound = self.db.rebind_managed_config(
+            int(previous["id"]),
+            10,
+            server_key="server-b",
+            interface_id="if-b",
+            cascade_peer_id="replacement-peer",
+            public_key="replacement-key",
+            peer_name="replacement-name",
+            client_group="Basic",
+        )
+
+        self.assertIsNotNone(rebound)
+        self.assertEqual(rebound["id"], previous["id"])
+        self.assertEqual(rebound["config_name"], "Phone")
+        self.assertEqual(rebound["admin_enabled"], 1)
+        self.assertEqual(rebound["created_at"], previous["created_at"])
+        self.assertEqual(rebound["server_key"], "server-b")
+        self.assertEqual(rebound["interface_id"], "if-b")
+        self.assertEqual(rebound["cascade_peer_id"], "replacement-peer")
+        self.assertEqual(rebound["public_key"], "replacement-key")
+        self.assertEqual(rebound["enabled"], 0)
+
+    def test_rebind_managed_config_rejects_bound_target_without_mutation(self):
+        self.db.save_client_peer(
+            10, "server-a", "if-a", "missing-peer", "old-key", "old-name"
+        )
+        self.db.save_client_peer(
+            11, "server-b", "if-b", "replacement-peer", "replacement-key", "other"
+        )
+        previous = self.db.get_managed_client_configs(10)[0]
+
+        rebound = self.db.rebind_managed_config(
+            int(previous["id"]),
+            10,
+            server_key="server-b",
+            interface_id="if-b",
+            cascade_peer_id="replacement-peer",
+            public_key="replacement-key",
+            peer_name="replacement-name",
+            client_group="Basic",
+        )
+
+        self.assertIsNone(rebound)
+        self.assertEqual(
+            self.db.get_client_peer(int(previous["id"]), 10)["cascade_peer_id"],
+            "missing-peer",
+        )
+
+    def test_admin_config_rebind_audit_contains_old_and_new_identity(self):
+        previous = {
+            "server_key": "server-a",
+            "interface_id": "if-a",
+            "cascade_peer_id": "old-peer",
+            "public_key": "old-key",
+        }
+        current = {
+            "server_key": "server-b",
+            "interface_id": "if-b",
+            "cascade_peer_id": "new-peer",
+            "public_key": "new-key",
+        }
+
+        self.db.log_admin_config_rebind(99, 10, 20, previous, current)
+
+        with closing(sqlite3.connect(self.path)) as connection:
+            operation, raw_details = connection.execute(
+                "SELECT operation, details FROM operation_logs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        details = json.loads(raw_details)
+        self.assertEqual(operation, "admin_rebind_config")
+        self.assertEqual(details["admin_id"], 99)
+        self.assertEqual(details["peer_id"], 20)
+        self.assertEqual(details["previous"], previous)
+        self.assertEqual(details["current"], current)
+
     def test_permanent_config_delete_is_owner_bound_and_allows_every_managed_config(self):
         self.db.save_client_peer(
             10, "server-a", "if-a", "primary", "key-a", "alice", "primary"

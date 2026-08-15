@@ -1572,6 +1572,80 @@ class Database:
             ).fetchone()
             return dict(row) if row else None
 
+    def rebind_managed_config(
+        self,
+        peer_id: int,
+        user_id: int,
+        *,
+        server_key: str,
+        interface_id: str,
+        cascade_peer_id: str,
+        public_key: str,
+        peer_name: str,
+        client_group: str,
+    ) -> dict[str, Any] | None:
+        """Atomically replace the Cascade identity of one managed config."""
+        try:
+            with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                conn.execute("BEGIN IMMEDIATE")
+                current = conn.execute(
+                    """
+                    SELECT * FROM client_peers
+                    WHERE id=? AND telegram_user_id=? AND role='managed'
+                      AND server_key IS NOT NULL AND interface_id IS NOT NULL
+                      AND cascade_peer_id IS NOT NULL
+                    """,
+                    (peer_id, user_id),
+                ).fetchone()
+                if not current:
+                    return None
+                conflict = conn.execute(
+                    """
+                    SELECT id FROM client_peers
+                    WHERE id != ? AND (
+                        (server_key=? AND interface_id=? AND cascade_peer_id=?)
+                        OR public_key=?
+                    )
+                    LIMIT 1
+                    """,
+                    (
+                        peer_id,
+                        server_key,
+                        interface_id,
+                        cascade_peer_id,
+                        public_key,
+                    ),
+                ).fetchone()
+                if conflict:
+                    return None
+                conn.execute(
+                    """
+                    UPDATE client_peers
+                    SET server_key=?, interface_id=?, cascade_peer_id=?,
+                        public_key=?, peer_name=?, client_group=?, enabled=0,
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE id=? AND telegram_user_id=? AND role='managed'
+                    """,
+                    (
+                        server_key,
+                        interface_id,
+                        cascade_peer_id,
+                        public_key,
+                        peer_name,
+                        client_group,
+                        peer_id,
+                        user_id,
+                    ),
+                )
+                rebound = conn.execute(
+                    "SELECT * FROM client_peers WHERE id=?", (peer_id,)
+                ).fetchone()
+                conn.commit()
+                return dict(rebound) if rebound else None
+        except sqlite3.IntegrityError:
+            return None
+
     def get_managed_client_configs(
         self, user_id: int, *, available_only: bool = False
     ) -> list[dict[str, Any]]:
@@ -1730,6 +1804,41 @@ class Database:
             conn.execute(
                 "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
                 (f"telegram:{user_id}", operation, details),
+            )
+            conn.commit()
+
+    def log_admin_config_rebind(
+        self,
+        admin_id: int,
+        user_id: int,
+        peer_id: int,
+        previous: dict[str, Any],
+        current: dict[str, Any],
+    ) -> None:
+        """Audit old and new Cascade identities for a manual config repair."""
+
+        def identity(config: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "server_key": config.get("server_key"),
+                "interface_id": config.get("interface_id"),
+                "cascade_peer_id": config.get("cascade_peer_id"),
+                "public_key": config.get("public_key"),
+            }
+
+        details = json.dumps(
+            {
+                "admin_id": admin_id,
+                "client_id": user_id,
+                "peer_id": peer_id,
+                "previous": identity(previous),
+                "current": identity(current),
+            },
+            sort_keys=True,
+        )
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO operation_logs(peer_name, operation, details) VALUES (?, ?, ?)",
+                (f"telegram:{user_id}", "admin_rebind_config", details),
             )
             conn.commit()
 
