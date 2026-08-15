@@ -29,6 +29,7 @@ RUN groupadd --gid 1000 app \
 COPY --from=builder /build/.venv /app/.venv
 COPY --chown=app:app *.py ./
 COPY --chown=app:app handlers ./handlers
+COPY --chown=app:app scripts/backup_runtime.py ./scripts/backup_runtime.py
 
 USER app
 

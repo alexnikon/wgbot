@@ -37,6 +37,14 @@ def _get_bool(name: str, default: bool = False) -> bool:
     raise ValueError(f"{name} must be a boolean value")
 
 
+def _get_interval_seconds(name: str, default: int) -> int:
+    """Read an interval where zero disables the periodic task."""
+    value = _get_int(name, default, minimum=0)
+    if 0 < value < 60:
+        raise ValueError(f"{name} must be zero or at least 60")
+    return value
+
+
 
 # Telegram Bot Configuration
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -74,6 +82,12 @@ WEBHOOK_MAX_BODY_BYTES = _get_int("WEBHOOK_MAX_BODY_BYTES", 65536, minimum=1024)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 INTERNAL_METRICS_TOKEN = os.getenv("INTERNAL_METRICS_TOKEN", "").strip()
 METRICS_PORT = _get_int("METRICS_PORT", 9100, minimum=1, maximum=65535)
+
+# Runtime backups
+BACKUP_INTERVAL_SECONDS = _get_interval_seconds(
+    "BACKUP_INTERVAL_SECONDS", 21600
+)
+RUNTIME_BACKUP_ROOT = Path(os.getenv("RUNTIME_BACKUP_ROOT", "/runtime"))
 
 # Support
 SUPPORT_URL = os.getenv("SUPPORT_URL")

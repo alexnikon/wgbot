@@ -3,14 +3,16 @@ import logging
 import signal
 from collections.abc import Awaitable, Callable, Generator
 from contextlib import contextmanager, suppress
+from pathlib import Path
 
 import uvicorn
 
 import bot as bot_module
 import webhook_server
-from config import METRICS_PORT
+from config import BACKUP_INTERVAL_SECONDS, METRICS_PORT, RUNTIME_BACKUP_ROOT
 from logging_setup import configure_logging
 from prometheus_exporter import create_metrics_app
+from scripts.backup_runtime import create_runtime_backup
 from services import AppServices, create_services
 
 configure_logging()
@@ -48,10 +50,42 @@ def create_metrics_server(services: AppServices) -> NoSignalServer:
     return create_http_server(create_metrics_app(services), METRICS_PORT)
 
 
+async def run_periodic_backups(
+    root: Path,
+    interval_seconds: int,
+    shutdown_requested: asyncio.Event,
+) -> None:
+    """Create runtime backups periodically until application shutdown."""
+    if interval_seconds == 0:
+        logger.info("Periodic runtime backups are disabled")
+        await shutdown_requested.wait()
+        return
+
+    logger.info(
+        "Periodic runtime backups scheduled every %s seconds",
+        interval_seconds,
+    )
+    while True:
+        try:
+            await asyncio.wait_for(
+                shutdown_requested.wait(),
+                timeout=interval_seconds,
+            )
+            return
+        except TimeoutError:
+            pass
+
+        try:
+            await asyncio.to_thread(create_runtime_backup, root)
+        except Exception:
+            logger.exception("Periodic runtime backup failed")
+
+
 async def supervise_runtime(
     bot_runtime: Awaitable[None],
     webhook_runtime: Awaitable[None],
     metrics_runtime: Awaitable[None],
+    backup_runtime: Awaitable[None],
     shutdown_requested: asyncio.Event,
     request_shutdown: Callable[[], Awaitable[None]],
 ) -> None:
@@ -59,10 +93,11 @@ async def supervise_runtime(
     bot_task = asyncio.create_task(bot_runtime, name="bot-polling")
     webhook_task = asyncio.create_task(webhook_runtime, name="webhook-server")
     metrics_task = asyncio.create_task(metrics_runtime, name="metrics-server")
+    backup_task = asyncio.create_task(backup_runtime, name="runtime-backup")
     shutdown_task = asyncio.create_task(
         shutdown_requested.wait(), name="shutdown-signal"
     )
-    runtime_tasks = (bot_task, webhook_task, metrics_task)
+    runtime_tasks = (bot_task, webhook_task, metrics_task, backup_task)
     all_tasks = (*runtime_tasks, shutdown_task)
     try:
         done, _ = await asyncio.wait(all_tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -132,6 +167,11 @@ async def main() -> None:
             bot_module.main(services),
             server.serve(),
             metrics_server.serve(),
+            run_periodic_backups(
+                RUNTIME_BACKUP_ROOT,
+                BACKUP_INTERVAL_SECONDS,
+                shutdown_requested,
+            ),
             shutdown_requested,
             request_shutdown,
         )
