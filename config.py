@@ -37,12 +37,31 @@ def _get_bool(name: str, default: bool = False) -> bool:
     raise ValueError(f"{name} must be a boolean value")
 
 
-def _get_interval_seconds(name: str, default: int) -> int:
-    """Read an interval where zero disables the periodic task."""
-    value = _get_int(name, default, minimum=0)
-    if 0 < value < 60:
-        raise ValueError(f"{name} must be zero or at least 60")
-    return value
+def _get_backup_interval_hours(name: str, default: str) -> int:
+    """Read a supported UTC-aligned backup interval in hours."""
+    raw_value = os.getenv(name, default).strip().lower()
+    if raw_value == "0":
+        return 0
+
+    allowed_hours = {1, 2, 3, 4, 6, 8, 12, 24}
+    if not raw_value.endswith("h"):
+        raise ValueError(
+            f"{name} must be 0 or one of: "
+            + ", ".join(f"{hours}h" for hours in sorted(allowed_hours))
+        )
+    try:
+        hours = int(raw_value[:-1])
+    except ValueError as exc:
+        raise ValueError(
+            f"{name} must be 0 or one of: "
+            + ", ".join(f"{value}h" for value in sorted(allowed_hours))
+        ) from exc
+    if hours not in allowed_hours:
+        raise ValueError(
+            f"{name} must be 0 or one of: "
+            + ", ".join(f"{value}h" for value in sorted(allowed_hours))
+        )
+    return hours
 
 
 
@@ -84,9 +103,7 @@ INTERNAL_METRICS_TOKEN = os.getenv("INTERNAL_METRICS_TOKEN", "").strip()
 METRICS_PORT = _get_int("METRICS_PORT", 9100, minimum=1, maximum=65535)
 
 # Runtime backups
-BACKUP_INTERVAL_SECONDS = _get_interval_seconds(
-    "BACKUP_INTERVAL_SECONDS", 21600
-)
+BACKUP_INTERVAL_HOURS = _get_backup_interval_hours("BACKUP_INTERVAL", "6h")
 RUNTIME_BACKUP_ROOT = Path(os.getenv("RUNTIME_BACKUP_ROOT", "/runtime"))
 
 # Support

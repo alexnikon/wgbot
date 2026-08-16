@@ -26,7 +26,7 @@ services:
       WEBHOOK_MAX_BODY_BYTES: ${WEBHOOK_MAX_BODY_BYTES:-65536}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       METRICS_PORT: ${METRICS_PORT:-9100}
-      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-21600}
+      BACKUP_INTERVAL: ${BACKUP_INTERVAL:-6h}
       RUNTIME_BACKUP_ROOT: /runtime
     ports:
       - "127.0.0.1:8001:8001"
@@ -35,8 +35,6 @@ services:
       - ./DB:/app/data
       - ./secrets/cascade_servers.json:/run/secrets/cascade_servers.json:ro
       - ./.env:/runtime/.env:ro
-      - ./DB:/runtime/DB:ro
-      - ./secrets/cascade_servers.json:/runtime/secrets/cascade_servers.json:ro
       - ./backups:/runtime/backups
     read_only: true
     tmpfs:

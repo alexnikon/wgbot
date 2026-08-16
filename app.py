@@ -3,13 +3,20 @@ import logging
 import signal
 from collections.abc import Awaitable, Callable, Generator
 from contextlib import contextmanager, suppress
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import uvicorn
 
 import bot as bot_module
 import webhook_server
-from config import BACKUP_INTERVAL_SECONDS, METRICS_PORT, RUNTIME_BACKUP_ROOT
+from config import (
+    BACKUP_INTERVAL_HOURS,
+    CASCADE_SERVERS_FILE,
+    DATABASE_FILE,
+    METRICS_PORT,
+    RUNTIME_BACKUP_ROOT,
+)
 from logging_setup import configure_logging
 from prometheus_exporter import create_metrics_app
 from scripts.backup_runtime import create_runtime_backup
@@ -52,33 +59,69 @@ def create_metrics_server(services: AppServices) -> NoSignalServer:
 
 async def run_periodic_backups(
     root: Path,
-    interval_seconds: int,
+    interval_hours: int,
     shutdown_requested: asyncio.Event,
+    *,
+    environment: Path,
+    database: Path,
+    cascade_servers: Path,
+    backup_dir: Path,
 ) -> None:
-    """Create runtime backups periodically until application shutdown."""
-    if interval_seconds == 0:
+    """Create runtime backups at UTC-aligned calendar boundaries."""
+    if interval_hours == 0:
         logger.info("Periodic runtime backups are disabled")
         await shutdown_requested.wait()
         return
 
+    next_run = next_backup_at(datetime.now(UTC), interval_hours)
     logger.info(
-        "Periodic runtime backups scheduled every %s seconds",
-        interval_seconds,
+        "Periodic runtime backups scheduled: interval=%sh next_run=%s",
+        interval_hours,
+        next_run.strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
     while True:
-        try:
-            await asyncio.wait_for(
-                shutdown_requested.wait(),
-                timeout=interval_seconds,
-            )
+        if shutdown_requested.is_set():
             return
-        except TimeoutError:
-            pass
+
+        delay = max(0.0, (next_run - datetime.now(UTC)).total_seconds())
+        if await _wait_for_shutdown(shutdown_requested, delay):
+            return
 
         try:
-            await asyncio.to_thread(create_runtime_backup, root)
+            await asyncio.to_thread(
+                create_runtime_backup,
+                root,
+                environment=environment,
+                database=database,
+                cascade_servers=cascade_servers,
+                backup_dir=backup_dir,
+            )
         except Exception:
             logger.exception("Periodic runtime backup failed")
+        next_run = next_backup_at(datetime.now(UTC), interval_hours)
+
+
+def next_backup_at(now: datetime, interval_hours: int) -> datetime:
+    """Return the next strict UTC calendar boundary for an interval."""
+    if interval_hours <= 0 or 24 % interval_hours != 0:
+        raise ValueError("Backup interval must be a positive divisor of 24 hours")
+    now = now.astimezone(UTC)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    interval = timedelta(hours=interval_hours)
+    elapsed_slots = (now - midnight) // interval
+    return midnight + (elapsed_slots + 1) * interval
+
+
+async def _wait_for_shutdown(
+    shutdown_requested: asyncio.Event,
+    delay: float,
+) -> bool:
+    """Wait until shutdown or return false when a schedule boundary arrives."""
+    try:
+        await asyncio.wait_for(shutdown_requested.wait(), timeout=delay)
+    except TimeoutError:
+        return False
+    return True
 
 
 async def supervise_runtime(
@@ -169,8 +212,12 @@ async def main() -> None:
             metrics_server.serve(),
             run_periodic_backups(
                 RUNTIME_BACKUP_ROOT,
-                BACKUP_INTERVAL_SECONDS,
+                BACKUP_INTERVAL_HOURS,
                 shutdown_requested,
+                environment=RUNTIME_BACKUP_ROOT / ".env",
+                database=Path(DATABASE_FILE),
+                cascade_servers=CASCADE_SERVERS_FILE,
+                backup_dir=RUNTIME_BACKUP_ROOT / "backups",
             ),
             shutdown_requested,
             request_shutdown,

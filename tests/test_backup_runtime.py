@@ -90,6 +90,36 @@ class RuntimeBackupTests(unittest.TestCase):
         self.assertEqual(values, [("saved",), ("from-wal",)])
         self.assertEqual(list((self.root / "backups").glob(".wgbot-backup-*")), [])
 
+    def test_explicit_runtime_paths_include_current_wal_data(self):
+        runtime_root = self.root / "runtime"
+        runtime_root.mkdir()
+        backup_dir = runtime_root / "backups"
+
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("INSERT INTO values_table VALUES ('explicit-wal')")
+            connection.commit()
+            self.assertTrue(Path(f"{self.database}-wal").exists())
+
+            created = backup_runtime.create_runtime_backup(
+                runtime_root,
+                now=datetime(2030, 1, 2, 6, 0, 0, tzinfo=UTC),
+                environment=self.environment,
+                database=self.database,
+                cascade_servers=self.registry,
+                backup_dir=backup_dir,
+            )
+
+        with zipfile.ZipFile(created[0]) as archive:
+            extracted_database = runtime_root / "explicit.db"
+            extracted_database.write_bytes(archive.read("wgbot.db"))
+        with closing(sqlite3.connect(extracted_database)) as connection:
+            values = connection.execute(
+                "SELECT value FROM values_table ORDER BY rowid"
+            ).fetchall()
+
+        self.assertEqual(values, [("saved",), ("explicit-wal",)])
+
     def test_rejects_invalid_cascade_registry_without_partial_archive(self):
         self.registry.write_text("{invalid", encoding="utf-8")
 

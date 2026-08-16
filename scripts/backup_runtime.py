@@ -197,19 +197,24 @@ def create_runtime_backup(
     root: Path,
     label: str | None = None,
     now: datetime | None = None,
+    *,
+    environment: Path | None = None,
+    database: Path | None = None,
+    cascade_servers: Path | None = None,
+    backup_dir: Path | None = None,
 ) -> list[Path]:
     """Back up runtime data and apply age retention from the root .env file."""
     del label  # Kept temporarily for compatibility with older callers.
     now = (now or datetime.now(UTC)).astimezone(UTC)
-    environment = root / ".env"
-    database = root / "DB" / "wgbot.db"
-    cascade_servers = root / "secrets" / "cascade_servers.json"
+    environment = environment or root / ".env"
+    database = database or root / "DB" / "wgbot.db"
+    cascade_servers = cascade_servers or root / "secrets" / "cascade_servers.json"
 
     values = read_env(environment) if environment.is_file() else {}
     retention_days = parse_nonnegative_int(
         values, "BACKUP_RETENTION_DAYS", DEFAULT_RETENTION_DAYS
     )
-    backup_dir = root / "backups"
+    backup_dir = backup_dir or root / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
 
     source_paths = {
@@ -218,9 +223,14 @@ def create_runtime_backup(
         "cascade_servers.json": cascade_servers,
     }
     sources = {name: path for name, path in source_paths.items() if path.is_file()}
+    source_labels = {
+        ".env": ".env",
+        "wgbot.db": "DB/wgbot.db",
+        "cascade_servers.json": "secrets/cascade_servers.json",
+    }
     missing = [
-        str(path.relative_to(root))
-        for path in source_paths.values()
+        source_labels[name]
+        for name, path in source_paths.items()
         if not path.is_file()
     ]
     if not sources:
