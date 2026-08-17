@@ -390,6 +390,29 @@ class ChatPanelService:
             reply_markup,
         )
 
+    async def recreate(
+        self,
+        chat_id: int,
+        user_id: int,
+        content: TelegramTextLike,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> Message:
+        """Send a fresh panel at the bottom before removing the previous one."""
+        panel = await asyncio.to_thread(self.db.get_telegram_ui_panel, user_id)
+        sent = await send_telegram_text(
+            self.bot,
+            chat_id,
+            content,
+            reply_markup=reply_markup,
+        )
+        await self._save(user_id, chat_id, sent.message_id)
+        if panel and (
+            int(panel["chat_id"]) != chat_id
+            or int(panel["message_id"]) != sent.message_id
+        ):
+            await self._delete_message(int(panel["chat_id"]), int(panel["message_id"]))
+        return sent
+
     async def delete_user_message(self, message: Message) -> None:
         try:
             await message.delete()

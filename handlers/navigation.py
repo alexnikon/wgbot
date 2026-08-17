@@ -31,7 +31,7 @@ async def cmd_start(
     notify_admins=None,
     cascade_router: CascadeRouter | None = None,
 ):
-    """Reset transient UI state and restore the main control panel."""
+    """Reset transient UI state and recreate the control panel at the bottom."""
     user_id = message.from_user.id
     await chat_panel.delete_user_message(message)
     clear_admin_state(user_id)
@@ -54,7 +54,7 @@ async def cmd_start(
                     f"Причина: {claim.conflict_reason or 'неизвестно'}\n"
                     "Проверь заявку в разделе «Ожидают привязки»."
                 )
-            await chat_panel.restore_or_create(
+            await chat_panel.recreate(
                 message.chat.id,
                 user_id,
                 "✅ Заявка отправлена администратору. Доступ появится после подтверждения.",
@@ -96,7 +96,7 @@ async def cmd_start(
                     f"Username: @{getattr(message.from_user, 'username', None) or 'нет'}"
                     f"{warning}"
                 )
-            await chat_panel.restore_or_create(
+            await chat_panel.recreate(
                 message.chat.id,
                 user_id,
                 "✅ Профиль привязан. Доступ готов к использованию."
@@ -105,7 +105,7 @@ async def cmd_start(
                 create_main_menu_keyboard(user_id),
             )
             return
-        await chat_panel.restore_or_create(
+        await chat_panel.recreate(
             message.chat.id,
             user_id,
             "❌ Ссылка недействительна или истекла. Попроси администратора перевыпустить её.",
@@ -115,7 +115,7 @@ async def cmd_start(
     client_reader = getattr(db, "get_admin_client_details", None)
     if callable(client_reader) and client_reader(user_id):
         db.upsert_client(user_id, getattr(message.from_user, "username", None))
-    await chat_panel.restore_or_create(
+    await chat_panel.recreate(
         message.chat.id,
         user_id,
         home_message(db, user_id),

@@ -571,7 +571,7 @@ class ComplimentaryCascadeTests(unittest.IsolatedAsyncioTestCase):
         invitation = self.db.create_client_invitation("invite_user", 99)
         self.db.set_invitation_complimentary(invitation["id"], 99, True)
         panel = SimpleNamespace(
-            delete_user_message=AsyncMock(), restore_or_create=AsyncMock()
+            delete_user_message=AsyncMock(), recreate=AsyncMock()
         )
         notify_admins = AsyncMock()
         message = SimpleNamespace(

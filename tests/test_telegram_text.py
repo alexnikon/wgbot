@@ -403,6 +403,55 @@ class TelegramTextTests(unittest.IsolatedAsyncioTestCase):
         bot.send_rich_message.assert_awaited_once()
         bot.send_message.assert_not_awaited()
 
+    async def test_recreate_panel_saves_new_message_before_deleting_old(self):
+        events = []
+        stored_panel = {"chat_id": 10, "message_id": 77}
+
+        def set_panel(_user_id, chat_id, message_id):
+            events.append(("save", chat_id, message_id))
+            stored_panel.update(chat_id=chat_id, message_id=message_id)
+
+        database = SimpleNamespace(
+            get_telegram_ui_panel=lambda _user_id: dict(stored_panel),
+            set_telegram_ui_panel=set_panel,
+        )
+
+        async def delete_message(**kwargs):
+            events.append(("delete", kwargs["chat_id"], kwargs["message_id"]))
+
+        sent_message = SimpleNamespace(message_id=88)
+        bot = SimpleNamespace(
+            send_rich_message=AsyncMock(return_value=sent_message),
+            send_message=AsyncMock(),
+            delete_message=AsyncMock(side_effect=delete_message),
+        )
+        panel = ChatPanelService(bot, database)
+
+        result = await panel.recreate(10, 10, welcome_message())
+
+        self.assertIs(result, sent_message)
+        self.assertEqual(stored_panel, {"chat_id": 10, "message_id": 88})
+        self.assertEqual(events, [("save", 10, 88), ("delete", 10, 77)])
+
+    async def test_recreate_panel_keeps_old_panel_when_send_fails(self):
+        stored_panel = {"chat_id": 10, "message_id": 77}
+        database = SimpleNamespace(
+            get_telegram_ui_panel=lambda _user_id: dict(stored_panel),
+            set_telegram_ui_panel=lambda *_args: self.fail("panel must not be replaced"),
+        )
+        bot = SimpleNamespace(
+            send_rich_message=AsyncMock(side_effect=RuntimeError("offline")),
+            send_message=AsyncMock(),
+            delete_message=AsyncMock(),
+        )
+        panel = ChatPanelService(bot, database)
+
+        with self.assertRaisesRegex(RuntimeError, "offline"):
+            await panel.recreate(10, 10, welcome_message())
+
+        self.assertEqual(stored_panel, {"chat_id": 10, "message_id": 77})
+        bot.delete_message.assert_not_awaited()
+
     def test_authored_templates_do_not_bypass_rich_runtime(self):
         root = Path(__file__).resolve().parents[1]
         paths = [

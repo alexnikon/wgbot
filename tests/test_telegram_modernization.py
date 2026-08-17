@@ -415,8 +415,8 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(keyboard.inline_keyboard[1][0].callback_data, "main")
         fake_panel.adopt.assert_awaited_once_with(instruction_message, 10)
 
-    async def test_hidden_start_deletes_input_and_restores_panel(self):
-        panel = SimpleNamespace(delete_user_message=AsyncMock(), restore_or_create=AsyncMock())
+    async def test_hidden_start_deletes_input_and_recreates_panel(self):
+        panel = SimpleNamespace(delete_user_message=AsyncMock(), recreate=AsyncMock())
         clear_admin_state = unittest.mock.Mock()
         message = SimpleNamespace(from_user=SimpleNamespace(id=42), chat=SimpleNamespace(id=42))
         keyboard = SimpleNamespace()
@@ -430,15 +430,15 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
             user_action_locks=UserActionLocks(),
         )
         panel.delete_user_message.assert_awaited_once_with(message)
-        panel.restore_or_create.assert_awaited_once()
-        self.assertIs(panel.restore_or_create.await_args.args[3], keyboard)
+        panel.recreate.assert_awaited_once()
+        self.assertIs(panel.recreate.await_args.args[3], keyboard)
         clear_admin_state.assert_called_once_with(42)
 
     async def test_start_is_not_debounced_and_bypasses_admin_workflow(self):
         active_restores = 0
         maximum_active_restores = 0
 
-        async def restore_or_create(*_args):
+        async def recreate(*_args):
             nonlocal active_restores, maximum_active_restores
             active_restores += 1
             maximum_active_restores = max(maximum_active_restores, active_restores)
@@ -447,7 +447,7 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
 
         panel = SimpleNamespace(
             delete_user_message=AsyncMock(),
-            restore_or_create=AsyncMock(side_effect=restore_or_create),
+            recreate=AsyncMock(side_effect=recreate),
         )
         clear_admin_state = unittest.mock.Mock()
         message = SimpleNamespace(
@@ -474,7 +474,7 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
                 user_action_locks=locks,
             ),
         )
-        self.assertEqual(panel.restore_or_create.await_count, 2)
+        self.assertEqual(panel.recreate.await_count, 2)
         self.assertEqual(maximum_active_restores, 1)
 
         workflow = SimpleNamespace(get=lambda _user_id: {"state": "await_expiry"})
@@ -482,6 +482,43 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
             for text in ("/start", "/start payload", "/start@TestBot payload"):
                 command_message = SimpleNamespace(text=text, from_user=SimpleNamespace(id=42))
                 self.assertFalse(await ActiveAdminWorkflow()(command_message, workflow))
+
+    async def test_start_claim_conflict_and_invalid_link_recreate_panel(self):
+        keyboard = SimpleNamespace()
+        notify_admins = AsyncMock()
+        for claim in (
+            SimpleNamespace(
+                status="conflict",
+                invitation={"expected_username": "expected"},
+                conflict_reason="username_mismatch",
+            ),
+            SimpleNamespace(status="invalid"),
+        ):
+            panel = SimpleNamespace(
+                delete_user_message=AsyncMock(),
+                recreate=AsyncMock(),
+            )
+            message = SimpleNamespace(
+                text="/start claim_token",
+                from_user=SimpleNamespace(id=42, username="actual"),
+                chat=SimpleNamespace(id=42),
+            )
+            database = SimpleNamespace(
+                claim_client_invitation=lambda *_args, claim=claim: claim
+            )
+
+            await cmd_start(
+                message,
+                database,
+                lambda _user_id: keyboard,
+                panel,
+                unittest.mock.Mock(),
+                user_action_locks=UserActionLocks(),
+                notify_admins=notify_admins,
+            )
+
+            panel.recreate.assert_awaited_once()
+            self.assertIs(panel.recreate.await_args.args[3], keyboard)
 
     async def test_document_callback_is_not_adopted_as_panel(self):
         middleware = bot_module.PanelTrackingMiddleware()
