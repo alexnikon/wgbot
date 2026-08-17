@@ -508,13 +508,12 @@ async def yookassa_webhook(request: Request):
             if not local_payment:
                 logger.warning("Ignoring unknown YooKassa payment %s", object_id)
                 return JSONResponse({"status": "ignored"})
-            metadata = yookassa_client.get_payment_metadata(event_data)
             matches_local = (
-                yookassa_client.get_payment_amount(event_data) == int(local_payment["amount"])
+                yookassa_client.get_payment_amount(event_data)
+                == int(local_payment["amount"])
                 and event_data.get("amount", {}).get("currency")
                 == local_payment.get("currency", "RUB")
-                and str(metadata.get("user_id") or "") == str(local_payment["user_id"])
-                and str(metadata.get("tariff_key") or "") == str(local_payment["tariff_key"])
+                and local_payment.get("payment_method") == "yookassa"
             )
             if not matches_local:
                 logger.error("Rejected mismatched YooKassa payment %s", object_id)

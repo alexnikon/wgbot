@@ -126,6 +126,7 @@ config/env.txt
 .ropeproject
 
 # mkdocs documentation
+/assets
 /site
 .DS_Store
 

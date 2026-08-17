@@ -319,17 +319,17 @@ class PaymentManager:
             if effective_username.startswith("@"):
                 effective_username = effective_username[1:]
 
-            # Payment metadata
-            metadata = {
+            # Keep customer details local; YooKassa only needs payment details.
+            local_metadata = {
                 "user_id": str(user_id),
                 "tariff_key": tariff_key,
                 "username": effective_username,
                 "description": f"Доступ к сервису на {tariff_data['name']}",
             }
             if payment_chat_id is not None:
-                metadata["payment_chat_id"] = str(payment_chat_id)
+                local_metadata["payment_chat_id"] = str(payment_chat_id)
             if payment_message_id is not None:
-                metadata["payment_message_id"] = str(payment_message_id)
+                local_metadata["payment_message_id"] = str(payment_message_id)
 
             logger.debug(
                 "Creating YooKassa payment for user %s, tariff %s, amount %s kopeks",
@@ -344,7 +344,6 @@ class PaymentManager:
                 currency="RUB",
                 description=f"Доступ к сервису на {tariff_data['name']}",
                 return_url=return_url,
-                metadata=metadata,
             )
 
             if payment_data:
@@ -370,7 +369,7 @@ class PaymentManager:
                 amount=amount,
                 payment_method="yookassa",
                 tariff_key=tariff_key,
-                metadata=metadata,
+                metadata=local_metadata,
                 currency="RUB",
                 provider_payment_charge_id=payment_id,
             )

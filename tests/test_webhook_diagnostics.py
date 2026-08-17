@@ -1,7 +1,9 @@
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
 from starlette.requests import Request
 
 import webhook_server
@@ -31,6 +33,25 @@ class WebhookDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
             webhook_server.db = self.original_database
         else:
             del webhook_server.db
+
+    async def post_yookassa_webhook(self, client, database, process):
+        with (
+            patch.object(webhook_server, "db", database),
+            patch.object(webhook_server, "yookassa_client", client, create=True),
+            patch.object(webhook_server, "process_successful_payment", process),
+        ):
+            transport = httpx.ASGITransport(app=webhook_server.app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://test"
+            ) as http_client:
+                return await http_client.post(
+                    "/webhook/yookassa",
+                    json={
+                        "type": "notification",
+                        "event": "payment.succeeded",
+                        "object": {"id": "payment-1"},
+                    },
+                )
 
     async def test_metrics_endpoint_is_disabled_without_token(self):
         with patch.object(webhook_server, "INTERNAL_METRICS_TOKEN", ""):
@@ -92,6 +113,99 @@ class WebhookDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         rich_html = client.post.await_args.kwargs["json"]["rich_message"]["html"]
         self.assertIn("<b>✅ Платеж обработан.</b>", rich_html)
         self.assertIn("<code>250</code> руб.", rich_html)
+
+    async def test_yookassa_webhook_accepts_payment_without_metadata(self):
+        payment = {
+            "id": "payment-1",
+            "status": "succeeded",
+            "amount": {"value": "150.00", "currency": "RUB"},
+        }
+        database = Mock()
+        database.get_payment_by_id.return_value = {
+            "payment_id": "payment-1",
+            "user_id": 10,
+            "amount": 15000,
+            "currency": "RUB",
+            "payment_method": "yookassa",
+            "tariff_key": "14_days",
+        }
+        client = SimpleNamespace(
+            parse_webhook=lambda body: json.loads(body),
+            get_payment=AsyncMock(return_value=payment),
+            get_payment_amount=lambda _data: 15000,
+        )
+        process = AsyncMock()
+
+        response = await self.post_yookassa_webhook(client, database, process)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok"})
+        process.assert_awaited_once_with(payment)
+
+    async def test_yookassa_webhook_rejects_local_payment_mismatches(self):
+        cases = (
+            ("amount", {"amount": 14900}),
+            ("currency", {"currency": "USD"}),
+            ("payment method", {"payment_method": "stars"}),
+        )
+        for label, override in cases:
+            with self.subTest(label=label):
+                payment = {
+                    "id": "payment-1",
+                    "status": "succeeded",
+                    "amount": {"value": "150.00", "currency": "RUB"},
+                }
+                database = Mock()
+                database.get_payment_by_id.return_value = {
+                    "payment_id": "payment-1",
+                    "user_id": 10,
+                    "amount": 15000,
+                    "currency": "RUB",
+                    "payment_method": "yookassa",
+                    "tariff_key": "14_days",
+                    **override,
+                }
+                client = SimpleNamespace(
+                    parse_webhook=lambda body: json.loads(body),
+                    get_payment=AsyncMock(return_value=payment),
+                    get_payment_amount=lambda _data: 15000,
+                )
+                process = AsyncMock()
+
+                response = await self.post_yookassa_webhook(
+                    client, database, process
+                )
+
+                self.assertEqual(response.json(), {"status": "ignored"})
+                process.assert_not_awaited()
+
+    async def test_yookassa_webhook_rejects_unknown_payment_and_status_mismatch(self):
+        cases = (
+            ("unknown payment", "succeeded", None),
+            ("status mismatch", "pending", {"payment_method": "yookassa"}),
+        )
+        for label, provider_status, local_payment in cases:
+            with self.subTest(label=label):
+                payment = {
+                    "id": "payment-1",
+                    "status": provider_status,
+                    "amount": {"value": "150.00", "currency": "RUB"},
+                }
+                database = Mock()
+                database.get_payment_by_id.return_value = local_payment
+                client = SimpleNamespace(
+                    parse_webhook=lambda body: json.loads(body),
+                    get_payment=AsyncMock(return_value=payment),
+                    get_payment_amount=lambda _data: 15000,
+                )
+                process = AsyncMock()
+
+                response = await self.post_yookassa_webhook(
+                    client, database, process
+                )
+
+                self.assertEqual(response.json(), {"status": "ignored"})
+                process.assert_not_awaited()
 
     async def test_yookassa_extension_uses_unified_payment_message(self):
         database = Mock()

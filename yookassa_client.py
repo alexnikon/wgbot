@@ -59,8 +59,13 @@ class YooKassaClient:
         if self._client is not None and not self._client.is_closed:
             await self._client.aclose()
     
-    async def create_payment(self, amount: int, currency: str, description: str, 
-                           return_url: str, metadata: dict[str, Any]) -> dict[str, Any] | None:
+    async def create_payment(
+        self,
+        amount: int,
+        currency: str,
+        description: str,
+        return_url: str,
+    ) -> dict[str, Any] | None:
         """
         Create a YooKassa payment.
         
@@ -69,8 +74,6 @@ class YooKassaClient:
             currency: Currency (RUB)
             description: Payment description
             return_url: Return URL after payment
-            metadata: Additional metadata
-            
         Returns:
             Payment data or None on error
         """
@@ -86,7 +89,6 @@ class YooKassaClient:
                 },
                 "capture": True,
                 "description": description,
-                "metadata": metadata
             }
             
             headers = self.headers.copy()
@@ -233,15 +235,3 @@ class YooKassaClient:
             return int(amount_value * 100)
         except (InvalidOperation, ValueError, TypeError):
             return 0
-    
-    def get_payment_metadata(self, payment_data: dict[str, Any]) -> dict[str, Any]:
-        """
-        Get payment metadata.
-        
-        Args:
-            payment_data: Payment data
-            
-        Returns:
-            Payment metadata
-        """
-        return payment_data.get("metadata", {})

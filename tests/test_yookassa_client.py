@@ -1,3 +1,4 @@
+import json
 import unittest
 
 import httpx
@@ -30,6 +31,37 @@ class YooKassaVerificationTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(YooKassaNotFound):
             await self.client.get_payment("payment-1")
+
+    async def test_create_payment_does_not_send_customer_metadata(self):
+        captured_body = None
+
+        def handle_request(request: httpx.Request) -> httpx.Response:
+            nonlocal captured_body
+            captured_body = json.loads(request.content)
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "id": "payment-1",
+                    "status": "pending",
+                    "confirmation": {"confirmation_url": "https://example.test/pay"},
+                },
+            )
+
+        self.client = YooKassaClient()
+        self.client._client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handle_request)
+        )
+
+        result = await self.client.create_payment(
+            amount=15000,
+            currency="RUB",
+            description="Service access for 2 weeks",
+            return_url="https://example.test/return",
+        )
+
+        self.assertEqual(result["id"], "payment-1")
+        self.assertNotIn("metadata", captured_body)
 
 
 if __name__ == "__main__":

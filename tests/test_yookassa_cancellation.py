@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -60,6 +61,45 @@ class YooKassaCancellationTests(unittest.IsolatedAsyncioTestCase):
             YooKassaCancelCallback.unpack(cancel_data),
             YooKassaCancelCallback(payment_id=payment_id),
         )
+
+    async def test_customer_metadata_is_only_persisted_locally(self):
+        client = SimpleNamespace(
+            shop_id="shop",
+            secret_key="secret",
+            create_payment=AsyncMock(
+                return_value={
+                    "id": "payment-private",
+                    "status": "pending",
+                    "confirmation": {"confirmation_url": "https://example.test/pay"},
+                }
+            ),
+        )
+        manager = PaymentManager(SimpleNamespace(), yookassa_client=client, db=self.db)
+
+        result = await manager.create_yookassa_payment(
+            424242,
+            "14_days",
+            "test_customer",
+            payment_chat_id=424242,
+            payment_message_id=99,
+        )
+
+        self.assertEqual(
+            result,
+            ("payment-private", "https://example.test/pay"),
+        )
+        provider_request = client.create_payment.await_args.kwargs
+        self.assertNotIn("metadata", provider_request)
+        serialized_request = json.dumps(provider_request)
+        self.assertNotIn("424242", serialized_request)
+        self.assertNotIn("test_customer", serialized_request)
+        payment = self.db.get_payment_by_id("payment-private")
+        metadata = json.loads(payment["metadata"])
+        self.assertEqual(metadata["user_id"], "424242")
+        self.assertEqual(metadata["username"], "test_customer")
+        self.assertEqual(metadata["tariff_key"], "14_days")
+        self.assertEqual(metadata["payment_chat_id"], "424242")
+        self.assertEqual(metadata["payment_message_id"], "99")
 
     async def test_cancel_callback_marks_attempt(self):
         self.add_payment()
