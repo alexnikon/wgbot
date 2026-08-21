@@ -202,6 +202,7 @@ def create_runtime_backup(
     database: Path | None = None,
     cascade_servers: Path | None = None,
     backup_dir: Path | None = None,
+    emit_success: bool = True,
 ) -> list[Path]:
     """Back up runtime data and apply age retention from the root .env file."""
     del label  # Kept temporarily for compatibility with older callers.
@@ -261,11 +262,12 @@ def create_runtime_backup(
             "INFO: Runtime backup is incomplete; missing source files: "
             f"{', '.join(missing)}; entries={len(sources)}"
         )
-    print(
-        "Runtime backup complete: created=1 "
-        f"entries={len(sources)} removed={len(removed)} "
-        f"retention_days={retention_days}"
-    )
+    if emit_success:
+        print(
+            "Runtime backup complete: created=1 "
+            f"entries={len(sources)} removed={len(removed)} "
+            f"retention_days={retention_days}"
+        )
     return [destination]
 
 

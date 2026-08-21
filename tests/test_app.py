@@ -181,6 +181,7 @@ class PeriodicBackupTests(unittest.IsolatedAsyncioTestCase):
 
         def create_backup(root, **paths):
             self.assertEqual(root, self.root)
+            self.assertFalse(paths.pop("emit_success"))
             self.assertEqual(paths, self.paths)
             shutdown_requested.set()
 
@@ -195,7 +196,11 @@ class PeriodicBackupTests(unittest.IsolatedAsyncioTestCase):
                 **self.paths,
             )
 
-        backup.assert_called_once_with(self.root, **self.paths)
+        backup.assert_called_once_with(
+            self.root,
+            **self.paths,
+            emit_success=False,
+        )
 
     async def test_scheduler_retries_after_backup_error(self):
         shutdown_requested = asyncio.Event()

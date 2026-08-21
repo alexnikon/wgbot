@@ -120,6 +120,59 @@ class RuntimeBackupTests(unittest.TestCase):
 
         self.assertEqual(values, [("saved",), ("explicit-wal",)])
 
+    def test_can_suppress_success_output(self):
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            created = backup_runtime.create_runtime_backup(
+                self.root,
+                now=datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
+                emit_success=False,
+            )
+
+        self.assertEqual(len(created), 1)
+        self.assertEqual(output.getvalue(), "")
+
+    def test_success_output_is_enabled_by_default(self):
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            created = self._create_backup()
+
+        self.assertEqual(len(created), 1)
+        self.assertIn("Runtime backup complete: created=1", output.getvalue())
+
+    def test_suppressed_success_keeps_incomplete_warning(self):
+        self.registry.unlink()
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            created = backup_runtime.create_runtime_backup(
+                self.root,
+                now=datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
+                emit_success=False,
+            )
+
+        self.assertEqual(len(created), 1)
+        self.assertIn("INFO: Runtime backup is incomplete", output.getvalue())
+        self.assertNotIn("Runtime backup complete", output.getvalue())
+
+    def test_suppressed_success_keeps_skipped_warning(self):
+        self.environment.unlink()
+        self.database.unlink()
+        self.registry.unlink()
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            created = backup_runtime.create_runtime_backup(
+                self.root,
+                now=datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC),
+                emit_success=False,
+            )
+
+        self.assertEqual(created, [])
+        self.assertIn("INFO: Runtime backup skipped", output.getvalue())
+
     def test_rejects_invalid_cascade_registry_without_partial_archive(self):
         self.registry.write_text("{invalid", encoding="utf-8")
 

@@ -95,6 +95,7 @@ async def run_periodic_backups(
                 database=database,
                 cascade_servers=cascade_servers,
                 backup_dir=backup_dir,
+                emit_success=False,
             )
         except Exception:
             logger.exception("Periodic runtime backup failed")
