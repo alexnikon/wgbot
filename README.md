@@ -58,6 +58,23 @@ created configuration. `assignable_client_groups` is the protected allowlist sho
 administrators when creating configurations or changing a client's unified group.
 Every allowlisted group must already exist on the corresponding Cascade server.
 
+Use `client_interfaces` to offer named interfaces to customers after they choose a
+location. Each entry contains `interface_name` (the exact, case-sensitive Cascade
+interface name), `name` (the button label), and `description` (a short customer-facing
+explanation). See `cascade_servers.example.json`; replace the example names with
+real interfaces and localize the labels and descriptions for your customers.
+Names do not establish protocol versions: configure each label to match the actual
+interface. The bot resolves names to UUIDs through Cascade and checks the selected
+binding again before creating a peer. Missing or ambiguous names block creation.
+
+Omitting `client_interfaces` preserves the legacy single-`interface_id` flow. An
+empty list disables customer creation at that location. Keep the existing
+`interface_id` for default API operations and compatibility. The list supports up
+to 10 entries; interface names and labels allow 64 characters, descriptions 240.
+All fields must be non-empty printable strings, with unique interface names.
+Restart the bot after changing the registry. Existing configurations retain their
+stored UUIDs, and the three-configuration limit applies across all versions.
+
 Add your Telegram, YooKassa, tariff, support, administrator, and Cascade settings,
 then start the service:
 

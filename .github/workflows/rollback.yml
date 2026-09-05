@@ -66,6 +66,9 @@ jobs:
 
           cd "$DEPLOY_PATH"
 
+          exec 9>.runtime.lock
+          flock -w 600 9
+
           test -r scripts/backup_runtime.py
           mkdir -p DB
           python3 scripts/backup_runtime.py --root "$DEPLOY_PATH"

@@ -22,6 +22,7 @@ from callbacks import (
     AdminClientCallback,
     AdminConfigCallback,
     ClientConfigCallback,
+    ClientConfigFlowCallback,
     PaymentMethod,
     PaymentMethodCallback,
     RefundConfirmationCallback,
@@ -895,6 +896,7 @@ class TelegramDatabaseTests(unittest.TestCase):
             self.db,
             10,
             "confirm_create",
+            token="test-token",
             config_name="Телефон",
             server_key="fin-1",
             interface_id="if-a",
@@ -922,6 +924,7 @@ class TelegramDatabaseTests(unittest.TestCase):
                 AsyncMock(),
                 AsyncMock(),
                 sender,
+                ClientConfigFlowCallback(action="create_confirm", token="test-token"),
             )
         )
 

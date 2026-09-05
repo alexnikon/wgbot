@@ -119,6 +119,9 @@ jobs:
           mkdir -p "$DEPLOY_PATH/DB" "$DEPLOY_PATH/backups" \
             "$DEPLOY_PATH/scripts" "$DEPLOY_PATH/secrets"
 
+          exec 9>"$DEPLOY_PATH/.runtime.lock"
+          flock -w 600 9
+
           install -m 644 "$staging/docker-compose.yml" "$DEPLOY_PATH/docker-compose.yml"
           install -m 755 "$staging/scripts/backup_runtime.py" \
             "$DEPLOY_PATH/scripts/backup_runtime.py"

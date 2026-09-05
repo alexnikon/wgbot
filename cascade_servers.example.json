@@ -9,9 +9,24 @@
       "priority": 10,
       "max_peers": 250,
       "client_group": "Basic",
-      "assignable_client_groups": ["Basic", "Premium"],
+      "assignable_client_groups": [
+        "Basic",
+        "Premium"
+      ],
       "enabled": true,
-      "verify_tls": true
+      "verify_tls": true,
+      "client_interfaces": [
+        {
+          "interface_name": "wg11",
+          "name": "AWG 2.0",
+          "description": "For VPN apps that support AmneziaWG 2.0."
+        },
+        {
+          "interface_name": "awg3",
+          "name": "AWG 3.1",
+          "description": "For VPN apps that support AmneziaWG 3.1."
+        }
+      ]
     }
   ]
 }

@@ -1,0 +1,10 @@
+# Apply with iptables-restore --noflush before publishing TCP/9200 on 0.0.0.0.
+# DOCKER-USER must already exist. Install once, then persist these additions.
+*filter
+:WGBOT_METRICS - [0:0]
+-A WGBOT_METRICS -i lo -j RETURN
+-A WGBOT_METRICS -i wg12 -s 10.8.2.0/24 -j RETURN
+-A WGBOT_METRICS -j DROP
+-I INPUT 1 -p tcp --dport 9200 -j WGBOT_METRICS
+-I DOCKER-USER 1 -p tcp -m conntrack --ctstate DNAT --ctdir ORIGINAL --ctorigdstport 9200 -j WGBOT_METRICS
+COMMIT

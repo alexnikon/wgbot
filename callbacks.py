@@ -72,3 +72,9 @@ class RefundConfirmationCallback(CallbackData, prefix="refund"):
 
 class StarApprovalCallback(CallbackData, prefix="stapprove"):
     review_id: str
+
+
+class ClientConfigFlowCallback(CallbackData, prefix="cflow"):
+    action: str
+    token: str
+    value: int = 0
