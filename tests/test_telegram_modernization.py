@@ -49,6 +49,7 @@ from handlers.admin import (
     client_card_keyboard,
     client_group_label,
     client_list_keyboard,
+    client_management_keyboard,
     config_details_keyboard,
     config_error_back_keyboard,
     config_list_keyboard,
@@ -594,6 +595,17 @@ class TelegramModernizationTests(unittest.IsolatedAsyncioTestCase):
             button.text for row in admin_dashboard_keyboard().inline_keyboard for button in row
         ]
         self.assertIn("👥 Клиенты и скидки", labels)
+        self.assertIn("📣 Рассылка", labels)
+        self.assertIn("💳 Платежи и расхождения", labels)
+        self.assertIn("⭐ Сверить Stars", labels)
+        self.assertIn("↩️ Возврат Stars", labels)
+
+    def test_client_management_contains_admin_operations(self):
+        labels = [
+            button.text
+            for row in client_management_keyboard().inline_keyboard
+            for button in row
+        ]
         self.assertIn("📣 Рассылка", labels)
         self.assertIn("💳 Платежи и расхождения", labels)
         self.assertIn("⭐ Сверить Stars", labels)

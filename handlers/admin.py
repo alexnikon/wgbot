@@ -152,6 +152,10 @@ def client_management_keyboard() -> InlineKeyboardMarkup:
                     text="⏳ Ожидают привязки", callback_data="admin_pending_clients"
                 )
             ],
+            [InlineKeyboardButton(text="📣 Рассылка", callback_data="admin_broadcast")],
+            [InlineKeyboardButton(text="💳 Платежи и расхождения", callback_data="admin_payments")],
+            [InlineKeyboardButton(text="⭐ Сверить Stars", callback_data="admin_stars_reconcile")],
+            [InlineKeyboardButton(text="↩️ Возврат Stars", callback_data="admin_refund_stars")],
             [InlineKeyboardButton(text="⬅️ Главное меню", callback_data="main")],
         ]
     )
