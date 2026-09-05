@@ -24,12 +24,13 @@ from handlers.access import (
     get_client_config_workflow,
     save_creation_step,
     select_client_config_location,
+    set_client_config_workflow,
     start_client_config_workflow,
 )
 
 OPTIONS = (
-    ClientInterface("wg11", "AWG 2.0", "Supports AWG 2.0."),
-    ClientInterface("awg3", "AWG 3.1", "Supports AWG 3.1."),
+    ClientInterface("wg10", "AWG 2.0", "Supports AWG 2.0."),
+    ClientInterface("wg13", "AWG 3.1", "Supports AWG 3.1."),
 )
 
 
@@ -40,11 +41,11 @@ class ClientInterfaceTests(unittest.IsolatedAsyncioTestCase):
         self.db = Database(str(Path(directory.name) / "test.db"))
         self.db.ensure_subscription(10, "alice", "2099-01-01 00:00:00", "paid", "30_days", "stars")
         self.server = CascadeServer(
-            "server", "https://example.test", "x" * 32, "uuid-2", 1, 100,
+            "server", "https://example.test", "x" * 32, "wg10", 1, 100,
             server_name="Location", client_interfaces=OPTIONS,
         )
         self.router = CascadeRouter(self.db, servers=[self.server])
-        self.live = [{"id": "uuid-2", "name": "wg11"}, {"id": "uuid-3", "name": "awg3"}]
+        self.live = [{"id": "wg10", "name": "Prod"}, {"id": "wg13", "name": "awg3"}]
         self.api = SimpleNamespace(
             list_interfaces=AsyncMock(side_effect=lambda: self.live),
             list_peers=AsyncMock(return_value=[]),
@@ -68,28 +69,27 @@ class ClientInterfaceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.edit = AsyncMock()
 
-    async def create(self, name, interface_id="uuid-2", interface_name="wg11"):
+    async def create(self, name, interface_id="wg10"):
         return await self.router.create_managed_config(
-            10, name, "server", interface_id, interface_name=interface_name,
+            10, name, "server", interface_id,
             production_only=True, self_service_limit=3,
         )
 
-    async def test_both_versions_use_resolved_ids_and_share_limit(self):
-        for index, (uid, name) in enumerate((("uuid-2", "wg11"), ("uuid-3", "awg3"), ("uuid-2", "wg11"))):
-            stored, content = await self.create(f"Device {index}", uid, name)
+    async def test_both_versions_use_configured_ids_and_share_limit(self):
+        for index, uid in enumerate(("wg10", "wg13", "wg10")):
+            stored, content = await self.create(f"Device {index}", uid)
             self.assertEqual(stored["interface_id"], uid)
             self.assertEqual(content, b"config")
             self.assertEqual(self.api.create_peer.await_args.args[2], uid)
             self.assertEqual(self.api.download_config.await_args.args[1], uid)
         with self.assertRaisesRegex(CascadeError, "limit reached"):
-            await self.create("Fourth", "uuid-3", "awg3")
+            await self.create("Fourth", "wg13")
         self.assertEqual(self.api.create_peer.await_count, 3)
 
     async def test_missing_ambiguous_and_recreated_interfaces_block_creation(self):
         for live in (
-            self.live[:1], self.live + [dict(self.live[0], id="other")],
+            self.live[:1], self.live + [dict(self.live[0], name="other")],
             [dict(self.live[0], id="replacement"), self.live[1]],
-            [dict(self.live[0], name="renamed"), self.live[1]],
         ):
             with self.subTest(live=live):
                 self.live = live
@@ -109,7 +109,7 @@ class ClientInterfaceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unlisted_interface_and_changed_allowlist_block_creation(self):
         with self.assertRaises(CascadeError):
-            await self.create("Phone", "uuid-3", "wg11")
+            await self.create("Phone", "unlisted")
         self.router.servers = [replace(self.server, client_interfaces=())]
         self.assertEqual(self.router.get_client_production_locations(), [])
         with self.assertRaises(CascadeError):
@@ -118,14 +118,17 @@ class ClientInterfaceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_legacy_and_annotations_do_not_guess_unknown_versions(self):
         text = await annotated_config_details(
-            self.router, {"server_key": "server", "interface_id": "uuid-3", "config_name": "Phone"}, "Location"
+            self.router, {"server_key": "server", "interface_id": "wg13", "config_name": "Phone"}, "Location"
         )
         self.assertIn("AWG 3.1", text)
         self.assertIn("Supports AWG 3.1.", text)
+        self.assertIn("Версия протокола: AWG 3.1", text)
+        self.assertNotIn("Интерфейс:", text)
+        self.assertNotIn("Статус:", text)
         self.assertIsNone(await self.router.get_client_interface_annotation("server", "unknown"))
         self.router.servers = [replace(self.server, client_interfaces=None)]
-        await self.create("Legacy", interface_name=None)
-        self.assertIsNone(await self.router.get_client_interface_annotation("server", "uuid-2"))
+        await self.create("Legacy")
+        self.assertIsNone(await self.router.get_client_interface_annotation("server", "wg10"))
 
     async def step(self, action, value=0, token=None):
         flow = get_client_config_workflow(self.db, 10)
@@ -179,8 +182,11 @@ class ClientInterfaceTests(unittest.IsolatedAsyncioTestCase):
         unchanged = await self.step("location", token=initial["token"])
         self.assertEqual(flow, unchanged)
         flow = await self.step("interface", 1)
-        self.assertEqual(flow["interface_id"], "uuid-3")
+        self.assertEqual(flow["interface_id"], "wg13")
         self.assertIn("Supports AWG 3.1.", creation_panel(flow)[0])
+        self.assertIn("Версия протокола: AWG 3.1", creation_panel(flow)[0])
+        self.assertNotIn("Интерфейс:", creation_panel(flow)[0])
+        self.assertNotIn("interface_name", flow)
         flow = await self.step("interfaces")
         self.assertEqual(flow["state"], "select_interface")
         flow = await self.step("locations")
@@ -228,12 +234,67 @@ class ClientInterfaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(get_client_config_workflow(self.db, 10))
         self.assertIn("начни выбор заново", self.edit.await_args.args[1])
 
+    async def test_rename_after_selection_preserves_creation_and_annotation(self):
+        self.start()
+        await self.step("location")
+        flow = await self.step("interface", 1)
+        # Duplicate editable names must not affect distinct Cascade IDs.
+        for interface in self.live:
+            interface["name"] = "Renamed"
+        sender = AsyncMock(return_value=True)
+        await create_client_config(
+            self.callback, self.db, self.router, AsyncMock(), self.edit, sender,
+            ClientConfigFlowCallback(action="create_confirm", token=flow["token"]),
+        )
+        self.assertEqual(self.api.create_peer.await_args.args[2], "wg13")
+        self.assertEqual(self.api.download_config.await_args.args[1], "wg13")
+        sender.assert_awaited_once()
+        config = self.db.get_managed_client_configs(10)[0]
+        text = await annotated_config_details(self.router, config, "Finland")
+        self.assertEqual(
+            text,
+            "🗂 Phone\n\nЛокация: Finland\nВерсия протокола: AWG 3.1\nSupports AWG 3.1.",
+        )
+
+    async def test_old_workflows_require_restart_before_selection_or_creation(self):
+        for state, action in (("select_interface", "interface"), ("confirm_create", "create_confirm")):
+            with self.subTest(state=state):
+                set_client_config_workflow(
+                    self.db, 10, state, token="old", config_name="Phone",
+                    server_key="server", interface_id="wg13", interface_name="awg3",
+                )
+                sender = AsyncMock()
+                if action == "interface":
+                    await self.step(action)
+                else:
+                    await create_client_config(
+                        self.callback, self.db, self.router, AsyncMock(), self.edit, sender,
+                        ClientConfigFlowCallback(action=action, token="old"),
+                    )
+                self.assertIsNone(get_client_config_workflow(self.db, 10))
+                self.assertIn("Начни выбор заново", self.edit.await_args.args[1])
+                sender.assert_not_awaited()
+        self.api.create_peer.assert_not_awaited()
+
+    async def test_old_name_entry_requires_restart(self):
+        set_client_config_workflow(
+            self.db, 10, "await_create_name", token="old",
+            service_chat_id=10, service_message_id=100,
+        )
+        message = SimpleNamespace(
+            from_user=SimpleNamespace(id=10), text="Phone", bot=object(), delete=AsyncMock(),
+        )
+        with patch("handlers.access.edit_telegram_text", AsyncMock()) as edit:
+            await capture_client_config_name(message, self.db, self.router)
+        self.assertIsNone(get_client_config_workflow(self.db, 10))
+        self.assertIn("Начни выбор заново", edit.await_args.args[3])
+
 
 class ClientInterfaceRegistryTests(unittest.TestCase):
     def load(self, value, present=True):
         server = {
             "server_key": "server", "base_url": "https://example.test", "api_token": "x" * 32,
-            "interface_id": "uuid", "max_peers": 100,
+            "interface_id": "wg10", "max_peers": 100,
         }
         if present:
             server["client_interfaces"] = value
@@ -248,9 +309,20 @@ class ClientInterfaceRegistryTests(unittest.TestCase):
         self.assertIsNone(self.load(None, present=False).client_interfaces)
         self.assertEqual(self.load([]).client_interfaces, ())
 
-    def test_invalid_and_duplicate_names(self):
+    def test_invalid_and_duplicate_ids(self):
         option = vars(OPTIONS[0])
-        for invalid in (None, {}, [None], [option, option], [dict(option, interface_name="")],
+        for invalid in (None, {}, [None], [option, option], [dict(option, interface_id="")],
                         [dict(option, name=123)], [dict(option, description="bad\ntext")]):
             with self.subTest(value=invalid), self.assertRaises(CascadeError):
                 self.load(invalid)
+
+    def test_rejects_name_based_entries_even_when_id_is_present(self):
+        option = vars(OPTIONS[0])
+        for entry in (
+            {"interface_name": "Prod", "name": "AWG 2.0", "description": "Description"},
+            dict(option, interface_name="Prod"),
+        ):
+            with self.subTest(entry=entry), self.assertRaisesRegex(
+                CascadeError, "interface_name is no longer supported.*use interface_id"
+            ):
+                self.load([entry])

@@ -55,7 +55,7 @@ class ManagedConfigRebindResult:
 
 @dataclass(frozen=True)
 class ClientInterface:
-    interface_name: str
+    interface_id: str
     name: str
     description: str
 
@@ -127,12 +127,17 @@ def load_cascade_servers(path: Path = CASCADE_SERVERS_FILE) -> list[CascadeServe
             if not isinstance(raw_interfaces, list) or len(raw_interfaces) > 10:
                 raise CascadeError("client_interfaces must be a list of at most 10 entries")
             parsed_interfaces = []
-            interface_names = set()
+            interface_ids = set()
             for entry in raw_interfaces:
                 if not isinstance(entry, dict):
                     raise CascadeError("Each client interface must be an object")
+                if "interface_name" in entry:
+                    raise CascadeError(
+                        f"client_interfaces.interface_name is no longer supported for {server_key}; "
+                        "use interface_id with the Cascade interface ID"
+                    )
                 values = []
-                for field, limit in (("interface_name", 64), ("name", 64), ("description", 240)):
+                for field, limit in (("interface_id", 64), ("name", 64), ("description", 240)):
                     value = entry.get(field)
                     if (
                         not isinstance(value, str) or not value.strip()
@@ -141,9 +146,9 @@ def load_cascade_servers(path: Path = CASCADE_SERVERS_FILE) -> list[CascadeServe
                     ):
                         raise CascadeError(f"Invalid client interface {field} for {server_key}")
                     values.append(value.strip())
-                if values[0] in interface_names:
-                    raise CascadeError(f"Duplicate client interface name for {server_key}")
-                interface_names.add(values[0])
+                if values[0] in interface_ids:
+                    raise CascadeError(f"Duplicate client interface ID for {server_key}")
+                interface_ids.add(values[0])
                 parsed_interfaces.append(ClientInterface(*values))
             client_interfaces = tuple(parsed_interfaces)
         server = CascadeServer(
@@ -510,7 +515,7 @@ class CascadeRouter:
         ]
 
     async def get_client_interfaces(self, server_key: str) -> list[dict[str, str]]:
-        """Resolve the explicit client allowlist against exact live interface names."""
+        """Validate the explicit client allowlist against opaque Cascade IDs."""
         server = self.get_server(server_key)
         if not server.enabled:
             raise CascadeError("Location is disabled")
@@ -519,12 +524,11 @@ class CascadeRouter:
         live = await self.get_api(server_key).list_interfaces()
         result = []
         for option in server.client_interfaces:
-            matches = [item for item in live if item.get("name") == option.interface_name]
+            matches = [item for item in live if item.get("id") == option.interface_id]
             if len(matches) != 1 or not matches[0].get("id"):
-                raise CascadeError(f"Client interface {option.interface_name} is missing or ambiguous")
+                raise CascadeError(f"Client interface {option.interface_id} is missing or ambiguous")
             result.append({
                 "interface_id": str(matches[0]["id"]),
-                "interface_name": option.interface_name,
                 "name": option.name,
                 "description": option.description,
             })
@@ -533,18 +537,18 @@ class CascadeRouter:
         return result
 
     async def validate_client_interface(
-        self, server_key: str, interface_id: str, interface_name: str | None
+        self, server_key: str, interface_id: str
     ) -> None:
         server = self.get_server(server_key)
         if not server.enabled:
             raise CascadeError("Location is disabled")
         if server.client_interfaces is None:
-            if interface_name is not None or interface_id != server.interface_id:
+            if interface_id != server.interface_id:
                 raise CascadeError("Self-service requires the configured production interface")
             return
         options = await self.get_client_interfaces(server_key)
         if not any(
-            item["interface_id"] == interface_id and item["interface_name"] == interface_name
+            item["interface_id"] == interface_id
             for item in options
         ):
             raise CascadeError("Selected client interface changed or is no longer allowed")
@@ -1036,7 +1040,6 @@ class CascadeRouter:
         reassign_existing_group: bool = True,
         self_service_limit: int | None = None,
         production_only: bool = False,
-        interface_name: str | None = None,
     ) -> tuple[dict[str, Any], bytes]:
         config_name = normalize_config_name(config_name)
         access = self.db.get_client_access_state(user_id)
@@ -1045,7 +1048,7 @@ class CascadeRouter:
             raise CascadeError("Active access with an expiration date is required")
         server = self.get_server(server_key)
         if production_only or self_service_limit is not None:
-            await self.validate_client_interface(server_key, interface_id, interface_name)
+            await self.validate_client_interface(server_key, interface_id)
         if self_service_limit is not None:
             if self.db.is_client_banned(user_id):
                 raise CascadeError("Banned clients cannot create configurations")
@@ -1129,7 +1132,7 @@ class CascadeRouter:
                 elif current_configs and explicit_group:
                     await self._verify_client_group_unlocked(user_id, client_group)
                 if production_only or self_service_limit is not None:
-                    await self.validate_client_interface(server_key, interface_id, interface_name)
+                    await self.validate_client_interface(server_key, interface_id)
                 current_interfaces = await api.list_interfaces()
                 if not any(
                     str(item.get("id") or "") == interface_id

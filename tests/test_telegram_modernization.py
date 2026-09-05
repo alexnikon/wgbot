@@ -897,6 +897,7 @@ class TelegramDatabaseTests(unittest.TestCase):
             10,
             "confirm_create",
             token="test-token",
+            version=2,
             config_name="Телефон",
             server_key="fin-1",
             interface_id="if-a",

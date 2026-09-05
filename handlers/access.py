@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 router = Router(name="access")
 CLIENT_CONFIGS_PAGE_SIZE = 8
 CLIENT_CONFIG_WORKFLOW_TYPE = "client_config_flow"
+CLIENT_CONFIG_FLOW_VERSION = 2
 
 
 def get_client_config_workflow(db: Database, user_id: int) -> dict[str, Any] | None:
@@ -54,7 +55,7 @@ def flow_button(
 
 
 def save_creation_step(db: Database, user_id: int, flow: dict[str, Any], state: str) -> None:
-    flow.update(state=state, token=secrets.token_hex(6))
+    flow.update(state=state, token=secrets.token_hex(6), version=CLIENT_CONFIG_FLOW_VERSION)
     set_client_config_workflow(
         db, user_id, state, **{key: value for key, value in flow.items() if key != "state"}
     )
@@ -82,12 +83,12 @@ def creation_panel(flow: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
         rows.append([flow_button(flow, "⬅️ К локациям", "locations")])
     else:
         text = f"Создать конфиг «{flow['config_name']}»?\n\nЛокация: {flow['server_name']}"
-        if flow.get("interface_name"):
-            text += f"\nИнтерфейс: {flow['interface_label']}\n{flow['interface_description']}"
+        if flow.get("interface_label"):
+            text += f"\nВерсия протокола: {flow['interface_label']}\n{flow['interface_description']}"
         rows = [[flow_button(flow, "✅ Создать", "create_confirm")]]
         rows.append([
             flow_button(
-                flow, "⬅️ Назад", "interfaces" if flow.get("interface_name") else "locations"
+                flow, "⬅️ Назад", "interfaces" if flow.get("interface_label") else "locations"
             )
         ])
     rows.append([flow_button(flow, "❌ Отмена", "cancel")])
@@ -102,7 +103,7 @@ async def annotated_config_details(
         str(config["server_key"]), str(config["interface_id"])
     )
     if annotation:
-        text += f"\nИнтерфейс: {annotation['name']}\n{annotation['description']}"
+        text += f"\nВерсия протокола: {annotation['name']}\n{annotation['description']}"
     return text
 
 
@@ -229,11 +230,9 @@ def client_config_details_keyboard(config: dict[str, Any], page: int) -> InlineK
 
 
 def client_config_details_text(config: dict[str, Any], server_name: str) -> str:
-    status = "активен" if config.get("enabled") else "недоступен"
     return (
         f"🗂 {config['config_name']}\n\n"
-        f"Локация: {server_name}\n"
-        f"Статус: {status}"
+        f"Локация: {server_name}"
     )
 
 
@@ -418,7 +417,10 @@ async def start_client_config_workflow(
     await safe_answer_callback(callback_query)
     user_id = callback_query.from_user.id
     existing_flow = get_client_config_workflow(db, user_id)
-    if existing_flow and existing_flow.get("state") == "creating":
+    if (
+        existing_flow and existing_flow.get("state") == "creating"
+        and existing_flow.get("version") == CLIENT_CONFIG_FLOW_VERSION
+    ):
         return
     access = db.get_peer_by_telegram_id(user_id)
     if db.is_client_banned(user_id) or not access or not is_access_active(access):
@@ -459,6 +461,7 @@ async def start_client_config_workflow(
         user_id,
         state,
         token=token,
+        version=CLIENT_CONFIG_FLOW_VERSION,
         peer_id=peer_id,
         page=callback_data.page,
         service_chat_id=callback_query.message.chat.id,
@@ -494,7 +497,16 @@ async def select_client_config_location(
     await safe_answer_callback(callback_query)
     user_id = callback_query.from_user.id
     flow = get_client_config_workflow(db, user_id)
-    if not flow or flow.get("token") != callback_data.token or flow["state"] == "creating":
+    if not flow or flow.get("token") != callback_data.token:
+        return
+    if flow.get("version") != CLIENT_CONFIG_FLOW_VERSION:
+        clear_client_config_workflow(db, user_id)
+        await safe_edit_callback_message(
+            callback_query.message, "Создание устарело. Начни выбор заново.",
+            reply_markup=client_config_keyboard(db, user_id)[0],
+        )
+        return
+    if flow["state"] == "creating":
         return
     if callback_data.action == "cancel":
         clear_client_config_workflow(db, user_id)
@@ -530,7 +542,8 @@ async def select_client_config_location(
             server = cascade_router.get_server(str(flow["server_key"]))
             if not server.enabled or server.client_interfaces == ():
                 raise CascadeError("Location is unavailable")
-            flow.pop("interface_name", None)
+            flow.pop("interface_label", None)
+            flow.pop("interface_description", None)
             if server.client_interfaces is None:
                 flow["interface_id"] = server.interface_id
                 state = "confirm_create"
@@ -543,7 +556,7 @@ async def select_client_config_location(
                 raise CascadeError("Invalid interface selection")
             option = flow["interfaces"][index]
             flow.update(
-                interface_id=option["interface_id"], interface_name=option["interface_name"],
+                interface_id=option["interface_id"],
                 interface_label=option["name"], interface_description=option["description"],
             )
             state = "confirm_create"
@@ -581,6 +594,13 @@ async def create_client_config(
     flow = get_client_config_workflow(db, user_id)
     if not flow or flow.get("state") != "confirm_create" or flow.get("token") != callback_data.token:
         return
+    if flow.get("version") != CLIENT_CONFIG_FLOW_VERSION:
+        clear_client_config_workflow(db, user_id)
+        await safe_edit_callback_message(
+            callback_query.message, "Создание устарело. Начни выбор заново.",
+            reply_markup=client_config_keyboard(db, user_id)[0],
+        )
+        return
     save_creation_step(db, user_id, flow, "creating")
     try:
         config, config_content = await cascade_router.create_managed_config(
@@ -591,7 +611,6 @@ async def create_client_config(
             reassign_existing_group=False,
             self_service_limit=MAX_CLIENT_CONFIGS,
             production_only=True,
-            interface_name=flow.get("interface_name"),
         )
     except (CascadeCapacityError, CascadeError):
         clear_client_config_workflow(db, user_id)
@@ -753,6 +772,14 @@ async def capture_client_config_name(
     user_id = message.from_user.id
     flow = get_client_config_workflow(db, user_id)
     if not flow or flow.get("state") not in {"await_create_name", "await_rename_name"}:
+        return
+    if flow.get("version") != CLIENT_CONFIG_FLOW_VERSION:
+        clear_client_config_workflow(db, user_id)
+        await edit_telegram_text(
+            message.bot, flow["service_chat_id"], flow["service_message_id"],
+            "Создание устарело. Начни выбор заново.",
+            reply_markup=client_config_keyboard(db, user_id)[0],
+        )
         return
     if db.is_client_banned(user_id) or not db.has_active_access(user_id):
         clear_client_config_workflow(db, user_id)

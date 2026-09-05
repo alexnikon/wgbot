@@ -5,7 +5,7 @@
       "server_name": "Netherlands",
       "base_url": "https://cascade.example.com/hidden-admin-path",
       "api_token": "ws_replace_with_api_token",
-      "interface_id": "replace-with-interface-uuid",
+      "interface_id": "wg10",
       "priority": 10,
       "max_peers": 250,
       "client_group": "Basic",
@@ -17,12 +17,12 @@
       "verify_tls": true,
       "client_interfaces": [
         {
-          "interface_name": "wg11",
+          "interface_id": "wg10",
           "name": "AWG 2.0",
           "description": "For VPN apps that support AmneziaWG 2.0."
         },
         {
-          "interface_name": "awg3",
+          "interface_id": "wg13",
           "name": "AWG 3.1",
           "description": "For VPN apps that support AmneziaWG 3.1."
         }

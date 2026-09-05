@@ -58,22 +58,30 @@ created configuration. `assignable_client_groups` is the protected allowlist sho
 administrators when creating configurations or changing a client's unified group.
 Every allowlisted group must already exist on the corresponding Cascade server.
 
-Use `client_interfaces` to offer named interfaces to customers after they choose a
-location. Each entry contains `interface_name` (the exact, case-sensitive Cascade
-interface name), `name` (the button label), and `description` (a short customer-facing
-explanation). See `cascade_servers.example.json`; replace the example names with
-real interfaces and localize the labels and descriptions for your customers.
-Names do not establish protocol versions: configure each label to match the actual
-interface. The bot resolves names to UUIDs through Cascade and checks the selected
-binding again before creating a peer. Missing or ambiguous names block creation.
+Use `client_interfaces` to offer protocol versions after customers choose a
+location. Each entry contains `interface_id` (the exact Cascade interface ID),
+`name` (the button label), and `description` (a short customer-facing explanation).
+An ID is an opaque string such as `wg13`, not necessarily a UUID. Read the `id`
+field from `GET /api/tunnel-interfaces`; do not use its editable `name` field.
+See `cascade_servers.example.json`; replace the example IDs with real IDs and
+localize the labels and descriptions for your customers. Labels must match the
+actual protocol versions configured in Cascade. Renaming an interface does not
+affect selection or annotations. The bot checks that the selected ID exists and
+is allowed before creating a peer; missing or ambiguous IDs block creation.
 
 Omitting `client_interfaces` preserves the legacy single-`interface_id` flow. An
 empty list disables customer creation at that location. Keep the existing
 `interface_id` for default API operations and compatibility. The list supports up
-to 10 entries; interface names and labels allow 64 characters, descriptions 240.
-All fields must be non-empty printable strings, with unique interface names.
+to 10 entries; interface IDs and labels allow 64 characters, descriptions 240.
+All fields must be non-empty printable strings, with unique interface IDs.
 Restart the bot after changing the registry. Existing configurations retain their
-stored UUIDs, and the three-configuration limit applies across all versions.
+stored IDs, and the three-configuration limit applies across all versions.
+
+The former `client_interfaces.interface_name` format is rejected. Back up the
+registry and migrate it together with the application update: the previous
+application cannot read the new list format. Verify the server-specific IDs via
+Cascade before switching, and keep the matching application and registry for
+rollback. Customers with unfinished creation flows must restart their selection.
 
 Add your Telegram, YooKassa, tariff, support, administrator, and Cascade settings,
 then start the service:
