@@ -258,6 +258,56 @@ class DatabaseTests(unittest.TestCase):
             )
         )
 
+    def test_verified_payment_existing_active_client_is_extension(self):
+        self.db.ensure_subscription(
+            78,
+            "alice",
+            (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S"),
+            "paid",
+            "14_days",
+            "yookassa",
+        )
+        self.db.add_payment("pay-active-existing", 78, 12500, "yookassa", "14_days")
+
+        result = self.db.apply_verified_payment(
+            "pay-active-existing", 78, "alice", 12500, "yookassa", "14_days", 14
+        )
+
+        self.assertTrue(result["is_extension"])
+
+    def test_verified_payment_existing_expired_client_is_extension_from_now(self):
+        previous_expiry = datetime.now() - timedelta(days=2)
+        self.db.ensure_subscription(
+            79,
+            "alice",
+            previous_expiry.strftime("%Y-%m-%d %H:%M:%S"),
+            "paid",
+            "14_days",
+            "yookassa",
+        )
+        self.db.add_payment("pay-expired-existing", 79, 12500, "yookassa", "14_days")
+
+        before_payment = datetime.now()
+        result = self.db.apply_verified_payment(
+            "pay-expired-existing", 79, "alice", 12500, "yookassa", "14_days", 14
+        )
+        new_expiry = datetime.fromisoformat(result["expire_date"])
+
+        self.assertTrue(result["is_extension"])
+        self.assertGreater(new_expiry, before_payment + timedelta(days=13, hours=23))
+        self.assertLess(new_expiry, before_payment + timedelta(days=15))
+        self.assertGreater(new_expiry, previous_expiry + timedelta(days=14))
+
+    def test_verified_payment_existing_client_without_subscription_is_extension(self):
+        self.db.upsert_client(80, "alice")
+        self.db.add_payment("pay-existing-client", 80, 12500, "yookassa", "14_days")
+
+        result = self.db.apply_verified_payment(
+            "pay-existing-client", 80, "alice", 12500, "yookassa", "14_days", 14
+        )
+
+        self.assertTrue(result["is_extension"])
+
     def test_refund_is_applied_once(self):
         self.db.activate_new_access(10, "alice", 30, "30_days", "stars")
         self.db.add_payment("payment-1", 10, 100, "stars", "30_days")

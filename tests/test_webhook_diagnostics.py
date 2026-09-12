@@ -258,6 +258,10 @@ class WebhookDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(content.plain.startswith("✅ Оплачено!"))
         self.assertIn("продлен на 2 недели", content.plain)
         self.assertIn("📅 Осталось:", content.plain)
+        self.assertIn(
+            "🔁 Клиент продлил подписку",
+            notify.await_args.args[0].plain,
+        )
         cascade_router.sync_user_access.assert_awaited_once()
 
     async def test_banned_yookassa_payment_extends_without_user_reply_or_provisioning(self):

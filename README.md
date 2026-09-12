@@ -7,7 +7,7 @@ choose a plan, pay, receive their configuration, and manage their subscription
 without leaving the chat.
 
 The bot connects Telegram payments, YooKassa, and
-[Cascade](https://github.com/JohnnyVBut/cascade) in one smooth customer journey.
+[Cascade](https://github.com/alexnikon/cascade) in one smooth customer journey.
 
 ## Why WGBot
 

@@ -3099,6 +3099,10 @@ class Database:
                 conn.rollback()
                 raise ValueError("Verified payment does not match the local payment record")
 
+            client_exists = conn.execute(
+                "SELECT 1 FROM clients WHERE telegram_user_id=?",
+                (user_id,),
+            ).fetchone() is not None
             normalized_username = (username or "").strip().lstrip("@")
             conn.execute(
                 """
@@ -3122,11 +3126,6 @@ class Database:
                     current_expiry = datetime.fromisoformat(subscription["expire_date"])
                 except ValueError:
                     current_expiry = now
-            is_extension = bool(
-                subscription
-                and subscription["payment_status"] == "paid"
-                and current_expiry > now
-            )
             new_expiry = max(current_expiry, now) + timedelta(days=days)
             expire_date = new_expiry.strftime("%Y-%m-%d %H:%M:%S")
             stars_paid = amount if payment_method == "stars" else 0
@@ -3184,7 +3183,7 @@ class Database:
                 conn.rollback()
                 return None
             conn.commit()
-            return {"expire_date": expire_date, "is_extension": is_extension}
+            return {"expire_date": expire_date, "is_extension": client_exists}
 
     def update_payment_status(
         self,
