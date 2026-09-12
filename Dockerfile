@@ -22,6 +22,10 @@ ENV PATH="/app/.venv/bin:$PATH" \
 
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends --only-upgrade libpcre2-8-0 \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd --gid 1000 app \
     && useradd --uid 1000 --gid app --no-create-home --shell /usr/sbin/nologin app \
     && python -m pip uninstall --yes pip setuptools wheel
